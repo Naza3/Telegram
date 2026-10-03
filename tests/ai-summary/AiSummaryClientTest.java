@@ -63,10 +63,12 @@ public final class AiSummaryClientTest {
     }
     private static final class Diagnostic implements AiSummaryClient.DiagnosticCallback {
         volatile AiSummaryClient.DiagnosticResult result;
+        volatile AiSummaryClient.DiagnosticErrorInfo info;
         volatile String error;
         volatile int calls;
         public void onSuccess(AiSummaryClient.DiagnosticResult value) { result = value; calls++; }
         public void onError(String value) { error = value; calls++; }
+        public void onError(String value, AiSummaryClient.DiagnosticErrorInfo detail) { info = detail; onError(value); }
     }
 
     public static void main(String[] args) throws Exception {
@@ -184,6 +186,12 @@ public final class AiSummaryClientTest {
             });
             test("diagnostic read timeout is actionable", AiSummaryClientTest::diagnosticTimeout);
             test("diagnostic cancellation suppresses an already queued callback", AiSummaryClientTest::cancelDiagnostic);
+            test("diagnostic HTTP errors expose only selected safe explanations", AiSummaryClientTest::diagnosticHttpDetails);
+            test("diagnostic errors hide HTML, opaque JSON and payload echoes", AiSummaryClientTest::diagnosticHttpUnknownFormats);
+            test("diagnostic reasons redact encoded credentials before display limits", AiSummaryClientTest::diagnosticHttpRedaction);
+            test("detailed HTTP failures remain private to the fixed-text diagnostic", AiSummaryClientTest::diagnosticHttpIsolation);
+            test("cancellation suppresses queued detailed diagnostic errors", AiSummaryClientTest::cancelDetailedDiagnostic);
+            test("actual MNN local API contract accepts every request path without unsupported sampling options", AiSummaryClientTest::mnnLocalApiContract);
             test("custom direction reaches every source and at least two merge rounds", AiSummaryClientTest::directionAcrossMergeRounds);
             test("source citations cannot escape their chunk via forged text", AiSummaryClientTest::sourceReferenceMembership);
             test("merge citations cannot reintroduce references absent from partials", AiSummaryClientTest::mergeReferenceMembership);
@@ -285,6 +293,192 @@ public final class AiSummaryClientTest {
         while (result.calls == 0 && System.nanoTime() < end) { AndroidUtilities.drain(); Thread.sleep(5); }
         check(result.calls != 0, "timed out waiting for diagnostic callback");
     }
+    private static void diagnosticHttpDetails() throws Exception {
+        for (String response : List.of(
+                "{\"error\":{\"message\":\"Cannot parse messages: content must be a string\",\"request\":\"DO_NOT_ECHO_REQUEST\"}}",
+                "{\"error\":\"Cannot parse messages: content must be a string\"}",
+                "{\"message\":\"Cannot parse messages: content must be a string\"}",
+                "{\"detail\":\"Cannot parse messages: content must be a string\"}")) {
+            Diagnostic result = diagnose(400, response, config("local", ""));
+            check(result.result == null && result.error.contains("400"), "friendly HTTP status missing");
+            check(result.info != null && result.info.status == 400 && "json".equals(result.info.responseFormat), "structured diagnostic missing");
+            check("Cannot parse messages: content must be a string".equals(result.info.serverMessage), "wrong JSON field exposed");
+        }
+        Diagnostic list = diagnose(422, "{\"detail\":[{\"msg\":\"Field required\",\"input\":\"DO_NOT_ECHO_INPUT\",\"loc\":[\"body\",\"messages\"]},{\"msg\":\"Invalid role\"}]}", config("local", ""));
+        check(list.info.status == 422 && "Field required；Invalid role".equals(list.info.serverMessage), "422 exposed more than selected msg values");
+        Diagnostic plain = diagnose(400, "Bad Request: failed to convert request body", config("local", ""));
+        check("text".equals(plain.info.responseFormat) && plain.info.serverMessage.contains("failed to convert"), "short plain explanation suppressed");
+        Diagnostic normalized = diagnose(400, new JSONObject().put("message", "Bad\r\nrequest\u0000\u202einvalid\trole").toString(), config("local", ""));
+        check("Bad request invalid role".equals(normalized.info.serverMessage), "control/bidi characters not normalized");
+    }
+
+    private static void diagnosticHttpUnknownFormats() throws Exception {
+        Diagnostic empty = diagnose(400, "", config("local", ""));
+        check(empty.info != null && "empty".equals(empty.info.responseFormat) && empty.info.serverMessage.isEmpty(), "empty body fabricated an explanation");
+        Diagnostic html = diagnose(400, "<!DOCTYPE html><html>DO_NOT_ECHO_HTML<script>secret</script></html>", config("local", ""));
+        check("html".equals(html.info.responseFormat) && !html.info.serverMessage.contains("<") && !html.info.serverMessage.contains("DO_NOT_ECHO"), "HTML body was displayed");
+        Diagnostic prefixedHtml = diagnose(400, "Proxy response: <html><body>DO_NOT_ECHO_HTML</body></html>", config("local", ""));
+        check("html".equals(prefixedHtml.info.responseFormat) && !prefixedHtml.info.serverMessage.contains("DO_NOT_ECHO"), "prefixed HTML displayed");
+        for (String raw : List.of("{\"request\":{\"messages\":[\"DO_NOT_ECHO_OPAQUE\"]}}", "{\"error\":{\"request\":\"DO_NOT_ECHO_OPAQUE\"}}",
+                "[\"DO_NOT_ECHO_OPAQUE\"]", "{\"message\":\"truncated DO_NOT_ECHO_OPAQUE")) {
+            Diagnostic opaque = diagnose(400, raw, config("local", ""));
+            check("json".equals(opaque.info.responseFormat) && opaque.info.serverMessage.isEmpty(), "unknown JSON fell back to a raw dump");
+        }
+        Diagnostic embedded = diagnose(400, new JSONObject().put("error", "Invalid body. Request body: {\"messages\":[\"DO_NOT_ECHO_PAYLOAD\"]}").toString(), config("local", ""));
+        check("Invalid body.".equals(embedded.info.serverMessage), "scalar field exposed an embedded request");
+        Diagnostic oversized = diagnose(400, "DO_NOT_ECHO_LONG_BODY".repeat(900), config("local", ""));
+        check(oversized.info.serverMessage.isEmpty(), "long unstructured body displayed");
+    }
+
+    private static void diagnosticHttpRedaction() throws Exception {
+        String key = "s3cr3t/a+b?VALUE";
+        StringBuilder unicode = new StringBuilder();
+        StringBuilder percent = new StringBuilder();
+        for (char value : key.toCharArray()) {
+            unicode.append(String.format("\\u%04x", (int) value));
+            percent.append(String.format("%%%02X", (int) value));
+        }
+        for (String encoded : List.of(key, key.replace("/", "\\/"), unicode.toString(), percent.toString(),
+                percent.toString().replace("%", "%25"), key.substring(0, 5) + "\u202e" + key.substring(5))) {
+            Diagnostic result = diagnose(400, new JSONObject().put("message", "Unsupported option " + encoded + "; use a string").toString(), config("local", key));
+            check(result.info.serverMessage.contains("凭据已隐藏") && !result.info.serverMessage.contains("s3cr3t")
+                    && !result.info.serverMessage.contains("VALUE") && !result.info.serverMessage.contains("%73")
+                    && !result.info.serverMessage.contains("\\u0073"), "known/encoded key not redacted");
+        }
+        String spacedKey = "SENSITIVE KEY /+?";
+        Diagnostic form = diagnose(400, new JSONObject().put("message", "Invalid " + java.net.URLEncoder.encode(spacedKey, "UTF-8")).toString(), config("local", spacedKey));
+        check(!form.info.serverMessage.contains("SENSITIVE") && form.info.serverMessage.contains("凭据已隐藏"), "form-encoded space key exposed");
+        String formattedKey = "SENSITIVE\u202eKEY";
+        Diagnostic format = diagnose(400, new JSONObject().put("message", "Invalid SENSITIVEKEY").toString(), config("local", formattedKey));
+        check(!format.info.serverMessage.contains("SENSITIVE") && format.info.serverMessage.contains("凭据已隐藏"), "normalized configured key exposed");
+        String generic = "Invalid Authorization: Bearer OTHER_CREDENTIAL; api_key=SECOND_SECRET; password=THIRD_SECRET; token=FOURTH_SECRET; sk-abcdefghijklm";
+        Diagnostic credentials = diagnose(400, new JSONObject().put("message", generic).toString(), config("local", ""));
+        for (String forbidden : List.of("OTHER_CREDENTIAL", "SECOND_SECRET", "THIRD_SECRET", "FOURTH_SECRET", "sk-abcdefghijklm")) {
+            check(!credentials.info.serverMessage.contains(forbidden), "credential-shaped value exposed");
+        }
+        for (String sensitive : List.of("Cannot reach http://alice:URL_PRIVATE_PASSWORD@proxy.invalid/v1",
+                "Rejected Cookie: session=COOKIE_PRIVATE_VALUE; other=COOKIE_SECOND_VALUE")) {
+            Diagnostic reason = diagnose(400, new JSONObject().put("message", sensitive).toString(), config("local", ""));
+            check(!reason.info.serverMessage.contains("PRIVATE") && !reason.info.serverMessage.contains("COOKIE_SECOND_VALUE"), "URL or Cookie credential exposed");
+        }
+        Diagnostic capped = diagnose(400, new JSONObject().put("message", "😀".repeat(390) + key + " tail".repeat(90)).toString(), config("local", key));
+        String safe = capped.info.serverMessage;
+        check(safe.codePointCount(0, safe.length()) <= 400 && !safe.contains("s3cr3t") && safe.endsWith("…"), "key truncated before redaction or code-point cap failed");
+    }
+
+    private static void diagnosticHttpIsolation() throws Exception {
+        String body = "{\"error\":{\"message\":\"PRIVATE_SERVER_DETAIL\"}}";
+        Result summary = invoke(400, body, config("local", ""));
+        check(summary.error != null && !summary.error.contains("PRIVATE_SERVER_DETAIL"), "summary error body exposed");
+        nextReply.set(new Reply(422, body));
+        AiSummaryClient client = new AiSummaryClient(); Result question = new Result();
+        client.ask(config("local", ""), MESSAGES, PromptOptions.DEFAULT, "几点？", List.of(), question); await(question); client.cancel();
+        check(question.error != null && !question.error.contains("PRIVATE_SERVER_DETAIL"), "question error body exposed");
+        for (int status : List.of(401, 403, 302)) {
+            Diagnostic hidden = diagnose(status, body, config("local", ""));
+            check(hidden.info == null && !hidden.error.contains("PRIVATE_SERVER_DETAIL"), "auth or redirect body exposed");
+        }
+        Diagnostic generatedError = diagnose(200, completion("Error: PRIVATE_SERVER_DETAIL"), config("local", ""));
+        check(generatedError.info == null && !generatedError.error.contains("PRIVATE_SERVER_DETAIL"), "200 model content became diagnostic detail");
+        nextReply.set(new Reply(400, body));
+        AtomicReference<String> legacyError = new AtomicReference<>();
+        client.testConnection(config("local", ""), new AiSummaryClient.DiagnosticCallback() {
+            public void onSuccess(AiSummaryClient.DiagnosticResult value) { throw new AssertionError("unexpected success"); }
+            public void onError(String value) { legacyError.set(value); }
+        });
+        long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (legacyError.get() == null && System.nanoTime() < end) { AndroidUtilities.drain(); Thread.sleep(5); }
+        client.cancel();
+        check(legacyError.get() != null && !legacyError.get().contains("PRIVATE_SERVER_DETAIL"), "legacy callback no longer works safely");
+    }
+
+    private static void cancelDetailedDiagnostic() throws Exception {
+        nextReply.set(new Reply(400, "{\"message\":\"STALE_ERROR_REASON\"}"));
+        AiSummaryClient client = new AiSummaryClient(); Diagnostic result = new Diagnostic();
+        client.testConnection(config("local", ""), result);
+        long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (AndroidUtilities.pendingImmediate() == 0 && System.nanoTime() < end) Thread.sleep(5);
+        check(AndroidUtilities.pendingImmediate() > 0, "detailed error did not queue");
+        client.cancel(); AndroidUtilities.drain();
+        check(result.calls == 0 && result.info == null, "cancelled diagnostic detail delivered");
+    }
+
+    private static void mnnLocalApiContract() throws Exception {
+        // Mirrors Naza3/MNN feature/mnn-chat-local-api LocalApiRoutes.parseLocalPrompt
+        // at 097ebe: this is a protocol fixture, not a claim of a real phone/model run.
+        requestHistory.clear();
+        AtomicInteger accepted = new AtomicInteger();
+        replyGenerator.set(body -> {
+            String failure = mnnLocalRequestFailure(body);
+            if (failure != null) return new Reply(400, new JSONObject().put("error", new JSONObject().put("message", "Invalid request: " + failure)).toString());
+            accepted.incrementAndGet();
+            boolean diagnostic = "Reply OK.".equals(body.getJSONArray("messages").getJSONObject(1).getString("content"));
+            String answer = diagnostic ? "OK" : "【回答】明天十点 [m1]";
+            return body.getBoolean("stream") ? sse(delta(answer) + finish("stop") + "data: [DONE]\n\n")
+                    : new Reply(200, completion(answer));
+        });
+        AiSummaryClient client = new AiSummaryClient();
+        try {
+            AiSummarySettings.Config plain = new AiSummarySettings.Config(base, "mnn-local", "", 512, false);
+            AiSummarySettings.Config streaming = new AiSummarySettings.Config(base, "mnn-local", "", 512, true);
+            Diagnostic diagnostic = new Diagnostic();
+            client.testConnection(plain, diagnostic); await(diagnostic);
+            check(diagnostic.result != null, "MNN contract rejected diagnostic: " + diagnostic.error);
+            for (AiSummarySettings.Config config : List.of(plain, streaming)) {
+                Result summary = new Result();
+                client.summarize(config, MESSAGES, summary); await(summary);
+                check(summary.summary != null, "MNN contract rejected summary: " + summary.error);
+                Result question = new Result();
+                client.ask(config, MESSAGES, PromptOptions.DEFAULT, "几点？", List.of(), question); await(question);
+                check(question.summary != null, "MNN contract rejected question: " + question.error);
+                if (config.stream) check(!summary.partials.isEmpty() && !question.partials.isEmpty(), "MNN stream contract bypassed SSE");
+            }
+            check(accepted.get() == 5 && requestHistory.size() == 5, "contract task retried or did not reach inference fixture");
+            for (int i = 0; i < requestHistory.size(); i++) {
+                JSONObject body = requestHistory.get(i);
+                check("mnn-local".equals(body.getString("model")) && body.getJSONArray("messages").length() == 2,
+                        "configured model or prompt structure was changed");
+                check(body.getInt("max_tokens") == (i == 0 ? 64 : 512), "output limit changed between paths");
+                check("system".equals(body.getJSONArray("messages").getJSONObject(0).getString("role"))
+                        && "user".equals(body.getJSONArray("messages").getJSONObject(1).getString("role")), "message roles changed");
+            }
+            JSONObject previousPayload = new JSONObject(requestHistory.get(0).toString()).put("temperature", 0.2);
+            check("Unsupported generation option".equals(mnnLocalRequestFailure(previousPayload)), "fixture does not reproduce the old HTTP 400 cause");
+        } finally {
+            client.cancel(); replyGenerator.set(null);
+        }
+    }
+
+    private static String mnnLocalRequestFailure(JSONObject body) {
+        if (body.toString().getBytes(StandardCharsets.UTF_8).length > 64 * 1024) return "Request body exceeds 64 KiB";
+        Object model = body.opt("model");
+        if (model != null && model != JSONObject.NULL && !"mnn-local".equals(model) && !"loaded-fixture-model".equals(model)) return "Requested model is not loaded";
+        for (String unsupported : List.of("tools", "tool_choice", "functions", "function_call", "response_format", "temperature", "top_p", "stop", "logprobs", "frequency_penalty", "presence_penalty", "n")) {
+            if (body.has(unsupported) && !body.isNull(unsupported)) return "Unsupported generation option";
+        }
+        int tokens = body.optInt("max_tokens", 512);
+        if (tokens < 1 || tokens > 2048) return "max_tokens must be 1..2048";
+        org.json.JSONArray messages = body.optJSONArray("messages");
+        if (messages == null || messages.length() == 0 || messages.length() > 64) return "messages must contain 1..64 entries";
+        int characters = 0;
+        boolean hasUser = false;
+        StringBuilder allText = new StringBuilder();
+        for (int i = 0; i < messages.length(); i++) {
+            JSONObject message = messages.optJSONObject(i);
+            if (message == null || !List.of("system", "user", "assistant").contains(message.optString("role"))) return "Unsupported message role";
+            hasUser |= "user".equals(message.optString("role"));
+            Object content = message.opt("content");
+            if (!(content instanceof String)) return "Message content must be a string";
+            characters += ((String) content).length();
+            allText.append((String) content);
+        }
+        if (!hasUser) return "A user message is required";
+        if (java.util.regex.Pattern.compile("<\\s*/?\\s*(img|image|audio|video)\\b", java.util.regex.Pattern.CASE_INSENSITIVE).matcher(allText).find()) return "Media markup is not supported";
+        if (characters > 32768) return "Message text exceeds 32768 characters";
+        if (body.has("stream") && !(body.opt("stream") instanceof Boolean)) return "stream must be a boolean";
+        return null;
+    }
+
     private static void diagnosticTimeout() throws Exception {
         requestStarted = new CountDownLatch(1); releaseRequest = new CountDownLatch(1);
         nextReply.set(new Reply(200, completion("OK"), true));

@@ -1148,7 +1148,7 @@ public final class GroupSummarySheet {
         addText("最大输出 token（64–8192）", true);
         EditTextBoldCursor outputTokens = edit("512", Integer.toString(config.maxOutputTokens),
                 InputType.TYPE_CLASS_NUMBER);
-        addText("服务端支持时生效；较大的值会增加手机推理耗时。", false);
+        addText("MNN 本机 API 最高支持 2048，建议先用 512；其他服务按其限制填写。", false);
         addText("上下文字符预算（2048–32000）", true);
         EditTextBoldCursor contextBudget = edit("6000", Integer.toString(config.inputCharacterBudget),
                 InputType.TYPE_CLASS_NUMBER);
@@ -1242,22 +1242,28 @@ public final class GroupSummarySheet {
             public void onSuccess(AiSummaryClient.DiagnosticResult result) {
                 if (active(generation)) {
                     client = null;
-                    showConnectionResult(config, result, null);
+                    showConnectionResult(config, result, null, null);
                 }
             }
 
             @Override
             public void onError(String error) {
+                onError(error, null);
+            }
+
+            @Override
+            public void onError(String error, AiSummaryClient.DiagnosticErrorInfo info) {
                 if (active(generation)) {
                     client = null;
-                    showConnectionResult(config, null, error);
+                    showConnectionResult(config, null, error, info);
                 }
             }
         });
     }
 
     private void showConnectionResult(AiSummarySettings.Config config,
-                                      AiSummaryClient.DiagnosticResult result, String error) {
+                                      AiSummaryClient.DiagnosticResult result, String error,
+                                      AiSummaryClient.DiagnosticErrorInfo info) {
         clearContent();
         if (result != null) {
             addText("连接与文本生成测试通过", true);
@@ -1270,6 +1276,28 @@ public final class GroupSummarySheet {
         } else {
             addText("连接测试未通过", true);
             addText(error, false);
+            if (info != null) {
+                addText("连接测试诊断", true);
+                String format;
+                switch (info.responseFormat) {
+                    case "json": format = "JSON"; break;
+                    case "text": format = "文本"; break;
+                    case "html": format = "HTML 页面"; break;
+                    case "empty": format = "空响应"; break;
+                    default: format = "未知"; break;
+                }
+                addText("HTTP " + info.status + " · 返回格式：" + format, false);
+                if (!info.serverMessage.isEmpty()) {
+                    addText("服务端错误说明", true);
+                    // Plain selectable text: server content is never rendered as HTML or links.
+                    addText(info.serverMessage, false).setTextIsSelectable(true);
+                } else if ("html".equals(info.responseFormat)) {
+                    addText("服务返回了 HTML 错误页。请核对地址和端口是否与 MNN Chat API 设置页一致。", false);
+                } else if (info.status != 401 && info.status != 403
+                        && !(info.status >= 300 && info.status < 400)) {
+                    addText("服务未返回可展示的具体原因。排查时请同时提供 API 地址、模型名称和 MNN Chat 版本。", false);
+                }
+            }
         }
         addText("测试不会保存设置；返回设置后可修改或保存当前配置。", false);
         addAction(result != null ? "再次测试" : "重试连接测试", () -> testConnection(config));

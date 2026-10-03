@@ -62,6 +62,24 @@ public final class AiSummaryClient {
     public interface DiagnosticCallback {
         void onSuccess(DiagnosticResult result);
         void onError(String error);
+        /** Additional safe detail is available only for this fixed-text connection test. */
+        default void onError(String error, DiagnosticErrorInfo info) {
+            onError(error);
+        }
+    }
+
+    public static final class DiagnosticErrorInfo {
+        public final int status;
+        /** Selected, sanitized server explanation; empty if no safe explanation is available. */
+        public final String serverMessage;
+        /** json, text, html, empty or unknown; describes the inspected body, never a header dump. */
+        public final String responseFormat;
+
+        DiagnosticErrorInfo(int status, String serverMessage, String responseFormat) {
+            this.status = status;
+            this.serverMessage = serverMessage;
+            this.responseFormat = responseFormat;
+        }
     }
 
     public static final class DiagnosticResult {
@@ -132,7 +150,14 @@ public final class AiSummaryClient {
             } catch (CancelledException ignored) {
             } catch (Exception error) {
                 if (endpoint != null) endpoint.close();
-                deliver(request, () -> callback.onError(describeError(error)));
+                DiagnosticErrorInfo info = null;
+                if (error instanceof HttpFailureException) {
+                    HttpFailureException failure = (HttpFailureException) error;
+                    info = AiSummaryDiagnosticSanitizer.create(failure.status, failure.body,
+                            failure.contentType, config.apiKey);
+                }
+                final DiagnosticErrorInfo diagnosticInfo = info;
+                deliver(request, () -> callback.onError(describeError(error), diagnosticInfo));
             } finally {
                 if (endpoint != null) endpoint.close();
                 finishTask(request);
@@ -347,8 +372,8 @@ public final class AiSummaryClient {
             body.put("model", config.model);
         }
         body.put("stream", stream);
-        body.put("temperature", 0.2);
-        // Some MNN Chat releases accept but ignore this compatibility parameter.
+        // Use the loaded model's sampling defaults: the local MNN API rejects temperature.
+        // Older upstream MNN Chat releases may ignore max_tokens; compatible forks enforce it.
         body.put("max_tokens", maxOutputTokens);
         body.put("messages", new JSONArray()
                 .put(new JSONObject().put("role", "system").put("content", systemPrompt))
@@ -382,7 +407,9 @@ public final class AiSummaryClient {
                 if (status == 401 || status == 403 || (status >= 300 && status < 400)) {
                     throw new SummaryException(httpError(status));
                 }
-                throw new SummaryException(serverError(status, readErrorBody(current, request)));
+                String failureBody = readErrorBody(current, request);
+                throw new HttpFailureException(serverError(status, failureBody), status,
+                        failureBody, current.getContentType());
             }
             String contentType = current.getContentType();
             if (stream && contentType != null && contentType.toLowerCase(Locale.US).startsWith("text/event-stream")) {
@@ -485,7 +512,8 @@ public final class AiSummaryClient {
     }
 
     private String readErrorBody(HttpURLConnection current, int request) throws IOException, CancelledException {
-        // Only classify a bounded prefix. Never show, persist or log the server's error body.
+        // Retain only a bounded prefix, never logged or persisted. Chat callbacks expose only
+        // fixed classification text; the fixed-text diagnostic may select and sanitize a reason.
         try (InputStream input = current.getErrorStream(); ByteArrayOutputStream buffer = new ByteArrayOutputStream()) {
             if (input == null) {
                 return "";
@@ -601,9 +629,23 @@ public final class AiSummaryClient {
         return "模型服务请求失败（HTTP " + status + "）。请检查模型服务后重试。";
     }
 
-    private static final class SummaryException extends Exception {
+    private static class SummaryException extends Exception {
         SummaryException(String message) {
             super(message);
+        }
+    }
+
+    /** Raw fields stay inside this request; getMessage() remains a fixed safe classification. */
+    private static final class HttpFailureException extends SummaryException {
+        final int status;
+        final String body;
+        final String contentType;
+
+        HttpFailureException(String message, int status, String body, String contentType) {
+            super(message);
+            this.status = status;
+            this.body = body;
+            this.contentType = contentType;
         }
     }
 

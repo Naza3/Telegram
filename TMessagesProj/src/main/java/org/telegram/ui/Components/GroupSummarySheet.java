@@ -43,12 +43,16 @@ import org.telegram.messenger.ai.PromptPreferences;
 import org.telegram.messenger.ai.SummaryHistoryLoader;
 import org.telegram.messenger.ai.SummaryMessage;
 import org.telegram.messenger.ai.SummaryStateStore;
+import org.telegram.messenger.ai.SummarySourceVerifier;
 import org.telegram.ui.ActionBar.AlertDialog;
 import org.telegram.ui.ActionBar.BaseFragment;
 import org.telegram.ui.ActionBar.Theme;
 
 import java.util.ArrayList;
 import java.util.Locale;
+import java.util.Date;
+import java.util.HashMap;
+import java.text.SimpleDateFormat;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.regex.Matcher;
@@ -84,6 +88,22 @@ public final class GroupSummarySheet {
             this.initialize = initialize;
             this.replayHistory = replayHistory;
             this.replayMessages = replayMessages == null ? null : new ArrayList<>(replayMessages);
+        }
+    }
+
+    private static final class SourceUpdate {
+        final String text;
+        final int editDate;
+        final boolean usable;
+
+        SourceUpdate(String text, int editDate, boolean usable) {
+            this.text = text;
+            this.editDate = editDate;
+            this.usable = usable;
+        }
+
+        boolean changed(SummaryMessage source) {
+            return !usable || source.editDate != editDate || !source.text.equals(text);
         }
     }
 
@@ -136,6 +156,12 @@ public final class GroupSummarySheet {
     private ArrayList<SummaryMessage> lastSuccessfulSources;
     private boolean resultCommitted;
     private String completionNotice;
+    private final HashMap<Integer, SourceUpdate> pendingSourceUpdates = new HashMap<>();
+    private boolean sourceSnapshotInvalid;
+    private SummarySourceVerifier sourceVerifier;
+    private AlertDialog sourceDialog;
+    private LinearLayout sourceContent;
+    private int sourceOperation;
     private boolean closed;
     private int operation;
 
@@ -223,6 +249,8 @@ public final class GroupSummarySheet {
 
     private void cancelWork() {
         operation++;
+        closeSourcePreview();
+        pendingSourceUpdates.clear();
         stopProgressUpdates();
         streamingDraft = null;
         summaryInferenceStarted = false;
@@ -241,6 +269,151 @@ public final class GroupSummarySheet {
             client.cancel();
             client = null;
         }
+    }
+
+    public void onSourceDeleted(int messageId) {
+        if (closed) return;
+        if (!checkAccountOwner()) return;
+        SourceUpdate update = new SourceUpdate(null, 0, false);
+        if (historyLoader != null) pendingSourceUpdates.put(messageId, update);
+        if (sourceChanged(sourceMessages, messageId, update)
+                || sourceChanged(lastSuccessfulSources, messageId, update)
+                || summaryRange != null && sourceChanged(summaryRange.replayMessages, messageId, update)) {
+            invalidateSources("原消息已删除，当前摘要及原文快照已过期。请重新读取消息后总结。", false);
+        }
+    }
+
+    public void onSourceUpdated(int messageId, String text, int editDate, boolean usable) {
+        if (closed) return;
+        if (!checkAccountOwner()) return;
+        SourceUpdate update = new SourceUpdate(text, editDate, usable);
+        if (historyLoader != null) pendingSourceUpdates.put(messageId, update);
+        if (sourceChanged(sourceMessages, messageId, update)
+                || sourceChanged(lastSuccessfulSources, messageId, update)
+                || summaryRange != null && sourceChanged(summaryRange.replayMessages, messageId, update)) {
+            invalidateSources("原消息已修改或不再可用，当前摘要及原文快照已过期。请重新读取消息后总结。", false);
+        }
+    }
+
+    public void onAccessRevoked() {
+        if (!closed) invalidateSources("当前聊天已受保护或不可访问，已清除摘要和原文快照。", true);
+    }
+
+    private boolean sourceChanged(ArrayList<SummaryMessage> sources, int messageId, SourceUpdate update) {
+        if (sources == null) return false;
+        for (SummaryMessage source : sources) {
+            if (source.dialogId == dialogId && source.id == messageId && update.changed(source)) return true;
+        }
+        return false;
+    }
+
+    private void invalidateSources(String reason, boolean accessRevoked) {
+        if (closed || !checkAccountOwner()) return;
+        cancelWork();
+        sourceSnapshotInvalid = true;
+        sourceMessages = null;
+        summaryHistory = null;
+        summaryRange = null;
+        lastSuccessfulSources = null;
+        lastSuccessfulHistory = null;
+        summaryPrompt = null;
+        summaryConfig = null;
+        coverageNote = null;
+        clearContent();
+        addText(accessRevoked ? "当前聊天内容不可用于总结" : "摘要已过期", true);
+        addText(reason, false);
+        if (!accessRevoked) addAction("重新读取并选择范围", this::showSelection);
+    }
+
+    private void closeSourcePreview() {
+        sourceOperation++;
+        if (sourceVerifier != null) {
+            sourceVerifier.cancel();
+            sourceVerifier = null;
+        }
+        AlertDialog previous = sourceDialog;
+        sourceDialog = null;
+        sourceContent = null;
+        if (previous != null) previous.dismiss();
+    }
+
+    private boolean sourcePreviewActive(int parentGeneration, int previewGeneration) {
+        return !sourceSnapshotInvalid && sourceOperation == previewGeneration && sourceDialog != null
+                && sourceDialog.isShowing() && active(parentGeneration);
+    }
+
+    private void showSourcePreview(SummaryMessage source, int reference) {
+        if (!active(operation) || sourceSnapshotInvalid) return;
+        closeSourcePreview();
+        final int parentGeneration = operation;
+        final int previewGeneration = sourceOperation;
+        sourceContent = new LinearLayout(context);
+        sourceContent.setOrientation(LinearLayout.VERTICAL);
+        sourceContent.setPadding(dp(24), 0, dp(24), dp(8));
+        final AlertDialog preview = new AlertDialog.Builder(context, resourcesProvider)
+                .setTitle("原文引用 [m" + reference + "]")
+                .setView(sourceContent)
+                .setNegativeButton("关闭", (ignored, which) -> closeSourcePreview())
+                .create();
+        sourceDialog = preview;
+        preview.setOnDismissListener(ignored -> {
+            if (sourceDialog == preview) closeSourcePreview();
+        });
+        try {
+            // BaseFragment.showDialog would dismiss the parent summary dialog.
+            preview.show();
+            verifySource(source, parentGeneration, previewGeneration, false);
+        } catch (RuntimeException ignored) {
+            closeSourcePreview();
+        }
+    }
+
+    private void verifySource(SummaryMessage expected, int parentGeneration, int previewGeneration, boolean jump) {
+        if (!sourcePreviewActive(parentGeneration, previewGeneration)) return;
+        if (sourceVerifier != null) sourceVerifier.cancel();
+        sourceContent.removeAllViews();
+        addText(sourceContent, jump ? "正在重新核验原消息…" : "正在读取并核验原消息…", true);
+        sourceVerifier = new SummarySourceVerifier(account, ownerId, dialogId, topicId);
+        sourceVerifier.verify(expected, new SummarySourceVerifier.Callback() {
+            @Override
+            public void onVerified(SummaryMessage current) {
+                if (!sourcePreviewActive(parentGeneration, previewGeneration)) return;
+                sourceVerifier = null;
+                if (jump) {
+                    if (navigator != null) {
+                        dismiss();
+                        navigator.open(current.dialogId, current.id);
+                    }
+                    return;
+                }
+                sourceContent.removeAllViews();
+                addText(sourceContent, current.sender, true);
+                addText(sourceContent, new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
+                        .format(new Date(current.date * 1000L)), false);
+                TextView original = addText(sourceContent, current.text, false);
+                original.setTextColor(color(Theme.key_dialogTextBlack));
+                original.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 16);
+                original.setTextIsSelectable(true);
+                addAction(sourceContent, "跳回群聊", () ->
+                        verifySource(current, parentGeneration, previewGeneration, true));
+            }
+
+            @Override
+            public void onInvalidated(String reason) {
+                if (sourcePreviewActive(parentGeneration, previewGeneration)) invalidateSources(reason, false);
+            }
+
+            @Override
+            public void onError(String message) {
+                if (!sourcePreviewActive(parentGeneration, previewGeneration)) return;
+                sourceVerifier = null;
+                sourceContent.removeAllViews();
+                addText(sourceContent, "暂时无法显示原文", true);
+                addText(sourceContent, message, false);
+                addAction(sourceContent, "重新核验", () ->
+                        verifySource(expected, parentGeneration, previewGeneration, false));
+            }
+        });
     }
 
     private void stopProgressUpdates() {
@@ -947,6 +1120,7 @@ public final class GroupSummarySheet {
         summaryHistory = null;
         completionNotice = null;
         resultCommitted = false;
+        sourceSnapshotInvalid = false;
         summaryRange = request;
         summaryPrompt = prompt;
         summaryConfig = config;
@@ -1004,6 +1178,14 @@ public final class GroupSummarySheet {
         historyLoader = null;
         summaryHistory = result;
         sourceMessages = new ArrayList<>(replay == null ? result.messages : replay);
+        for (SummaryMessage source : sourceMessages) {
+            SourceUpdate update = pendingSourceUpdates.get(source.id);
+            if (update != null && update.changed(source)) {
+                invalidateSources("读取期间原消息已变化，本次原文快照已过期。请重新读取消息。", false);
+                return;
+            }
+        }
+        pendingSourceUpdates.clear();
         coverageNote = result.coverageNote;
         if (summaryRange.replayHistory != null) {
             coverageNote += summaryRange.mode == RangeMode.REPLAY
@@ -1191,7 +1373,7 @@ public final class GroupSummarySheet {
             addText("总结方向：" + PromptOptions.templateLabel(summaryPrompt.templateId), false);
         }
         addText(coverageNote, false);
-        addText("点击 [m数字] 查看原消息；请结合原文核对模型生成的结论。", false);
+        addText("点击 [m数字] 先核验并预览原文，再选择跳回群聊；请结合原文核对模型生成的结论。", false);
         TextView result = addText(linkSources(summary), false);
         result.setTextColor(color(Theme.key_dialogTextBlack));
         result.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 16);
@@ -1207,6 +1389,7 @@ public final class GroupSummarySheet {
     }
 
     private CharSequence linkSources(String summary) {
+        final int resultOperation = operation;
         SpannableStringBuilder text = new SpannableStringBuilder(summary);
         Matcher headings = HEADING.matcher(summary);
         while (headings.find()) {
@@ -1225,14 +1408,14 @@ public final class GroupSummarySheet {
                 continue;
             }
             SummaryMessage source = sourceMessages.get(index);
+            final int reference = index + 1;
             text.setSpan(new ClickableSpan() {
                 @Override
                 public void onClick(View widget) {
-                    if (!active(operation) || navigator == null) {
+                    if (!active(resultOperation) || sourceSnapshotInvalid) {
                         return;
                     }
-                    dismiss();
-                    navigator.open(source.dialogId, source.id);
+                    showSourcePreview(source, reference);
                 }
 
                 @Override
@@ -1271,6 +1454,10 @@ public final class GroupSummarySheet {
     }
 
     private TextView addText(CharSequence text, boolean title) {
+        return addText(content, text, title);
+    }
+
+    private TextView addText(LinearLayout parent, CharSequence text, boolean title) {
         TextView view = new TextView(context);
         view.setText(text);
         view.setTextSize(TypedValue.COMPLEX_UNIT_DIP, title ? 16 : 14);
@@ -1279,11 +1466,16 @@ public final class GroupSummarySheet {
         if (title) {
             view.setTypeface(AndroidUtilities.bold());
         }
-        content.addView(view, LayoutHelper.createLinear(-1, -2, 0, title ? 12 : 6, 0, 6));
+        parent.addView(view, LayoutHelper.createLinear(-1, -2, 0, title ? 12 : 6, 0, 6));
         return view;
     }
 
     private void addAction(String label, Runnable action) {
+        addAction(content, label, action);
+    }
+
+    private void addAction(LinearLayout parent, String label, Runnable action) {
+        final int actionOperation = operation;
         TextView button = new TextView(context);
         button.setText(label);
         button.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 16);
@@ -1296,11 +1488,11 @@ public final class GroupSummarySheet {
                 color(Theme.key_dialogBackgroundGray), color(Theme.key_listSelector)));
         button.setFocusable(true);
         button.setOnClickListener(view -> {
-            if (!closed) {
+            if (!closed && actionOperation == operation) {
                 action.run();
             }
         });
-        content.addView(button, LayoutHelper.createLinear(-1, -2, 0, 8, 0, 0));
+        parent.addView(button, LayoutHelper.createLinear(-1, -2, 0, 8, 0, 0));
     }
 
     private int color(int key) {

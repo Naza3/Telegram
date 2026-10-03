@@ -20581,6 +20581,37 @@ public class ChatActivity extends BaseFragment implements
             didReceivedNotification6(id, account, args);
             didReceivedNotification7(id, account, args);
         }
+        updateSummarySources(id, account, args);
+    }
+
+    /** Keep explicit saved-result views and an open summary consistent with observed source changes. */
+    private void updateSummarySources(int id, int account, Object[] args) {
+        if (account != currentAccount || dialog_id >= 0 || currentChat == null) return;
+        if (id == NotificationCenter.messagesDeleted && args.length >= 3 && !((Boolean) args[2])) {
+            long channel = (Long) args[1];
+            if (channel != (ChatObject.isChannel(currentChat) ? -dialog_id : 0)) return;
+            ArrayList<Integer> deleted = (ArrayList<Integer>) args[0];
+            for (int messageId : deleted) {
+                if (groupSummarySheet != null) groupSummarySheet.onSourceDeleted(messageId);
+            }
+        } else if (id == NotificationCenter.replaceMessagesObjects && (Long) args[0] == dialog_id) {
+            ArrayList<MessageObject> replaced = (ArrayList<MessageObject>) args[1];
+            for (MessageObject message : replaced) {
+                if (message == null || message.messageOwner == null) continue;
+                TLRPC.Message source = message.messageOwner;
+                if (groupSummarySheet != null) {
+                    groupSummarySheet.onSourceUpdated(source.id, source.message, source.edit_date,
+                            org.telegram.messenger.ai.SummaryHistoryLoader.isUsableText(source));
+                }
+            }
+        }
+        if (id == NotificationCenter.chatInfoDidLoad || id == NotificationCenter.updateInterfaces) {
+            TLRPC.Chat fresh = getMessagesController().getChat(-dialog_id);
+            if (fresh != null && (fresh.noforwards || fresh.kicked || fresh.left || fresh.deactivated
+                    || fresh instanceof TLRPC.TL_chatForbidden || fresh instanceof TLRPC.TL_channelForbidden)) {
+                if (groupSummarySheet != null) groupSummarySheet.onAccessRevoked();
+            }
+        }
     }
 
     private void didReceivedNotification_messagesDidLoad(int id, int account, final Object... args) {

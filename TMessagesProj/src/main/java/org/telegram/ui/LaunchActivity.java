@@ -7315,25 +7315,12 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
             BaseFragment fragment = mainFragmentsStack.get(mainFragmentsStack.size() - 1);
             fragment.createArticleViewer(false).open((TLRPC.TL_webPage) args[0], (String) args[1]);
         } else if (id == NotificationCenter.hasNewContactsToImport) {
-            if (actionBarLayout == null || actionBarLayout.getFragmentStack().isEmpty()) {
-                return;
-            }
-            final int type = (Integer) args[0];
             final HashMap<String, ContactsController.Contact> contactHashMap = (HashMap<String, ContactsController.Contact>) args[1];
             final boolean first = (Boolean) args[2];
             final boolean schedule = (Boolean) args[3];
-            BaseFragment fragment = actionBarLayout.getFragmentStack().get(actionBarLayout.getFragmentStack().size() - 1);
-
-            AlertDialog.Builder builder = new AlertDialog.Builder(LaunchActivity.this);
-            builder.setTopAnimation(R.raw.permission_request_contacts, AlertsCreator.PERMISSIONS_REQUEST_TOP_ICON_SIZE, false, Theme.getColor(Theme.key_dialogTopBackground));
-            builder.setTitle(LocaleController.getString(R.string.UpdateContactsTitle));
-            builder.setMessage(LocaleController.getString(R.string.UpdateContactsMessage));
-            builder.setPositiveButton(LocaleController.getString(R.string.OK), (dialogInterface, i) -> ContactsController.getInstance(account).syncPhoneBookByAlert(contactHashMap, first, schedule, false));
-            builder.setNegativeButton(LocaleController.getString(R.string.Cancel), (dialog, which) -> ContactsController.getInstance(account).syncPhoneBookByAlert(contactHashMap, first, schedule, true));
-            builder.setOnBackButtonListener((dialogInterface, i) -> ContactsController.getInstance(account).syncPhoneBookByAlert(contactHashMap, first, schedule, true));
-            AlertDialog dialog = builder.create();
-            fragment.showDialog(dialog);
-            dialog.setCanceledOnTouchOutside(false);
+            // Background discovery must not prompt for phone-book import or imply consent.
+            // Complete the original Cancel path so contact synchronization is not left pending.
+            ContactsController.getInstance(account).syncPhoneBookByAlert(contactHashMap, first, schedule, true);
         } else if (id == NotificationCenter.didSetNewTheme) {
             Boolean nightTheme = (Boolean) args[0];
             if (!nightTheme) {

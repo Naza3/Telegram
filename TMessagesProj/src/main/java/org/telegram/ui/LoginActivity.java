@@ -3262,37 +3262,8 @@ public class LoginActivity extends BaseFragment implements NotificationCenter.No
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                             allowReadPhoneNumbers = getParentActivity().checkSelfPermission(Manifest.permission.READ_PHONE_NUMBERS) == PackageManager.PERMISSION_GRANTED;
                         }
-                        if (checkShowPermissions && (!allowCall || !allowReadPhoneNumbers)) {
-                            permissionsShowItems.clear();
-                            if (!allowCall) {
-                                permissionsShowItems.add(Manifest.permission.READ_PHONE_STATE);
-                            }
-                            if (!allowReadPhoneNumbers && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                                permissionsShowItems.add(Manifest.permission.READ_PHONE_NUMBERS);
-                            }
-                            if (!permissionsShowItems.isEmpty()) {
-                                List<String> callbackPermissionItems = new ArrayList<>(permissionsShowItems);
-                                Runnable r = () -> {
-                                    SharedPreferences preferences = MessagesController.getGlobalMainSettings();
-                                    if (preferences.getBoolean("firstloginshow", true) || getParentActivity().shouldShowRequestPermissionRationale(Manifest.permission.READ_PHONE_STATE)) {
-                                        preferences.edit().putBoolean("firstloginshow", false).commit();
-                                        AlertDialog.Builder builder = new AlertDialog.Builder(getParentActivity());
-
-                                        builder.setTopAnimation(R.raw.incoming_calls, 46, false, Theme.getColor(Theme.key_dialogTopBackground));
-                                        builder.setPositiveButton(getString("Continue", R.string.Continue), null);
-                                        builder.setMessage(getString("AllowFillNumber", R.string.AllowFillNumber));
-                                        permissionsShowDialog = showDialog(builder.create(), true, null);
-                                        needRequestPermissions = true;
-                                    } else {
-                                        getParentActivity().requestPermissions(callbackPermissionItems.toArray(new String[0]), BasePermissionsActivity.REQUEST_CODE_CALLS);
-                                    }
-                                };
-                                if (isAnimatingIntro) {
-                                    animationFinishCallback = r;
-                                } else {
-                                    r.run();
-                                }
-                            }
+                        if (!allowCall || !allowReadPhoneNumbers) {
+                            // Opening the login page must not request optional autofill access.
                             return;
                         }
                     }

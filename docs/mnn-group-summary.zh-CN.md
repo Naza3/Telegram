@@ -2,6 +2,8 @@
 
 开发分支：[`feature/mnn-group-summary`](https://github.com/Naza3/Telegram/tree/feature/mnn-group-summary)。基于 Telegram Android `12.10.6 (7112)`，上游提交 `f2908b14133bbffbf7ab04f641ecb5bfaf533242`。远程仓库为用户创建的 [Naza3/Telegram](https://github.com/Naza3/Telegram)，本地 `origin` 指向该 Fork，`upstream` 保留官方仓库。
 
+后续自定义 Prompt、真机诊断、流式、增量总结等功能的任务拆分和验收标准见 [分阶段实施计划](mnn-group-summary-roadmap.zh-CN.md)。该计划中的待办尚未实现。
+
 ## 使用方式
 
 1. 在同一手机的 MNN Chat 中打开已下载的文本模型，进入聊天页。

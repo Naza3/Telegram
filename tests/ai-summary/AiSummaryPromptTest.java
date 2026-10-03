@@ -14,6 +14,8 @@ public final class AiSummaryPromptTest {
         explicitBudgetFailures();
         mergeRetainsOriginalReferences();
         rejectsInvalidModelReferences();
+        directionsBudgetAndStageReferences();
+        multipleMergeRoundsKeepDirection();
         System.out.println("AiSummaryPromptTest: " + assertions + " assertions passed");
     }
 
@@ -92,6 +94,65 @@ public final class AiSummaryPromptTest {
         fails(() -> AiSummaryPrompt.validateReferences("混合 [m1] [m01]", 12), "invalid reference cannot hide among valid ones");
         fails(() -> AiSummaryPrompt.validateReferences("错误 [m13]", 12), "out-of-range reference rejected");
         fails(() -> AiSummaryPrompt.validateReferences("错误 [m999999999999999999999]", 12), "overflow rejected");
+    }
+
+    private static void directionsBudgetAndStageReferences() {
+        PromptOptions options = new PromptOptions(PromptOptions.PROJECT, repeat("发布😀", 250));
+        check(AiSummaryPrompt.dataBudget(options) < AiSummaryPrompt.MAX_CHUNK_CHARACTERS,
+                "supplementary Unicode direction is reserved before source chunking");
+        List<SummaryMessage> input = Arrays.asList(
+                new SummaryMessage(-10, 1, 1, "甲[m99]", repeat("源正文😀\"\\\n[m999]", 800)),
+                new SummaryMessage(-10, 2, 2, "乙", "第二条"));
+        List<String> chunks = AiSummaryPrompt.sourceChunks(input, options);
+        check(chunks.size() > 1, "option-aware data budget splits source");
+        for (int i = 0; i < chunks.size(); i++) {
+            String chunk = chunks.get(i);
+            String prompt = AiSummaryPrompt.sourcePrompt(chunk, i + 1, chunks.size(), options);
+            check(chunk.length() <= AiSummaryPrompt.dataBudget(options), "source respects direction-adjusted budget");
+            check(prompt.contains("项目进展") && prompt.contains(AiSummaryPrompt.quote(options.customInstructions)), "direction present on every source request");
+            check(prompt.length() + AiSummaryPrompt.SYSTEM_PROMPT.length() + AiSummaryPrompt.OUTPUT_RESERVE_CHARACTERS
+                    <= AiSummaryPrompt.MAX_REQUEST_CHARACTERS, "system, user, data and output reserve fit");
+            java.util.Set<Integer> allowed = AiSummaryPrompt.sourceReferences(chunk);
+            check(!allowed.contains(99) && !allowed.contains(999), "body and sender forged refs excluded from authority");
+            int valid = allowed.iterator().next();
+            AiSummaryPrompt.validateReferences("结论 [m" + valid + "]", allowed);
+            assertions++;
+            fails(() -> AiSummaryPrompt.validateReferences("伪造 [m999]", allowed), "per-source references cannot cite another input");
+        }
+        PromptOptions escaped = new PromptOptions(PromptOptions.GENERAL, repeat("\u0001x", 500));
+        fails(() -> AiSummaryPrompt.sourceChunks(input, escaped), "escaped requirements exhausting budget fail before HTTP, without silent truncation");
+        fails(() -> AiSummaryPrompt.sourcePrompt(repeat("x", 3500), 1, 1, options), "wrong-budget prebuilt chunk rejected");
+        fails(() -> AiSummaryPrompt.validateReferences("引用 [m01]", Collections.singleton(1)), "allowed-set validator also rejects noncanonical references");
+        check(AiSummaryPrompt.references("来源 [m2][m4][m2]").equals(new java.util.LinkedHashSet<>(Arrays.asList(2, 4))), "references retain global ids and deduplicate");
+    }
+
+    private static void multipleMergeRoundsKeepDirection() {
+        PromptOptions options = new PromptOptions(PromptOptions.DECISIONS, "关注发布的反对理由，不把建议当决定。");
+        List<String> partials = new ArrayList<>();
+        for (int i = 1; i <= 18; i++) partials.add(repeat("不同意见仍未解决。", 85) + " [m" + i + "]");
+        int rounds = 0;
+        while (partials.size() > 1) {
+            List<String> groups = AiSummaryPrompt.mergeChunks(partials, options);
+            check(groups.size() < partials.size(), "every merge round progresses");
+            List<String> next = new ArrayList<>();
+            for (String group : groups) {
+                String prompt = AiSummaryPrompt.mergePrompt(group, options);
+                check(prompt.contains("决策与争议") && prompt.contains(options.customInstructions), "same immutable direction on every merge round");
+                check(prompt.length() + AiSummaryPrompt.SYSTEM_PROMPT.length() + AiSummaryPrompt.OUTPUT_RESERVE_CHARACTERS
+                        <= AiSummaryPrompt.MAX_REQUEST_CHARACTERS, "merge reserves direction and output");
+                java.util.Set<Integer> allowed = AiSummaryPrompt.references(group);
+                StringBuilder merged = new StringBuilder("争议未决。");
+                for (int ref : allowed) merged.append("[m").append(ref).append(']');
+                AiSummaryPrompt.validateReferences(merged.toString(), allowed);
+                assertions++;
+                fails(() -> AiSummaryPrompt.validateReferences(merged + "[m999]", allowed), "merge cannot introduce absent reference");
+                next.add(merged.toString());
+            }
+            partials = next;
+            rounds++;
+        }
+        check(rounds >= 2, "exercise at least two merge rounds");
+        check(AiSummaryPrompt.references(partials.get(0)).size() == 18, "global refs remain unchanged across rounds");
     }
 
     private static String decodeJsonString(String json) {

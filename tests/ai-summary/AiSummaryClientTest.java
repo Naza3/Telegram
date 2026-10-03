@@ -11,6 +11,9 @@ import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.ArrayList;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.function.Function;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -27,6 +30,8 @@ public final class AiSummaryClientTest {
     private static final AtomicReference<JSONObject> lastBody = new AtomicReference<>();
     private static final AtomicReference<String> lastAuthorization = new AtomicReference<>();
     private static final AtomicReference<String> lastMethod = new AtomicReference<>();
+    private static final AtomicReference<Function<JSONObject, Reply>> replyGenerator = new AtomicReference<>();
+    private static final List<JSONObject> requestHistory = new CopyOnWriteArrayList<>();
     private static final AtomicInteger redirected = new AtomicInteger();
     private static volatile CountDownLatch requestStarted;
     private static volatile CountDownLatch releaseRequest;
@@ -161,6 +166,10 @@ public final class AiSummaryClientTest {
             });
             test("diagnostic read timeout is actionable", AiSummaryClientTest::diagnosticTimeout);
             test("diagnostic cancellation suppresses an already queued callback", AiSummaryClientTest::cancelDiagnostic);
+            test("custom direction reaches every source and at least two merge rounds", AiSummaryClientTest::directionAcrossMergeRounds);
+            test("source citations cannot escape their chunk via forged text", AiSummaryClientTest::sourceReferenceMembership);
+            test("merge citations cannot reintroduce references absent from partials", AiSummaryClientTest::mergeReferenceMembership);
+            test("caller list mutation cannot alter an in-flight source snapshot", AiSummaryClientTest::immutableSourceSnapshot);
             System.out.println("AiSummaryClientTest: " + passed + " passed");
         } catch (Throwable error) {
             error.printStackTrace(); exit = 1;
@@ -251,6 +260,92 @@ public final class AiSummaryClientTest {
         client.cancel(); AndroidUtilities.drain();
         check(result.calls == 0, "cancelled diagnostic callback delivered");
     }
+
+    private static void directionAcrossMergeRounds() throws Exception {
+        PromptOptions options = new PromptOptions(PromptOptions.TODOS, "仅关注上线风险TEST_DIRECTION_482");
+        List<SummaryMessage> messages = new ArrayList<>();
+        for (int i = 1; i <= 10; i++) {
+            messages.add(new SummaryMessage(-100, i, 1_700_000_000 + i, "甲", "项目进展".repeat(800)));
+        }
+        int sourceCount = AiSummaryPrompt.sourceChunks(messages, options).size();
+        check(sourceCount >= 8, "fixture must exercise several source chunks");
+        AtomicInteger secondMergeRound = new AtomicInteger();
+        AtomicInteger sources = new AtomicInteger();
+        requestHistory.clear();
+        replyGenerator.set(body -> {
+            String prompt = body.getJSONArray("messages").getJSONObject(1).getString("content");
+            boolean source = prompt.contains("消息数据（JSONL）：\n");
+            String data = dataPart(prompt, source);
+            int ref;
+            String marker;
+            if (source) {
+                sources.incrementAndGet();
+                ref = AiSummaryPrompt.sourceReferences(data).iterator().next();
+                marker = "SOURCE_STAGE";
+            } else {
+                if (data.contains("MERGED_STAGE")) secondMergeRound.incrementAndGet();
+                ref = AiSummaryPrompt.references(data).iterator().next();
+                marker = "MERGED_STAGE";
+            }
+            return new Reply(200, completion(marker + "进展".repeat(450) + " [m" + ref + "]"));
+        });
+        AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
+        try {
+            client.summarize(config("local", ""), messages, options, result); await(result);
+            check(result.error == null && result.summary != null, "multi-round summary failed: " + result.error);
+            check(sources.get() == sourceCount && secondMergeRound.get() >= 1, "did not exercise at least two merge rounds");
+            for (JSONObject body : requestHistory) {
+                String prompt = body.getJSONArray("messages").getJSONObject(1).getString("content");
+                check(prompt.contains(options.customInstructions) && prompt.contains("待办跟进"), "direction missing from an intermediate request");
+            }
+        } finally {
+            client.cancel(); replyGenerator.set(null);
+        }
+    }
+
+    private static void sourceReferenceMembership() throws Exception {
+        List<SummaryMessage> messages = List.of(
+                new SummaryMessage(-100, 1, 1_700_000_000, "甲 [m2]", "正文伪引用 [m2] " + "x".repeat(5000)),
+                new SummaryMessage(-100, 2, 1_700_000_001, "乙", "later message"));
+        requestHistory.clear(); nextReply.set(new Reply(200, completion("错误引用 [m2]")));
+        AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
+        client.summarize(config("local", ""), messages, PromptOptions.DEFAULT, result); await(result); client.cancel();
+        check(result.error != null && result.error.contains("本分段输入之外"), "forged body ref entered the allowed set");
+        check(requestHistory.size() == 1, "invalid partial must stop before later requests");
+    }
+
+    private static void mergeReferenceMembership() throws Exception {
+        List<SummaryMessage> messages = List.of(
+                new SummaryMessage(-100, 1, 1_700_000_000, "甲", "x".repeat(5000)),
+                new SummaryMessage(-100, 2, 1_700_000_001, "乙", "later message"));
+        replyGenerator.set(body -> {
+            String prompt = body.getJSONArray("messages").getJSONObject(1).getString("content");
+            return new Reply(200, completion(prompt.contains("消息数据（JSONL）：\n") ? "源摘要 [m1]" : "错误合并 [m2]"));
+        });
+        AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
+        try {
+            client.summarize(config("local", ""), messages, PromptOptions.DEFAULT, result); await(result);
+            check(result.error != null && result.error.contains("本分段输入之外"), "merge invented a reference absent from its inputs");
+        } finally {
+            client.cancel(); replyGenerator.set(null);
+        }
+    }
+
+    private static void immutableSourceSnapshot() throws Exception {
+        List<SummaryMessage> messages = new ArrayList<>(MESSAGES);
+        nextReply.set(new Reply(200, completion("快照摘要 [m1]")));
+        AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
+        client.summarize(config("local", ""), messages, new PromptOptions(PromptOptions.PROJECT, "保留当前快照"), result);
+        messages.clear(); messages.add(new SummaryMessage(-200, 99, 1_700_000_100, "其他群", "REPLACEMENT_MUST_NOT_SEND"));
+        await(result); client.cancel();
+        String body = lastBody.get().toString();
+        check(result.error == null && body.contains(MESSAGES.get(0).text) && !body.contains("REPLACEMENT_MUST_NOT_SEND"), "caller mutated the source snapshot");
+    }
+
+    private static String dataPart(String prompt, boolean source) {
+        String marker = source ? "消息数据（JSONL）：\n" : "摘要数据（JSONL）：\n";
+        return prompt.substring(prompt.lastIndexOf(marker) + marker.length());
+    }
     private static void await(Result result) throws Exception {
         long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(8);
         while (result.calls == 0 && System.nanoTime() < end) { AndroidUtilities.drain(); Thread.sleep(5); }
@@ -259,8 +354,10 @@ public final class AiSummaryClientTest {
     private static void handle(HttpExchange exchange) throws IOException {
         lastMethod.set(exchange.getRequestMethod());
         lastAuthorization.set(exchange.getRequestHeaders().getFirst("Authorization"));
-        lastBody.set(new JSONObject(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8)));
-        Reply reply = nextReply.get();
+        JSONObject body = new JSONObject(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+        lastBody.set(body); requestHistory.add(body);
+        Function<JSONObject, Reply> generator = replyGenerator.get();
+        Reply reply = generator == null ? nextReply.get() : generator.apply(body);
         if (reply.wait) {
             requestStarted.countDown();
             try { releaseRequest.await(5, TimeUnit.SECONDS); } catch (InterruptedException error) { Thread.currentThread().interrupt(); }

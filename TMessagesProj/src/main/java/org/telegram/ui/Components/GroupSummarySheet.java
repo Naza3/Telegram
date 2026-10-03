@@ -8,10 +8,12 @@ package org.telegram.ui.Components;
 
 import android.content.Context;
 import android.graphics.Typeface;
+import android.text.Editable;
 import android.text.InputType;
 import android.text.SpannableStringBuilder;
 import android.text.Spanned;
 import android.text.TextPaint;
+import android.text.TextWatcher;
 import android.text.method.LinkMovementMethod;
 import android.text.method.PasswordTransformationMethod;
 import android.text.style.ClickableSpan;
@@ -20,6 +22,7 @@ import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewParent;
+import android.view.WindowManager;
 import android.view.inputmethod.EditorInfo;
 import android.widget.LinearLayout;
 import android.widget.RadioButton;
@@ -33,6 +36,8 @@ import org.telegram.messenger.UserConfig;
 import org.telegram.messenger.Utilities;
 import org.telegram.messenger.ai.AiSummaryClient;
 import org.telegram.messenger.ai.AiSummarySettings;
+import org.telegram.messenger.ai.PromptOptions;
+import org.telegram.messenger.ai.PromptPreferences;
 import org.telegram.messenger.ai.SummaryHistoryLoader;
 import org.telegram.messenger.ai.SummaryMessage;
 import org.telegram.ui.ActionBar.AlertDialog;
@@ -70,6 +75,12 @@ public final class GroupSummarySheet {
     private ArrayList<SummaryMessage> sourceMessages;
     private String coverageNote;
     private String settingsNotice;
+    private String promptNotice;
+    private PromptOptions savedPrompt = PromptOptions.DEFAULT;
+    private PromptPreferences.Scope savedPromptScope = PromptPreferences.Scope.BUILTIN;
+    private PromptOptions sessionPrompt;
+    private PromptOptions summaryPrompt;
+    private boolean promptLoaded;
     private String recentCountText = "100";
     private int recentCount = 100;
     private boolean today;
@@ -94,6 +105,12 @@ public final class GroupSummarySheet {
         if (fragment.showDialog(sheet.dialog, false, ignored -> sheet.onDismissed()) == null) {
             sheet.onDismissed();
             return null;
+        }
+        // The first page can be a preferences-loading view without an EditText. Later pages
+        // still need the IME; AlertDialog otherwise derives this flag only when first shown.
+        if (sheet.dialog.getWindow() != null) {
+            sheet.dialog.getWindow().clearFlags(WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM);
+            sheet.dialog.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
         }
         return sheet;
     }
@@ -134,6 +151,8 @@ public final class GroupSummarySheet {
         cancelWork();
         sourceMessages = null;
         coverageNote = null;
+        sessionPrompt = null;
+        summaryPrompt = null;
         content.removeAllViews();
     }
 
@@ -198,6 +217,10 @@ public final class GroupSummarySheet {
             addText("此聊天已限制内容保存，无法使用 AI 总结。", false);
             return;
         }
+        if (!promptLoaded) {
+            loadPromptPreferences();
+            return;
+        }
         addText(topicId == 0 ? "选择本群的文字消息范围" : "仅总结当前话题的文字消息", true);
         if (settingsNotice != null) {
             addText(settingsNotice, false);
@@ -226,6 +249,21 @@ public final class GroupSummarySheet {
         addText("当日按手机时区从 00:00 起计算；读取范围截至开始总结时。只处理文字，不读取图片、语音或文件内容。", false);
         addText("选中的文字将发送到你设置的 MNN Chat API 服务。结果仅在这里显示，点击引用可返回原消息。", false);
 
+        PromptOptions direction = effectivePrompt();
+        addText("总结方向：" + PromptOptions.templateLabel(direction.templateId) + " · "
+                + promptScopeLabel(sessionPrompt != null ? PromptPreferences.Scope.SESSION : savedPromptScope), true);
+        if (!direction.customInstructions.isEmpty()) {
+            addText("已设置补充要求（" + direction.customInstructions.codePointCount(0,
+                    direction.customInstructions.length()) + " 字符）。", false);
+        }
+        if (promptNotice != null) {
+            addText(promptNotice, false);
+        }
+        addAction("修改总结方向", () -> {
+            recentCountText = count.getText().toString();
+            showPromptEditor(effectivePrompt(), PromptPreferences.Scope.SESSION, null);
+        });
+
         addAction("MNN API 设置", () -> {
             recentCountText = count.getText().toString();
             showSettings();
@@ -245,6 +283,206 @@ public final class GroupSummarySheet {
                 }
             }
             startSummary();
+        });
+    }
+
+    private PromptOptions effectivePrompt() {
+        return sessionPrompt != null ? sessionPrompt : savedPrompt;
+    }
+
+    private String promptScopeLabel(PromptPreferences.Scope scope) {
+        switch (scope) {
+            case SESSION: return "本次面板";
+            case CHAT: return topicId == 0 ? "本群偏好" : "当前话题偏好";
+            case ACCOUNT: return "账号默认";
+            default: return "内置默认";
+        }
+    }
+
+    private void loadPromptPreferences() {
+        cancelWork();
+        final int generation = operation;
+        clearContent();
+        addText("正在读取总结方向…", true);
+        Utilities.globalQueue.postRunnable(() -> {
+            if (!sameAccountOwner()) {
+                AndroidUtilities.runOnUIThread(this::dismiss);
+                return;
+            }
+            try {
+                PromptPreferences.Resolved resolved = PromptPreferences.load(account, ownerId, dialogId, topicId);
+                AndroidUtilities.runOnUIThread(() -> {
+                    if (active(generation)) {
+                        savedPrompt = resolved.options;
+                        savedPromptScope = resolved.scope;
+                        promptLoaded = true;
+                        showSelection();
+                    }
+                });
+            } catch (RuntimeException ignored) {
+                AndroidUtilities.runOnUIThread(() -> {
+                    if (!active(generation)) return;
+                    clearContent();
+                    addText("无法读取已保存的总结方向，请重试。", true);
+                    addAction("重试读取", this::loadPromptPreferences);
+                    addAction("本次使用内置默认", () -> {
+                        sessionPrompt = PromptOptions.DEFAULT;
+                        promptLoaded = true;
+                        showSelection();
+                    });
+                });
+            }
+        });
+    }
+
+    private void showPromptEditor(PromptOptions draft, PromptPreferences.Scope selectedScope, String error) {
+        if (closed || !checkAccountOwner()) return;
+        cancelWork();
+        clearContent();
+        addText("总结方向", true);
+        addText("保持话题、结论、待办和原文引用。补充要求只改变关注点，不会排除所选范围中的消息。", false);
+        RadioGroup templates = new RadioGroup(context);
+        templates.setOrientation(RadioGroup.VERTICAL);
+        int defaultTemplateId = 0;
+        for (String template : new String[] {PromptOptions.GENERAL, PromptOptions.PROJECT,
+                PromptOptions.DECISIONS, PromptOptions.TODOS}) {
+            RadioButton option = radio(PromptOptions.templateLabel(template));
+            option.setId(View.generateViewId());
+            option.setTag(template);
+            templates.addView(option, new RadioGroup.LayoutParams(-1, dp(44)));
+            if (PromptOptions.GENERAL.equals(template)) defaultTemplateId = option.getId();
+            if (draft.templateId.equals(template)) templates.check(option.getId());
+        }
+        content.addView(templates, LayoutHelper.createLinear(-1, -2, 0, 4, 0, 4));
+        addText("补充要求（最多 " + PromptOptions.MAX_CUSTOM_CODE_POINTS + " 个 Unicode 字符）", true);
+        EditTextBoldCursor custom = edit("例如：重点整理发布阻塞、已确认决定和仍有分歧的问题。",
+                draft.customInstructions, InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
+        custom.setSingleLine(false);
+        custom.setMinLines(4);
+        custom.setMaxLines(8);
+        custom.setGravity(Gravity.TOP | Gravity.START);
+        custom.setImeOptions(EditorInfo.IME_FLAG_NO_EXTRACT_UI);
+        TextView counter = addText("", false);
+        Runnable updateCounter = () -> {
+            String text = custom.getText().toString();
+            int count = text.codePointCount(0, text.length());
+            counter.setText(count + " / " + PromptOptions.MAX_CUSTOM_CODE_POINTS + " 字符");
+            counter.setTextColor(color(count > PromptOptions.MAX_CUSTOM_CODE_POINTS
+                    ? Theme.key_text_RedRegular : Theme.key_dialogTextGray));
+        };
+        custom.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+            @Override public void onTextChanged(CharSequence s, int start, int before, int count) { updateCounter.run(); }
+            @Override public void afterTextChanged(Editable text) {}
+        });
+        updateCounter.run();
+
+        addText("应用范围", true);
+        RadioGroup scopes = new RadioGroup(context);
+        scopes.setOrientation(RadioGroup.VERTICAL);
+        int sessionScopeId = 0;
+        for (PromptPreferences.Scope scope : new PromptPreferences.Scope[] {PromptPreferences.Scope.SESSION,
+                PromptPreferences.Scope.CHAT, PromptPreferences.Scope.ACCOUNT}) {
+            String label = scope == PromptPreferences.Scope.SESSION ? "仅本次面板，不保存"
+                    : scope == PromptPreferences.Scope.CHAT ? (topicId == 0 ? "保存为本群偏好" : "保存为当前话题偏好")
+                    : "保存为当前账号默认";
+            RadioButton option = radio(label);
+            option.setId(View.generateViewId());
+            option.setTag(scope);
+            scopes.addView(option, new RadioGroup.LayoutParams(-1, dp(44)));
+            if (scope == PromptPreferences.Scope.SESSION) sessionScopeId = option.getId();
+            if (scope == selectedScope) scopes.check(option.getId());
+        }
+        content.addView(scopes, LayoutHelper.createLinear(-1, -2, 0, 4, 0, 4));
+        addText("本次面板优先于群／话题偏好，群／话题偏好优先于账号默认。保存账号默认不会覆盖已保存的群偏好。", false);
+        TextView validation = addText(error == null ? "" : error, false);
+        validation.setTextColor(color(Theme.key_text_RedRegular));
+        validation.setVisibility(error == null ? View.GONE : View.VISIBLE);
+        addAction("应用总结方向", () -> {
+            RadioButton template = templates.findViewById(templates.getCheckedRadioButtonId());
+            RadioButton scope = scopes.findViewById(scopes.getCheckedRadioButtonId());
+            try {
+                PromptOptions options = new PromptOptions((String) template.getTag(), custom.getText().toString());
+                savePromptOptions(options, (PromptPreferences.Scope) scope.getTag());
+            } catch (IllegalArgumentException exception) {
+                validation.setText(exception.getMessage());
+                validation.setVisibility(View.VISIBLE);
+                custom.requestFocus();
+            }
+        });
+        final int resetTemplateId = defaultTemplateId;
+        final int resetScopeId = sessionScopeId;
+        addAction("恢复默认填写", () -> {
+            templates.check(resetTemplateId);
+            custom.setText("");
+            scopes.check(resetScopeId);
+            validation.setVisibility(View.GONE);
+        });
+        if (sessionPrompt != null) {
+            addAction("清除本次覆盖", () -> {
+                sessionPrompt = null;
+                promptLoaded = false;
+                promptNotice = "已取消本次覆盖，恢复使用已保存的偏好。";
+                showSelection();
+            });
+        }
+        if (savedPromptScope == PromptPreferences.Scope.CHAT) {
+            addAction(topicId == 0 ? "清除本群偏好" : "清除当前话题偏好", () -> changePromptPreferences(
+                    () -> PromptPreferences.clearChat(account, ownerId, dialogId, topicId),
+                    "群／话题偏好已清除。", null,
+                    () -> showPromptEditor(draft, selectedScope, "清除失败，请重试。")));
+        }
+        addAction("清除账号默认", () -> changePromptPreferences(
+                () -> PromptPreferences.clearAccountDefault(account, ownerId), "账号默认已清除。", null,
+                () -> showPromptEditor(draft, selectedScope, "清除失败，请重试。")));
+        addAction("取消修改并返回", this::showSelection);
+    }
+
+    private void savePromptOptions(PromptOptions options, PromptPreferences.Scope scope) {
+        if (closed || !checkAccountOwner()) return;
+        if (scope == PromptPreferences.Scope.SESSION) {
+            sessionPrompt = options;
+            promptNotice = "总结方向仅用于本次面板，关闭后不保留。";
+            showSelection();
+            return;
+        }
+        changePromptPreferences(() -> PromptPreferences.save(account, ownerId, dialogId, topicId, scope, options),
+                "总结方向已保存。", scope,
+                () -> showPromptEditor(options, scope, "保存失败，请重试。"));
+    }
+
+    private void changePromptPreferences(Runnable change, String notice, PromptPreferences.Scope savingScope,
+                                         Runnable onError) {
+        if (closed || !checkAccountOwner()) return;
+        cancelWork();
+        final int generation = operation;
+        clearContent();
+        addText("正在更新总结方向…", true);
+        Utilities.globalQueue.postRunnable(() -> {
+            if (!sameAccountOwner()) {
+                AndroidUtilities.runOnUIThread(this::dismiss);
+                return;
+            }
+            try {
+                change.run();
+                PromptPreferences.Resolved resolved = PromptPreferences.load(account, ownerId, dialogId, topicId);
+                AndroidUtilities.runOnUIThread(() -> {
+                    if (!active(generation)) return;
+                    savedPrompt = resolved.options;
+                    savedPromptScope = resolved.scope;
+                    promptLoaded = true;
+                    if (savingScope != null) sessionPrompt = null;
+                    promptNotice = notice;
+                    if (savingScope == PromptPreferences.Scope.ACCOUNT && resolved.scope == PromptPreferences.Scope.CHAT) {
+                        promptNotice += " 本群／话题已有偏好，仍优先使用；清除该偏好后才使用账号默认。";
+                    }
+                    showSelection();
+                });
+            } catch (RuntimeException ignored) {
+                AndroidUtilities.runOnUIThread(() -> {
+                    if (active(generation)) onError.run();
+                });
+            }
         });
     }
 
@@ -447,10 +685,11 @@ public final class GroupSummarySheet {
     }
 
     private void startSummary() {
-        loadSettings(this::startSummary);
+        final PromptOptions prompt = effectivePrompt();
+        loadSettings(config -> startSummary(config, prompt));
     }
 
-    private void startSummary(AiSummarySettings.Config config) {
+    private void startSummary(AiSummarySettings.Config config, PromptOptions prompt) {
         if (closed || fragment.isFinished || !checkAccountOwner()) {
             return;
         }
@@ -466,6 +705,7 @@ public final class GroupSummarySheet {
         cancelWork();
         sourceMessages = null;
         coverageNote = null;
+        summaryPrompt = prompt;
         final int generation = operation;
         clearContent();
         addText("正在读取文字消息…", true);
@@ -497,7 +737,7 @@ public final class GroupSummarySheet {
                 addText("请保持 Telegram 在前台；关闭面板或离开页面会取消总结。", false);
                 addAction("取消并返回", GroupSummarySheet.this::showSelection);
                 client = new AiSummaryClient();
-                client.summarize(config, sourceMessages, new AiSummaryClient.Callback() {
+                client.summarize(config, sourceMessages, prompt, new AiSummaryClient.Callback() {
                     @Override
                     public void onSuccess(String summary) {
                         if (active(generation)) {
@@ -544,6 +784,9 @@ public final class GroupSummarySheet {
 
     private void showResult(String summary) {
         clearContent();
+        if (summaryPrompt != null) {
+            addText("总结方向：" + PromptOptions.templateLabel(summaryPrompt.templateId), false);
+        }
         addText(coverageNote, false);
         addText("点击 [m数字] 查看原消息；请结合原文核对模型生成的结论。", false);
         TextView result = addText(linkSources(summary), false);

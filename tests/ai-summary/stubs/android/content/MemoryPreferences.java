@@ -5,6 +5,7 @@ import java.util.Map;
 
 public final class MemoryPreferences implements SharedPreferences {
     public final Map<String, String> values = new HashMap<>();
+    public int failNextCommits;
     public Map<String, ?> getAll() { return new HashMap<>(values); }
     public String getString(String key, String fallback) { return values.getOrDefault(key, fallback); }
     public int getInt(String key, int fallback) { return values.containsKey(key) ? Integer.parseInt(values.get(key)) : fallback; }
@@ -20,6 +21,7 @@ public final class MemoryPreferences implements SharedPreferences {
                     else values.put(entry.getKey(), entry.getValue());
                 }
                 pending.clear();
+                if (failNextCommits > 0) { failNextCommits--; return false; }
                 return true;
             }
             public void apply() { commit(); }

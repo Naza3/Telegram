@@ -459,12 +459,14 @@ public class UserConfig extends BaseController {
     }
 
     public void clearConfig() {
+        final long summaryOwnerId = getClientUserId();
         getPreferences().edit().clear().apply();
 
         sharingMyLocationUntil = 0;
         lastMyLocationShareTime = 0;
         currentUser = null;
         clientUserId = 0;
+        org.telegram.messenger.ai.PromptPreferences.clearOwner(currentAccount, summaryOwnerId);
         registeredForPush = false;
         contactsSavedCount = 0;
         lastSendMessageId = -210000;

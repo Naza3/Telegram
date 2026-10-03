@@ -100,32 +100,45 @@ public final class AiSummaryClient {
     }
 
     public synchronized void summarize(AiSummarySettings.Config config, List<SummaryMessage> messages, Callback callback) {
+        summarize(config, messages, PromptOptions.DEFAULT, callback);
+    }
+
+    public synchronized void summarize(AiSummarySettings.Config config, List<SummaryMessage> messages,
+                                       PromptOptions options, Callback callback) {
         cancel();
         final int request = generation;
         final ArrayList<SummaryMessage> snapshot = messages == null ? null : new ArrayList<>(messages);
+        final PromptOptions direction = options; // Immutable and fixed for all source/merge requests.
         task = EXECUTOR.submit(() -> {
             try {
                 String error = AiSummarySettings.validate(config);
                 if (error != null) {
                     throw new SummaryException(error);
                 }
-                List<String> chunks = AiSummaryPrompt.sourceChunks(snapshot);
+                List<String> chunks = AiSummaryPrompt.sourceChunks(snapshot, direction);
                 int requestCount = chunks.size();
                 List<String> summaries = new ArrayList<>();
                 for (int i = 0; i < chunks.size(); i++) {
                     checkActive(request);
-                    summaries.add(complete(config, AiSummaryPrompt.sourcePrompt(chunks.get(i), i + 1, chunks.size()), request));
+                    String chunk = chunks.get(i);
+                    String summary = complete(config,
+                            AiSummaryPrompt.sourcePrompt(chunk, i + 1, chunks.size(), direction), request);
+                    AiSummaryPrompt.validateReferences(summary, AiSummaryPrompt.sourceReferences(chunk));
+                    summaries.add(summary);
                 }
                 while (summaries.size() > 1) {
                     checkActive(request);
-                    List<String> mergeChunks = AiSummaryPrompt.mergeChunks(summaries);
+                    List<String> mergeChunks = AiSummaryPrompt.mergeChunks(summaries, direction);
                     requestCount += mergeChunks.size();
                     if (requestCount > MAX_MODEL_REQUESTS) {
                         throw new SummaryException("分段摘要无法在本次请求上限内完成合并。请减少消息数量后重试。");
                     }
                     List<String> merged = new ArrayList<>();
                     for (String chunk : mergeChunks) {
-                        merged.add(complete(config, AiSummaryPrompt.mergePrompt(chunk), request));
+                        String summary = complete(config, AiSummaryPrompt.mergePrompt(chunk, direction), request);
+                        // The chunk contains only summaries validated against their own inputs.
+                        AiSummaryPrompt.validateReferences(summary, AiSummaryPrompt.references(chunk));
+                        merged.add(summary);
                     }
                     summaries = merged;
                 }

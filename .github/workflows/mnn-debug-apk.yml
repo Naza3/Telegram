@@ -48,6 +48,16 @@ jobs:
           distribution: temurin
           java-version: '21'
 
+      - name: Run AI summary regression tests and fixture validation
+        timeout-minutes: 10
+        shell: bash
+        env:
+          AI_SUMMARY_TOOLS_DIR: ${{ env.MNN_BUILD_DIR }}/ai-summary-tools
+        run: |
+          bash tests/ai-summary/bootstrap-tools.sh
+          bash tests/ai-summary/run.sh
+          python3 tests/ai-summary/fixtures/validate_fixtures.py
+
       - name: Install the Android toolchain
         shell: bash
         run: |

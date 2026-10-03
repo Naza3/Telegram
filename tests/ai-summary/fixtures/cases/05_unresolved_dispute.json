@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "case_id": "05_unresolved_dispute",
+  "title": "保留未解决争议",
+  "synthetic": true,
+  "tags": [
+    "disagreement",
+    "no_conclusion"
+  ],
+  "scope": {
+    "dialog_id": -900005,
+    "topic_id": 0,
+    "timezone": "Asia/Shanghai",
+    "snapshot_at": "2026-10-03T12:00:00+08:00",
+    "description": "完全合成的当前群已选文字消息；按下列数组顺序生成 [mN]，不含真实用户数据。"
+  },
+  "messages": [
+    {
+      "id": 501,
+      "sender": "阿青",
+      "date": "2026-10-03T09:00:00+08:00",
+      "text": "我主张保留旧界面，用户更熟悉。"
+    },
+    {
+      "id": 502,
+      "sender": "阿蓝",
+      "date": "2026-10-03T09:00:01+08:00",
+      "text": "我反对，应该换新界面，旧版维护成本太高。"
+    },
+    {
+      "id": 503,
+      "sender": "主持人",
+      "date": "2026-10-03T09:00:02+08:00",
+      "text": "双方都先保留意见，今天不拍板。"
+    }
+  ],
+  "expected": {
+    "facts": [
+      {
+        "id": "f1",
+        "statement": "阿青支持旧界面，阿蓝支持新界面，存在意见分歧。",
+        "source_ids": [
+          501,
+          502
+        ],
+        "state": "disputed"
+      },
+      {
+        "id": "f2",
+        "statement": "今天不作最终决定。",
+        "source_ids": [
+          503
+        ],
+        "state": "confirmed"
+      }
+    ],
+    "tasks": [],
+    "no_final_conclusion": true,
+    "forbidden_claims": [
+      {
+        "id": "x1",
+        "statement": "全员同意更换界面",
+        "reason": "抹去了明确分歧。",
+        "related_source_ids": [
+          501,
+          502,
+          503
+        ]
+      }
+    ]
+  },
+  "review_notes": [
+    "接受不同措辞；人工核查事实、确定性与引用是否由相应原文支持。"
+  ]
+}

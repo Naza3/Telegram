@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "case_id": "23_unknown_completion",
+  "title": "接受与进度不等于完成",
+  "synthetic": true,
+  "tags": [
+    "status",
+    "uncertainty"
+  ],
+  "scope": {
+    "dialog_id": -900023,
+    "topic_id": 0,
+    "timezone": "Asia/Shanghai",
+    "snapshot_at": "2026-10-03T12:00:00+08:00",
+    "description": "完全合成的当前群已选文字消息；按下列数组顺序生成 [mN]，不含真实用户数据。"
+  },
+  "messages": [
+    {
+      "id": 2301,
+      "sender": "小陆",
+      "date": "2026-10-03T09:00:00+08:00",
+      "text": "我接手测试，已经跑了大约一半。"
+    },
+    {
+      "id": 2302,
+      "sender": "主持人",
+      "date": "2026-10-03T09:00:01+08:00",
+      "text": "剩余用例结果还未知，先不要写全部通过。"
+    }
+  ],
+  "expected": {
+    "facts": [
+      {
+        "id": "f1",
+        "statement": "小陆负责测试，约完成一半；剩余结果未知。",
+        "source_ids": [
+          2301,
+          2302
+        ],
+        "state": "unknown"
+      }
+    ],
+    "tasks": [
+      {
+        "id": "t1",
+        "description": "继续完成剩余测试",
+        "source_ids": [
+          2301,
+          2302
+        ],
+        "owner": "小陆",
+        "owner_source_ids": [
+          2301
+        ],
+        "deadline": null,
+        "deadline_source_ids": []
+      }
+    ],
+    "no_final_conclusion": true,
+    "forbidden_claims": [
+      {
+        "id": "x1",
+        "statement": "所有测试通过、测试已完成或今晚一定完成",
+        "reason": "进度/接受任务不能推出完成、成功或时间承诺。",
+        "related_source_ids": [
+          2301,
+          2302
+        ]
+      }
+    ]
+  },
+  "review_notes": [
+    "接受不同措辞；人工核查事实、确定性与引用是否由相应原文支持。"
+  ]
+}

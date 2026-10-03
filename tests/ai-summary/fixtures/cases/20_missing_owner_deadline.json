@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "case_id": "20_missing_owner_deadline",
+  "title": "明确任务但负责人和时间空缺",
+  "synthetic": true,
+  "tags": [
+    "owner",
+    "deadline",
+    "unknown"
+  ],
+  "scope": {
+    "dialog_id": -900020,
+    "topic_id": 0,
+    "timezone": "Asia/Shanghai",
+    "snapshot_at": "2026-10-03T12:00:00+08:00",
+    "description": "完全合成的当前群已选文字消息；按下列数组顺序生成 [mN]，不含真实用户数据。"
+  },
+  "messages": [
+    {
+      "id": 2001,
+      "sender": "主持人",
+      "date": "2026-10-03T09:00:00+08:00",
+      "text": "需要补一份故障复盘。"
+    },
+    {
+      "id": 2002,
+      "sender": "小丁",
+      "date": "2026-10-03T09:00:01+08:00",
+      "text": "先记录为待办，还没有负责人，也没有截止日期。"
+    }
+  ],
+  "expected": {
+    "facts": [
+      {
+        "id": "f1",
+        "statement": "故障复盘是待办，但负责人和期限未指定。",
+        "source_ids": [
+          2001,
+          2002
+        ],
+        "state": "confirmed"
+      }
+    ],
+    "tasks": [
+      {
+        "id": "t1",
+        "description": "补充故障复盘",
+        "source_ids": [
+          2001,
+          2002
+        ],
+        "owner": null,
+        "owner_source_ids": [],
+        "deadline": null,
+        "deadline_source_ids": []
+      }
+    ],
+    "no_final_conclusion": false,
+    "forbidden_claims": [
+      {
+        "id": "x1",
+        "statement": "主持人或小丁负责，今天下班前完成",
+        "reason": "发言者不自动成为负责人，不能编造时间。",
+        "related_source_ids": [
+          2001,
+          2002
+        ]
+      }
+    ]
+  },
+  "review_notes": [
+    "接受不同措辞；人工核查事实、确定性与引用是否由相应原文支持。"
+  ]
+}

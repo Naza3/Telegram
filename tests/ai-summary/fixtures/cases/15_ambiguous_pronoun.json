@@ -1,0 +1,68 @@
+{
+  "schema_version": 1,
+  "case_id": "15_ambiguous_pronoun",
+  "title": "代词歧义不能猜负责人",
+  "synthetic": true,
+  "tags": [
+    "owner",
+    "uncertainty"
+  ],
+  "scope": {
+    "dialog_id": -900015,
+    "topic_id": 0,
+    "timezone": "Asia/Shanghai",
+    "snapshot_at": "2026-10-03T12:00:00+08:00",
+    "description": "完全合成的当前群已选文字消息；按下列数组顺序生成 [mN]，不含真实用户数据。"
+  },
+  "messages": [
+    {
+      "id": 1501,
+      "sender": "小黄",
+      "date": "2026-10-03T09:00:00+08:00",
+      "text": "小林和小周都看过这个问题。"
+    },
+    {
+      "id": 1502,
+      "sender": "小黄",
+      "date": "2026-10-03T09:00:01+08:00",
+      "text": "他可能会处理，但我还没跟本人确认。"
+    },
+    {
+      "id": 1503,
+      "sender": "主持人",
+      "date": "2026-10-03T09:00:02+08:00",
+      "text": "负责人暂时空着，等明确答复。"
+    }
+  ],
+  "expected": {
+    "facts": [
+      {
+        "id": "f1",
+        "statement": "问题负责人尚未确认，不能根据“他”确定具体人员。",
+        "source_ids": [
+          1501,
+          1502,
+          1503
+        ],
+        "state": "unknown"
+      }
+    ],
+    "tasks": [],
+    "no_final_conclusion": true,
+    "forbidden_claims": [
+      {
+        "id": "x1",
+        "statement": "小林或小周已确定接手",
+        "reason": "原文明示未确认且代词歧义。",
+        "related_source_ids": [
+          1501,
+          1502,
+          1503
+        ]
+      }
+    ]
+  },
+  "review_notes": [
+    "接受不同措辞；人工核查事实、确定性与引用是否由相应原文支持。"
+  ]
+}

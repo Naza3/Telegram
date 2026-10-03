@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "case_id": "03_revised_owner_deadline",
+  "title": "改口后的负责人和期限",
+  "synthetic": true,
+  "tags": [
+    "correction",
+    "owner",
+    "deadline"
+  ],
+  "scope": {
+    "dialog_id": -900003,
+    "topic_id": 0,
+    "timezone": "Asia/Shanghai",
+    "snapshot_at": "2026-10-03T12:00:00+08:00",
+    "description": "完全合成的当前群已选文字消息；按下列数组顺序生成 [mN]，不含真实用户数据。"
+  },
+  "messages": [
+    {
+      "id": 301,
+      "sender": "主持人",
+      "date": "2026-10-03T09:00:00+08:00",
+      "text": "先安排小王在 10 月 6 日交报告。"
+    },
+    {
+      "id": 302,
+      "sender": "主持人",
+      "date": "2026-10-03T09:00:01+08:00",
+      "text": "更正：由小李负责，不是小王，截止改为 10 月 8 日。"
+    },
+    {
+      "id": 303,
+      "sender": "小李",
+      "date": "2026-10-03T09:00:02+08:00",
+      "text": "收到，10 月 8 日提交报告。"
+    }
+  ],
+  "expected": {
+    "facts": [
+      {
+        "id": "f1",
+        "statement": "报告负责人已从小王改为小李，期限由 10 月 6 日改为 10 月 8 日。",
+        "source_ids": [
+          301,
+          302,
+          303
+        ],
+        "state": "corrected"
+      }
+    ],
+    "tasks": [
+      {
+        "id": "t1",
+        "description": "提交报告",
+        "source_ids": [
+          302,
+          303
+        ],
+        "owner": "小李",
+        "owner_source_ids": [
+          302,
+          303
+        ],
+        "deadline": "10 月 8 日",
+        "deadline_source_ids": [
+          302,
+          303
+        ]
+      }
+    ],
+    "no_final_conclusion": false,
+    "forbidden_claims": [
+      {
+        "id": "x1",
+        "statement": "小王仍负责或期限仍为 10 月 6 日",
+        "reason": "被后续更正取代。",
+        "related_source_ids": [
+          301,
+          302,
+          303
+        ]
+      }
+    ]
+  },
+  "review_notes": [
+    "接受不同措辞；人工核查事实、确定性与引用是否由相应原文支持。"
+  ]
+}

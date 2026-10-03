@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "case_id": "24_link_text_only",
+  "title": "链接原文不能补出网页事实",
+  "synthetic": true,
+  "tags": [
+    "link",
+    "uncertainty",
+    "no_conclusion"
+  ],
+  "scope": {
+    "dialog_id": -900024,
+    "topic_id": 0,
+    "timezone": "Asia/Shanghai",
+    "snapshot_at": "2026-10-03T12:00:00+08:00",
+    "description": "完全合成的当前群已选文字消息；按下列数组顺序生成 [mN]，不含真实用户数据。"
+  },
+  "messages": [
+    {
+      "id": 2401,
+      "sender": "小苏",
+      "date": "2026-10-03T09:00:00+08:00",
+      "text": "参考链接 https://example.invalid/report ，我还没有读内容。"
+    },
+    {
+      "id": 2402,
+      "sender": "主持人",
+      "date": "2026-10-03T09:00:01+08:00",
+      "text": "群里没有贴报告正文，暂时无法确认报告结论。"
+    }
+  ],
+  "expected": {
+    "facts": [
+      {
+        "id": "f1",
+        "statement": "群里只分享了链接，没有报告正文，报告结论未知。",
+        "source_ids": [
+          2401,
+          2402
+        ],
+        "state": "unknown"
+      }
+    ],
+    "tasks": [],
+    "no_final_conclusion": true,
+    "forbidden_claims": [
+      {
+        "id": "x1",
+        "statement": "报告确认收入增长 30%，作者是小苏",
+        "reason": "原文没有报告内容；禁止把网址或分享者当成正文/作者证据。",
+        "related_source_ids": [
+          2401,
+          2402
+        ]
+      }
+    ]
+  },
+  "review_notes": [
+    "不得访问链接。example.invalid 为合成域名。这里只评测消息原文，不评测网页抓取。"
+  ]
+}

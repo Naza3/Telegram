@@ -1,0 +1,69 @@
+{
+  "schema_version": 1,
+  "case_id": "02_explicit_negation",
+  "title": "明确否定不能翻转成肯定",
+  "synthetic": true,
+  "tags": [
+    "negation",
+    "no_conclusion"
+  ],
+  "scope": {
+    "dialog_id": -900002,
+    "topic_id": 0,
+    "timezone": "Asia/Shanghai",
+    "snapshot_at": "2026-10-03T12:00:00+08:00",
+    "description": "完全合成的当前群已选文字消息；按下列数组顺序生成 [mN]，不含真实用户数据。"
+  },
+  "messages": [
+    {
+      "id": 201,
+      "sender": "小陈",
+      "date": "2026-10-03T09:00:00+08:00",
+      "text": "今天不发布，不要把测试通过理解为可以上线。"
+    },
+    {
+      "id": 202,
+      "sender": "小周",
+      "date": "2026-10-03T09:00:01+08:00",
+      "text": "明白，测试通过了，但发布还没审批。"
+    }
+  ],
+  "expected": {
+    "facts": [
+      {
+        "id": "f1",
+        "statement": "测试通过，但发布未获审批，今天不发布。",
+        "source_ids": [
+          201,
+          202
+        ],
+        "state": "confirmed"
+      }
+    ],
+    "tasks": [],
+    "no_final_conclusion": true,
+    "forbidden_claims": [
+      {
+        "id": "x1",
+        "statement": "今天发布或已经批准上线",
+        "reason": "与明确否定相反。",
+        "related_source_ids": [
+          201,
+          202
+        ]
+      },
+      {
+        "id": "x2",
+        "statement": "明天由小周上线",
+        "reason": "原文未给新的负责人和日期。",
+        "related_source_ids": [
+          201,
+          202
+        ]
+      }
+    ]
+  },
+  "review_notes": [
+    "接受不同措辞；人工核查事实、确定性与引用是否由相应原文支持。"
+  ]
+}

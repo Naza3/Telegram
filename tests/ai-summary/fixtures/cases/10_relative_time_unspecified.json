@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "case_id": "10_relative_time_unspecified",
+  "title": "相对时间不能编造具体钟点",
+  "synthetic": true,
+  "tags": [
+    "deadline",
+    "uncertainty"
+  ],
+  "scope": {
+    "dialog_id": -900010,
+    "topic_id": 0,
+    "timezone": "Asia/Shanghai",
+    "snapshot_at": "2026-10-03T12:00:00+08:00",
+    "description": "完全合成的当前群已选文字消息；按下列数组顺序生成 [mN]，不含真实用户数据。"
+  },
+  "messages": [
+    {
+      "id": 1001,
+      "sender": "小许",
+      "date": "2026-10-03T09:00:00+08:00",
+      "text": "我这周内补充测试记录。"
+    },
+    {
+      "id": 1002,
+      "sender": "小田",
+      "date": "2026-10-03T09:00:01+08:00",
+      "text": "好，没有规定具体几点。"
+    }
+  ],
+  "expected": {
+    "facts": [
+      {
+        "id": "f1",
+        "statement": "小许承诺这周内补充测试记录，具体钟点未指定。",
+        "source_ids": [
+          1001,
+          1002
+        ],
+        "state": "confirmed"
+      }
+    ],
+    "tasks": [
+      {
+        "id": "t1",
+        "description": "补充测试记录",
+        "source_ids": [
+          1001
+        ],
+        "owner": "小许",
+        "owner_source_ids": [
+          1001
+        ],
+        "deadline": "这周内",
+        "deadline_source_ids": [
+          1001
+        ]
+      }
+    ],
+    "no_final_conclusion": false,
+    "forbidden_claims": [
+      {
+        "id": "x1",
+        "statement": "截止 2026-10-04 18:00",
+        "reason": "相对期限未授权推算具体日时。",
+        "related_source_ids": [
+          1001,
+          1002
+        ]
+      }
+    ]
+  },
+  "review_notes": [
+    "接受不同措辞；人工核查事实、确定性与引用是否由相应原文支持。"
+  ]
+}

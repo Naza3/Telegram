@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "case_id": "17_numbers_and_units",
+  "title": "数字更正与单位",
+  "synthetic": true,
+  "tags": [
+    "correction",
+    "numbers"
+  ],
+  "scope": {
+    "dialog_id": -900017,
+    "topic_id": 0,
+    "timezone": "Asia/Shanghai",
+    "snapshot_at": "2026-10-03T12:00:00+08:00",
+    "description": "完全合成的当前群已选文字消息；按下列数组顺序生成 [mN]，不含真实用户数据。"
+  },
+  "messages": [
+    {
+      "id": 1701,
+      "sender": "小孙",
+      "date": "2026-10-03T09:00:00+08:00",
+      "text": "预算是 15 万元。"
+    },
+    {
+      "id": 1702,
+      "sender": "小孙",
+      "date": "2026-10-03T09:00:01+08:00",
+      "text": "刚才少写一位，是 150 万元人民币，不是 15 万美元。"
+    },
+    {
+      "id": 1703,
+      "sender": "主持人",
+      "date": "2026-10-03T09:00:02+08:00",
+      "text": "按更正后的 150 万元人民币记录。"
+    }
+  ],
+  "expected": {
+    "facts": [
+      {
+        "id": "f1",
+        "statement": "最终记录预算为 150 万元人民币。",
+        "source_ids": [
+          1702,
+          1703
+        ],
+        "state": "corrected"
+      }
+    ],
+    "tasks": [],
+    "no_final_conclusion": false,
+    "forbidden_claims": [
+      {
+        "id": "x1",
+        "statement": "预算 15 万元、150 万美元或 150 元",
+        "reason": "数值或币种错误。",
+        "related_source_ids": [
+          1701,
+          1702,
+          1703
+        ]
+      }
+    ]
+  },
+  "review_notes": [
+    "接受不同措辞；人工核查事实、确定性与引用是否由相应原文支持。"
+  ]
+}

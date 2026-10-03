@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "case_id": "06_handoff_accepted",
+  "title": "已接受的任务转交",
+  "synthetic": true,
+  "tags": [
+    "handoff",
+    "owner"
+  ],
+  "scope": {
+    "dialog_id": -900006,
+    "topic_id": 0,
+    "timezone": "Asia/Shanghai",
+    "snapshot_at": "2026-10-03T12:00:00+08:00",
+    "description": "完全合成的当前群已选文字消息；按下列数组顺序生成 [mN]，不含真实用户数据。"
+  },
+  "messages": [
+    {
+      "id": 601,
+      "sender": "小宋",
+      "date": "2026-10-03T09:00:00+08:00",
+      "text": "我把资料整理转交给小唐，可以吗？"
+    },
+    {
+      "id": 602,
+      "sender": "小唐",
+      "date": "2026-10-03T09:00:01+08:00",
+      "text": "可以，我接手资料整理。"
+    },
+    {
+      "id": 603,
+      "sender": "小宋",
+      "date": "2026-10-03T09:00:02+08:00",
+      "text": "好，我不再负责这项任务。"
+    }
+  ],
+  "expected": {
+    "facts": [
+      {
+        "id": "f1",
+        "statement": "资料整理已由小宋转交小唐，小唐已接受。",
+        "source_ids": [
+          601,
+          602,
+          603
+        ],
+        "state": "confirmed"
+      }
+    ],
+    "tasks": [
+      {
+        "id": "t1",
+        "description": "整理资料",
+        "source_ids": [
+          601,
+          602,
+          603
+        ],
+        "owner": "小唐",
+        "owner_source_ids": [
+          602
+        ],
+        "deadline": null,
+        "deadline_source_ids": []
+      }
+    ],
+    "no_final_conclusion": false,
+    "forbidden_claims": [
+      {
+        "id": "x1",
+        "statement": "小宋与小唐共同负责或明天下午完成",
+        "reason": "原文取消小宋责任，没有期限。",
+        "related_source_ids": [
+          601,
+          602,
+          603
+        ]
+      }
+    ]
+  },
+  "review_notes": [
+    "接受不同措辞；人工核查事实、确定性与引用是否由相应原文支持。"
+  ]
+}

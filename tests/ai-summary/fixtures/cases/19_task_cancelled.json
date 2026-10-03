@@ -1,0 +1,67 @@
+{
+  "schema_version": 1,
+  "case_id": "19_task_cancelled",
+  "title": "撤销的任务不再作为待办",
+  "synthetic": true,
+  "tags": [
+    "cancellation",
+    "no_task"
+  ],
+  "scope": {
+    "dialog_id": -900019,
+    "topic_id": 0,
+    "timezone": "Asia/Shanghai",
+    "snapshot_at": "2026-10-03T12:00:00+08:00",
+    "description": "完全合成的当前群已选文字消息；按下列数组顺序生成 [mN]，不含真实用户数据。"
+  },
+  "messages": [
+    {
+      "id": 1901,
+      "sender": "主持人",
+      "date": "2026-10-03T09:00:00+08:00",
+      "text": "小方先准备线下场地报价。"
+    },
+    {
+      "id": 1902,
+      "sender": "主持人",
+      "date": "2026-10-03T09:00:01+08:00",
+      "text": "活动已取消，场地报价任务也撤销，不需要再做。"
+    },
+    {
+      "id": 1903,
+      "sender": "小方",
+      "date": "2026-10-03T09:00:02+08:00",
+      "text": "收到，我停止这项工作。"
+    }
+  ],
+  "expected": {
+    "facts": [
+      {
+        "id": "f1",
+        "statement": "活动及场地报价任务均已取消，小方停止工作。",
+        "source_ids": [
+          1902,
+          1903
+        ],
+        "state": "cancelled"
+      }
+    ],
+    "tasks": [],
+    "no_final_conclusion": false,
+    "forbidden_claims": [
+      {
+        "id": "x1",
+        "statement": "小方仍需准备报价或已完成报价",
+        "reason": "停止/撤销不等于仍需执行或已完成。",
+        "related_source_ids": [
+          1901,
+          1902,
+          1903
+        ]
+      }
+    ]
+  },
+  "review_notes": [
+    "接受不同措辞；人工核查事实、确定性与引用是否由相应原文支持。"
+  ]
+}

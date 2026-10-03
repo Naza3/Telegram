@@ -1,0 +1,78 @@
+{
+  "schema_version": 1,
+  "case_id": "09_conditional_task",
+  "title": "保留任务的前提条件",
+  "synthetic": true,
+  "tags": [
+    "conditional",
+    "deadline",
+    "uncertainty"
+  ],
+  "scope": {
+    "dialog_id": -900009,
+    "topic_id": 0,
+    "timezone": "Asia/Shanghai",
+    "snapshot_at": "2026-10-03T12:00:00+08:00",
+    "description": "完全合成的当前群已选文字消息；按下列数组顺序生成 [mN]，不含真实用户数据。"
+  },
+  "messages": [
+    {
+      "id": 901,
+      "sender": "小郑",
+      "date": "2026-10-03T09:00:00+08:00",
+      "text": "如果安全检查通过，我会在明天下午启动灰度；没通过就不启动。"
+    },
+    {
+      "id": 902,
+      "sender": "小顾",
+      "date": "2026-10-03T09:00:01+08:00",
+      "text": "目前安全检查还没有结果。"
+    }
+  ],
+  "expected": {
+    "facts": [
+      {
+        "id": "f1",
+        "statement": "灰度启动取决于安全检查通过，目前结果未知。",
+        "source_ids": [
+          901,
+          902
+        ],
+        "state": "unknown"
+      }
+    ],
+    "tasks": [
+      {
+        "id": "t1",
+        "description": "仅在安全检查通过后启动灰度",
+        "source_ids": [
+          901,
+          902
+        ],
+        "owner": "小郑",
+        "owner_source_ids": [
+          901
+        ],
+        "deadline": "明天下午（以安全检查通过为前提）",
+        "deadline_source_ids": [
+          901
+        ]
+      }
+    ],
+    "no_final_conclusion": true,
+    "forbidden_claims": [
+      {
+        "id": "x1",
+        "statement": "安全检查已经通过，明天下午必定启动",
+        "reason": "将未知条件当成已满足。",
+        "related_source_ids": [
+          901,
+          902
+        ]
+      }
+    ]
+  },
+  "review_notes": [
+    "接受不同措辞；人工核查事实、确定性与引用是否由相应原文支持。"
+  ]
+}

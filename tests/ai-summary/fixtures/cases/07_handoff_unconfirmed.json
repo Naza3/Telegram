@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "case_id": "07_handoff_unconfirmed",
+  "title": "尚未接受的转交提议",
+  "synthetic": true,
+  "tags": [
+    "handoff",
+    "uncertainty",
+    "no_conclusion"
+  ],
+  "scope": {
+    "dialog_id": -900007,
+    "topic_id": 0,
+    "timezone": "Asia/Shanghai",
+    "snapshot_at": "2026-10-03T12:00:00+08:00",
+    "description": "完全合成的当前群已选文字消息；按下列数组顺序生成 [mN]，不含真实用户数据。"
+  },
+  "messages": [
+    {
+      "id": 701,
+      "sender": "小宋",
+      "date": "2026-10-03T09:00:00+08:00",
+      "text": "能否让小唐接手整理资料？"
+    },
+    {
+      "id": 702,
+      "sender": "主持人",
+      "date": "2026-10-03T09:00:01+08:00",
+      "text": "先问小唐本人，现在还没确认。"
+    }
+  ],
+  "expected": {
+    "facts": [
+      {
+        "id": "f1",
+        "statement": "转交小唐只是待确认提议。",
+        "source_ids": [
+          701,
+          702
+        ],
+        "state": "proposed"
+      }
+    ],
+    "tasks": [],
+    "no_final_conclusion": true,
+    "forbidden_claims": [
+      {
+        "id": "x1",
+        "statement": "小唐已承诺接手或是已确定负责人",
+        "reason": "没有小唐的接受或确定分派。",
+        "related_source_ids": [
+          701,
+          702
+        ]
+      }
+    ]
+  },
+  "review_notes": [
+    "接受不同措辞；人工核查事实、确定性与引用是否由相应原文支持。"
+  ]
+}

@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "case_id": "16_reported_claim",
+  "title": "转述不升级为核实事实",
+  "synthetic": true,
+  "tags": [
+    "attribution",
+    "uncertainty"
+  ],
+  "scope": {
+    "dialog_id": -900016,
+    "topic_id": 0,
+    "timezone": "Asia/Shanghai",
+    "snapshot_at": "2026-10-03T12:00:00+08:00",
+    "description": "完全合成的当前群已选文字消息；按下列数组顺序生成 [mN]，不含真实用户数据。"
+  },
+  "messages": [
+    {
+      "id": 1601,
+      "sender": "小赵",
+      "date": "2026-10-03T09:00:00+08:00",
+      "text": "听供应商说周末能到货，我还没有看到物流单。"
+    },
+    {
+      "id": 1602,
+      "sender": "小钱",
+      "date": "2026-10-03T09:00:01+08:00",
+      "text": "请区分承诺和事实，目前不能确认已经发货。"
+    }
+  ],
+  "expected": {
+    "facts": [
+      {
+        "id": "f1",
+        "statement": "供应商称周末可到货，但无物流单，是否已发货无法确认。",
+        "source_ids": [
+          1601,
+          1602
+        ],
+        "state": "reported"
+      }
+    ],
+    "tasks": [],
+    "no_final_conclusion": true,
+    "forbidden_claims": [
+      {
+        "id": "x1",
+        "statement": "货物已发出并确定周末到达",
+        "reason": "把未核实转述写成已确认事实。",
+        "related_source_ids": [
+          1601,
+          1602
+        ]
+      }
+    ]
+  },
+  "review_notes": [
+    "接受不同措辞；人工核查事实、确定性与引用是否由相应原文支持。"
+  ]
+}

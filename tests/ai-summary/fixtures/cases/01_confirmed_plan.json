@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "case_id": "01_confirmed_plan",
+  "title": "明确决定、负责人和绝对时间",
+  "synthetic": true,
+  "tags": [
+    "decision",
+    "owner",
+    "deadline"
+  ],
+  "scope": {
+    "dialog_id": -900001,
+    "topic_id": 0,
+    "timezone": "Asia/Shanghai",
+    "snapshot_at": "2026-10-03T12:00:00+08:00",
+    "description": "完全合成的当前群已选文字消息；按下列数组顺序生成 [mN]，不含真实用户数据。"
+  },
+  "messages": [
+    {
+      "id": 101,
+      "sender": "主持人",
+      "date": "2026-10-03T09:00:00+08:00",
+      "text": "确认采用方案 B，小林负责提交清单，截止 2026-10-05 18:00。"
+    },
+    {
+      "id": 102,
+      "sender": "小林",
+      "date": "2026-10-03T09:00:01+08:00",
+      "text": "收到，我会按这个截止时间提交方案 B 的清单。"
+    }
+  ],
+  "expected": {
+    "facts": [
+      {
+        "id": "f1",
+        "statement": "已决定采用方案 B。",
+        "source_ids": [
+          101
+        ],
+        "state": "confirmed"
+      },
+      {
+        "id": "f2",
+        "statement": "小林已接受清单任务。",
+        "source_ids": [
+          101,
+          102
+        ],
+        "state": "confirmed"
+      }
+    ],
+    "tasks": [
+      {
+        "id": "t1",
+        "description": "提交方案 B 的清单",
+        "source_ids": [
+          101,
+          102
+        ],
+        "owner": "小林",
+        "owner_source_ids": [
+          101,
+          102
+        ],
+        "deadline": "2026-10-05 18:00",
+        "deadline_source_ids": [
+          101
+        ]
+      }
+    ],
+    "no_final_conclusion": false,
+    "forbidden_claims": [
+      {
+        "id": "x1",
+        "statement": "采用方案 A 或已提交清单",
+        "reason": "原文选择 B；接受任务不等于完成。",
+        "related_source_ids": [
+          101,
+          102
+        ]
+      }
+    ]
+  },
+  "review_notes": [
+    "接受不同措辞；人工核查事实、确定性与引用是否由相应原文支持。"
+  ]
+}

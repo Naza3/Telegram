@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "case_id": "04_proposal_only",
+  "title": "建议不等于已决定",
+  "synthetic": true,
+  "tags": [
+    "proposal",
+    "uncertainty",
+    "no_conclusion"
+  ],
+  "scope": {
+    "dialog_id": -900004,
+    "topic_id": 0,
+    "timezone": "Asia/Shanghai",
+    "snapshot_at": "2026-10-03T12:00:00+08:00",
+    "description": "完全合成的当前群已选文字消息；按下列数组顺序生成 [mN]，不含真实用户数据。"
+  },
+  "messages": [
+    {
+      "id": 401,
+      "sender": "小雨",
+      "date": "2026-10-03T09:00:00+08:00",
+      "text": "建议试试方案 C，可能便宜些。"
+    },
+    {
+      "id": 402,
+      "sender": "小白",
+      "date": "2026-10-03T09:00:01+08:00",
+      "text": "先等报价再决定。"
+    }
+  ],
+  "expected": {
+    "facts": [
+      {
+        "id": "f1",
+        "statement": "方案 C 只是建议，待报价后再决定。",
+        "source_ids": [
+          401,
+          402
+        ],
+        "state": "proposed"
+      }
+    ],
+    "tasks": [],
+    "no_final_conclusion": true,
+    "forbidden_claims": [
+      {
+        "id": "x1",
+        "statement": "已经采用方案 C，成本已降低",
+        "reason": "尚无报价或决策。",
+        "related_source_ids": [
+          401,
+          402
+        ]
+      }
+    ]
+  },
+  "review_notes": [
+    "接受不同措辞；人工核查事实、确定性与引用是否由相应原文支持。"
+  ]
+}

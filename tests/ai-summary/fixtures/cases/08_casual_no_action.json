@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "case_id": "08_casual_no_action",
+  "title": "闲聊没有结论或待办",
+  "synthetic": true,
+  "tags": [
+    "no_conclusion",
+    "no_task"
+  ],
+  "scope": {
+    "dialog_id": -900008,
+    "topic_id": 0,
+    "timezone": "Asia/Shanghai",
+    "snapshot_at": "2026-10-03T12:00:00+08:00",
+    "description": "完全合成的当前群已选文字消息；按下列数组顺序生成 [mN]，不含真实用户数据。"
+  },
+  "messages": [
+    {
+      "id": 801,
+      "sender": "小麦",
+      "date": "2026-10-03T09:00:00+08:00",
+      "text": "今天的云看起来像一只猫。"
+    },
+    {
+      "id": 802,
+      "sender": "小禾",
+      "date": "2026-10-03T09:00:01+08:00",
+      "text": "我看到的像一条鱼。"
+    }
+  ],
+  "expected": {
+    "facts": [
+      {
+        "id": "f1",
+        "statement": "大家在闲聊云的形状，各自描述不同。",
+        "source_ids": [
+          801,
+          802
+        ],
+        "state": "reported"
+      }
+    ],
+    "tasks": [],
+    "no_final_conclusion": true,
+    "forbidden_claims": [
+      {
+        "id": "x1",
+        "statement": "确定开展猫主题项目，交给小麦明天完成",
+        "reason": "闲聊未形成项目、责任或期限。",
+        "related_source_ids": [
+          801,
+          802
+        ]
+      }
+    ]
+  },
+  "review_notes": [
+    "接受不同措辞；人工核查事实、确定性与引用是否由相应原文支持。"
+  ]
+}

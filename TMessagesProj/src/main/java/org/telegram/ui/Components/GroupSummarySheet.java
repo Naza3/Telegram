@@ -40,6 +40,7 @@ import org.telegram.ui.ActionBar.BaseFragment;
 import org.telegram.ui.ActionBar.Theme;
 
 import java.util.ArrayList;
+import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -312,30 +313,104 @@ public final class GroupSummarySheet {
         TextView validation = addText("", false);
         validation.setTextColor(color(Theme.key_text_RedRegular));
         validation.setVisibility(View.GONE);
+        addAction("测试连接", () -> {
+            AiSummarySettings.Config snapshot = readSettingsInput(address, model, key, outputTokens, validation);
+            if (snapshot != null) {
+                testConnection(snapshot);
+            }
+        });
         addAction("保存设置", () -> {
-            int tokens;
-            try {
-                tokens = Integer.parseInt(outputTokens.getText().toString().trim());
-            } catch (NumberFormatException ignored) {
-                tokens = 0;
+            AiSummarySettings.Config updated = readSettingsInput(address, model, key, outputTokens, validation);
+            if (updated != null) {
+                saveSettings(updated);
             }
-            if (tokens < 64 || tokens > 8192) {
-                outputTokens.setError("请输入 64–8192 之间的值");
-                outputTokens.requestFocus();
-                return;
-            }
-            AiSummarySettings.Config updated = new AiSummarySettings.Config(
-                    address.getText().toString().trim(),
-                    model.getText().toString().trim(), key.getText().toString().trim(), tokens);
-            String error = AiSummarySettings.validate(updated);
-            if (error != null) {
-                validation.setText(error);
-                validation.setVisibility(View.VISIBLE);
-                return;
-            }
-            saveSettings(updated);
         });
         addAction("返回范围选择", this::showSelection);
+    }
+
+    private AiSummarySettings.Config readSettingsInput(EditTextBoldCursor address, EditTextBoldCursor model,
+                                                       EditTextBoldCursor key, EditTextBoldCursor outputTokens,
+                                                       TextView validation) {
+        validation.setVisibility(View.GONE);
+        int tokens;
+        try {
+            tokens = Integer.parseInt(outputTokens.getText().toString().trim());
+        } catch (NumberFormatException ignored) {
+            tokens = 0;
+        }
+        if (tokens < 64 || tokens > 8192) {
+            outputTokens.setError("请输入 64–8192 之间的值");
+            outputTokens.requestFocus();
+            return null;
+        }
+        AiSummarySettings.Config config = new AiSummarySettings.Config(address.getText().toString().trim(),
+                model.getText().toString().trim(), key.getText().toString().trim(), tokens);
+        String error = AiSummarySettings.validate(config);
+        if (error != null) {
+            validation.setText(error);
+            validation.setVisibility(View.VISIBLE);
+            return null;
+        }
+        return config;
+    }
+
+    private void testConnection(AiSummarySettings.Config config) {
+        if (closed || !checkAccountOwner()) {
+            return;
+        }
+        cancelWork();
+        final int generation = operation;
+        clearContent();
+        addText("正在测试 MNN API 连接…", true);
+        addText("使用当前填写的接口配置发送简短测试文本，不读取聊天消息，也不保存设置。", false);
+        addText("请保持 Telegram 在前台，并确保 MNN Chat 已加载模型、开启 API 服务。", false);
+        addAction("取消测试并返回设置", () -> returnToSettings(config));
+        client = new AiSummaryClient();
+        client.testConnection(config, new AiSummaryClient.DiagnosticCallback() {
+            @Override
+            public void onSuccess(AiSummaryClient.DiagnosticResult result) {
+                if (active(generation)) {
+                    client = null;
+                    showConnectionResult(config, result, null);
+                }
+            }
+
+            @Override
+            public void onError(String error) {
+                if (active(generation)) {
+                    client = null;
+                    showConnectionResult(config, null, error);
+                }
+            }
+        });
+    }
+
+    private void showConnectionResult(AiSummarySettings.Config config,
+                                      AiSummaryClient.DiagnosticResult result, String error) {
+        clearContent();
+        if (result != null) {
+            addText("连接与文本生成测试通过", true);
+            addText(String.format(Locale.US, "请求耗时：%.1f 秒", Math.max(0L, result.elapsedMs) / 1000.0), false);
+            if (result.reportedModel == null || result.reportedModel.trim().isEmpty()) {
+                addText("服务未返回模型标识，无法确认实际加载的模型。", false);
+            } else {
+                addText("服务返回的模型标识：" + result.reportedModel, false);
+            }
+        } else {
+            addText("连接测试未通过", true);
+            addText(error, false);
+        }
+        addText("测试不会保存设置；返回设置后可修改或保存当前配置。", false);
+        addAction(result != null ? "再次测试" : "重试连接测试", () -> testConnection(config));
+        addAction("返回设置", () -> returnToSettings(config));
+    }
+
+    private void returnToSettings(AiSummarySettings.Config config) {
+        if (closed || !checkAccountOwner()) {
+            return;
+        }
+        cancelWork();
+        showSettings(config);
     }
 
     private void saveSettings(AiSummarySettings.Config config) {

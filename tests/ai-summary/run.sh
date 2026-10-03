@@ -17,13 +17,10 @@ fi
 mapfile -d '' stub_files < <(find "$test_dir/stubs" -name '*.java' -print0)
 mapfile -d '' test_files < <(find "$test_dir" -maxdepth 1 -name '*Test.java' -print0)
 production_dir="$repo_dir/TMessagesProj/src/main/java/org/telegram/messenger/ai"
+mapfile -d '' production_files < <(find "$production_dir" -maxdepth 1 -name '*.java' ! -name 'AiSummarySecretStore.java' -print0)
 java -jar "$ecj_jar" -17 -encoding UTF-8 -warn:none -cp "$json_jar" -d "$classes_dir" \
     "${stub_files[@]}" "${test_files[@]}" \
-    "$production_dir/SummaryMessage.java" \
-    "$production_dir/SummaryHistoryLoader.java" \
-    "$production_dir/AiSummarySettings.java" \
-    "$production_dir/AiSummaryPrompt.java" \
-    "$production_dir/AiSummaryClient.java"
+    "${production_files[@]}"
 
 for test_file in "${test_files[@]}"; do
     test_class="$(basename -- "$test_file" .java)"

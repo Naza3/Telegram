@@ -203,6 +203,7 @@ public final class GroupSummarySheet {
     private boolean viewingCachedResult;
     private SummaryFilter.Options filterOptions = SummaryFilter.Options.DEFAULT;
     private boolean summaryFiltered;
+    private SummaryQuestionSheet questionSheet;
     private boolean closed;
     private int operation;
 
@@ -291,6 +292,7 @@ public final class GroupSummarySheet {
 
     private void cancelWork() {
         operation++;
+        closeQuestions();
         closeSourcePreview();
         pendingSourceUpdates.clear();
         stopProgressUpdates();
@@ -311,6 +313,29 @@ public final class GroupSummarySheet {
             client.cancel();
             client = null;
         }
+    }
+
+    private void closeQuestions() {
+        SummaryQuestionSheet previous = questionSheet;
+        questionSheet = null;
+        if (previous != null) previous.dismiss();
+    }
+
+    private void showQuestions() {
+        if (!active(operation) || sourceSnapshotInvalid || summaryHistory == null
+                || !summaryHistory.complete || sourceMessages == null || sourceMessages.isEmpty()
+                || summaryPrompt == null || summaryConfig == null) return;
+        if (MessagesController.getInstance(account).isPeerNoForwards(dialogId)) {
+            onAccessRevoked();
+            return;
+        }
+        if (questionSheet != null && questionSheet.isShowing()) return;
+        closeSourcePreview();
+        final int generation = operation;
+        questionSheet = SummaryQuestionSheet.show(fragment, account, ownerId, summaryConfig,
+                new ArrayList<>(sourceMessages), summaryPrompt, (source, reference) -> {
+                    if (active(generation) && !sourceSnapshotInvalid) showSourcePreview(source, reference);
+                });
     }
 
     public void onSourceDeleted(int messageId) {
@@ -1618,6 +1643,11 @@ public final class GroupSummarySheet {
         result.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 16);
         result.setMovementMethod(LinkMovementMethod.getInstance());
         result.setLinksClickable(true);
+        if (summaryHistory != null && summaryHistory.complete && sourceMessages != null && !sourceMessages.isEmpty()
+                && (resultCommitted || viewingCachedResult || summaryRange.mode == RangeMode.REPLAY)) {
+            addAction("追问本次消息", this::showQuestions);
+            addText("追问仅依据这次实际发送文字在生成时的原文快照，最多 5 轮；范围外消息及未观察到的后续修改不会自动同步。点击引用仍会重新核验原消息。", false);
+        }
         if (!viewingCachedResult && summaryHistory != null && summaryHistory.complete && summaryHistory.hasMore
                 && !(summaryRange.mode == RangeMode.SINCE && summaryFiltered)
                 && (summaryRange.mode == RangeMode.SINCE || summaryRange.mode == RangeMode.UNREAD

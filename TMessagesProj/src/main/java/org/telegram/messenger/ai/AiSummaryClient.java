@@ -146,10 +146,25 @@ public final class AiSummaryClient {
 
     public synchronized void summarize(AiSummarySettings.Config config, List<SummaryMessage> messages,
                                        PromptOptions options, Callback callback) {
+        startTask(config, messages, options, null, null, false, callback);
+    }
+
+    /** Answers against exactly the supplied source snapshot; completed history is copied once. */
+    public synchronized void ask(AiSummarySettings.Config config, List<SummaryMessage> messages,
+                                 PromptOptions options, String question,
+                                 List<SummaryQuestionPrompt.Turn> history, Callback callback) {
+        startTask(config, messages, options, question, history, true, callback);
+    }
+
+    private void startTask(AiSummarySettings.Config config, List<SummaryMessage> messages,
+                           PromptOptions options, String question, List<SummaryQuestionPrompt.Turn> history,
+                           boolean questionTask, Callback callback) {
         cancel();
         final int request = generation;
         final ArrayList<SummaryMessage> snapshot = messages == null ? null : new ArrayList<>(messages);
         final PromptOptions direction = options; // Immutable and fixed for all source/merge requests.
+        final List<SummaryQuestionPrompt.Turn> conversation = history == null ? null : new ArrayList<>(history);
+        final String systemPrompt = questionTask ? SummaryQuestionPrompt.SYSTEM_PROMPT : AiSummaryPrompt.SYSTEM_PROMPT;
         task = EXECUTOR.submit(() -> {
             long started = System.nanoTime();
             EndpointLease endpoint = null;
@@ -158,8 +173,10 @@ public final class AiSummaryClient {
                 if (error != null) {
                     throw new SummaryException(error);
                 }
-                List<String> chunks = AiSummaryPrompt.sourceChunks(snapshot, direction,
-                        config.inputCharacterBudget, config.maxOutputTokens);
+                List<String> chunks = questionTask
+                        ? SummaryQuestionPrompt.sourceChunks(snapshot, direction, question, conversation,
+                                config.inputCharacterBudget, config.maxOutputTokens)
+                        : AiSummaryPrompt.sourceChunks(snapshot, direction, config.inputCharacterBudget, config.maxOutputTokens);
                 endpoint = acquireEndpoint(config, request);
                 int requestCount = chunks.size();
                 List<String> summaries = new ArrayList<>();
@@ -167,19 +184,26 @@ public final class AiSummaryClient {
                 for (int i = 0; i < chunks.size(); i++) {
                     checkActive(request);
                     String chunk = chunks.get(i);
-                    String summary = complete(config,
-                            AiSummaryPrompt.sourcePrompt(chunk, i + 1, chunks.size(), direction,
-                                    config.inputCharacterBudget, config.maxOutputTokens), request,
+                    String prompt = questionTask
+                            ? SummaryQuestionPrompt.sourcePrompt(chunk, i + 1, chunks.size(), direction, question, conversation,
+                                    config.inputCharacterBudget, config.maxOutputTokens)
+                            : AiSummaryPrompt.sourcePrompt(chunk, i + 1, chunks.size(), direction,
+                                    config.inputCharacterBudget, config.maxOutputTokens);
+                    String summary = complete(config, systemPrompt, prompt, request,
                             chunks.size() == 1, callback);
-                    AiSummaryPrompt.validateReferences(summary, AiSummaryPrompt.sourceReferences(chunk));
+                    if (questionTask) SummaryQuestionPrompt.validateAnswer(summary, AiSummaryPrompt.sourceReferences(chunk));
+                    else AiSummaryPrompt.validateReferences(summary, AiSummaryPrompt.sourceReferences(chunk));
                     summaries.add(summary);
                     progress(request, callback, Stage.SOURCE, i + 1, chunks.size(), 0, started);
                 }
                 int mergeRound = 0;
                 while (summaries.size() > 1) {
                     checkActive(request);
-                    List<String> mergeChunks = AiSummaryPrompt.mergeChunks(summaries, direction,
-                            config.inputCharacterBudget, config.maxOutputTokens);
+                    List<String> mergeChunks = questionTask
+                            ? SummaryQuestionPrompt.mergeChunks(summaries, direction, question, conversation,
+                                    config.inputCharacterBudget, config.maxOutputTokens)
+                            : AiSummaryPrompt.mergeChunks(summaries, direction,
+                                    config.inputCharacterBudget, config.maxOutputTokens);
                     requestCount += mergeChunks.size();
                     if (requestCount > MAX_MODEL_REQUESTS) {
                         throw new SummaryException("分段摘要无法在本次请求上限内完成合并。请减少消息数量后重试。");
@@ -188,11 +212,16 @@ public final class AiSummaryClient {
                     mergeRound++;
                     progress(request, callback, Stage.MERGE, 0, mergeChunks.size(), mergeRound, started);
                     for (String chunk : mergeChunks) {
-                        String summary = complete(config, AiSummaryPrompt.mergePrompt(chunk, direction,
-                                        config.inputCharacterBudget, config.maxOutputTokens), request,
+                        String prompt = questionTask
+                                ? SummaryQuestionPrompt.mergePrompt(chunk, direction, question, conversation,
+                                        config.inputCharacterBudget, config.maxOutputTokens)
+                                : AiSummaryPrompt.mergePrompt(chunk, direction,
+                                        config.inputCharacterBudget, config.maxOutputTokens);
+                        String summary = complete(config, systemPrompt, prompt, request,
                                 mergeChunks.size() == 1, callback);
                         // The chunk contains only summaries validated against their own inputs.
-                        AiSummaryPrompt.validateReferences(summary, AiSummaryPrompt.references(chunk));
+                        if (questionTask) SummaryQuestionPrompt.validateAnswer(summary, SummaryQuestionPrompt.mergeReferences(chunk));
+                        else AiSummaryPrompt.validateReferences(summary, AiSummaryPrompt.references(chunk));
                         merged.add(summary);
                         progress(request, callback, Stage.MERGE, merged.size(), mergeChunks.size(), mergeRound, started);
                     }
@@ -200,7 +229,9 @@ public final class AiSummaryClient {
                 }
                 String result = summaries.get(0);
                 progress(request, callback, Stage.VALIDATING, 0, 1, mergeRound, started);
-                AiSummaryPrompt.validateReferences(result, snapshot.size());
+                if (!questionTask || !SummaryQuestionPrompt.isInsufficientEvidence(result)) {
+                    AiSummaryPrompt.validateReferences(result, snapshot.size());
+                }
                 progress(request, callback, Stage.VALIDATING, 1, 1, mergeRound, started);
                 endpoint.close();
                 deliver(request, () -> callback.onSuccess(result));
@@ -300,10 +331,10 @@ public final class AiSummaryClient {
         });
     }
 
-    private String complete(AiSummarySettings.Config config, String prompt, int request, boolean finalRequest,
+    private String complete(AiSummarySettings.Config config, String systemPrompt, String prompt, int request, boolean finalRequest,
                             Callback callback)
             throws IOException, JSONException, SummaryException, CancelledException {
-        return complete(config, AiSummaryPrompt.SYSTEM_PROMPT, prompt, config.maxOutputTokens,
+        return complete(config, systemPrompt, prompt, config.maxOutputTokens,
                 readTimeoutMs, request, config.stream && finalRequest, callback).text;
     }
 
@@ -428,7 +459,11 @@ public final class AiSummaryClient {
                 }
                 answer = text.toString();
             }
-            answer = stripThinking(answer);
+            try {
+                answer = stripThinking(answer);
+            } catch (AiSummarySse.Failure failure) {
+                throw new SummaryException(failure.getMessage());
+            }
             if (answer.regionMatches(true, 0, "Error:", 0, 6)) {
                 throw new SummaryException(serverError(status, answer));
             }
@@ -543,14 +578,8 @@ public final class AiSummaryClient {
         }
     }
 
-    static String stripThinking(String text) {
-        String result = text.replaceAll("(?is)<think(?:\\s[^>]*)?>.*?</think>", "").trim();
-        // An unfinished reasoning block has no final answer to display.
-        if (result.toLowerCase(java.util.Locale.US).contains("<think>")) {
-            return "";
-        }
-        int close = result.toLowerCase(java.util.Locale.US).lastIndexOf("</think>");
-        return (close >= 0 ? result.substring(close + 8) : result).trim();
+    static String stripThinking(String text) throws AiSummarySse.Failure {
+        return AiSummarySse.stripThinking(text);
     }
 
     private static String httpError(int status) {

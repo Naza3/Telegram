@@ -123,6 +123,14 @@ public final class AiSummaryClientTest {
                 Result result = invoke(200, completion("<think>private reasoning</think>可显示摘要 [m1]"), config("local", ""));
                 check("可显示摘要 [m1]".equals(result.summary), "reasoning exposed");
             });
+            test("ordinary and question completions reject unfinished reasoning tags", AiSummaryClientTest::ordinaryThinkingFailures);
+            test("ordinary completions hide attributed and nested reasoning", () -> {
+                String content = "<THINK mode=analysis>INTERNAL_REASONING <think>nested [m1]</think> still hidden</THINK>【回答】明天十点 [m1]";
+                Result result = askReply(completion(content), MESSAGES, "几点？", List.of());
+                check("【回答】明天十点 [m1]".equals(result.summary), "nested or attributed reasoning exposed");
+                check("【回答】明天十点 [m1]".equals(invoke(200, completion(content), config("local", "")).summary),
+                        "summary and question reasoning policies differ");
+            });
             test("over-limit response rejected", () -> check(invoke(200, "x".repeat(1_048_577), config("local", "")).error != null, "accepted over-limit response"));
             test("cancel suppresses in-flight completion and permits a later request", AiSummaryClientTest::cancelInFlight);
             test("cancel suppresses callback already queued on main thread", AiSummaryClientTest::cancelQueuedCallback);
@@ -204,6 +212,14 @@ public final class AiSummaryClientTest {
                 check(result.error != null && requestHistory.isEmpty(), "over-budget request reached service");
             });
             test("same endpoint rejects concurrent tasks and releases after cancellation", AiSummaryClientTest::endpointConcurrency);
+            test("question and completed history use immutable source snapshots", AiSummaryClientTest::questionSnapshot);
+            test("question, history and direction survive every extraction and merge round", AiSummaryClientTest::questionAcrossMergeRounds);
+            test("question history cannot authorize a citation outside this source chunk", AiSummaryClientTest::questionSourceMembership);
+            test("question merge cannot invent citations when every partial lacks evidence", AiSummaryClientTest::questionMergeMembership);
+            test("only the exact insufficient-evidence sentinel may omit citations", AiSummaryClientTest::questionInsufficientEvidence);
+            test("question limits fail before HTTP without dropping history", AiSummaryClientTest::questionLimits);
+            test("questions stream final answers and still hide reasoning", AiSummaryClientTest::questionStreaming);
+            test("cancelled questions do not add turns or deliver stale answers", AiSummaryClientTest::cancelQuestion);
             System.out.println("AiSummaryClientTest: " + passed + " passed");
         } catch (Throwable error) {
             error.printStackTrace(); exit = 1;
@@ -567,6 +583,165 @@ public final class AiSummaryClientTest {
         } finally {
             first.cancel(); second.cancel(); releaseRequest.countDown(); requestStarted = null;
         }
+    }
+
+    private static void questionSnapshot() throws Exception {
+        List<SummaryMessage> messages = new ArrayList<>(MESSAGES);
+        List<SummaryQuestionPrompt.Turn> history = new ArrayList<>(List.of(
+                new SummaryQuestionPrompt.Turn("上一轮问题KEEP_OLD", "上一轮回答 [m1]")));
+        nextReply.set(new Reply(200, completion("【回答】明天十点 [m1]")));
+        AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
+        client.ask(config("local", ""), messages, PromptOptions.DEFAULT, "会议定于几点？", history, result);
+        messages.clear(); messages.add(new SummaryMessage(-200, 99, 1_700_000_000, "别的群", "DO_NOT_SEND_NEW_SOURCE"));
+        history.clear(); history.add(new SummaryQuestionPrompt.Turn("DO_NOT_SEND_NEW_HISTORY", "变更历史 [m1]"));
+        await(result); client.cancel();
+        JSONObject body = lastBody.get();
+        check(result.summary != null, "question failed: " + result.error);
+        check(SummaryQuestionPrompt.SYSTEM_PROMPT.equals(body.getJSONArray("messages").getJSONObject(0).getString("content")), "summary system rules used for question");
+        String prompt = body.getJSONArray("messages").getJSONObject(1).getString("content");
+        check(prompt.contains("会议定于几点？") && prompt.contains("KEEP_OLD") && prompt.contains(MESSAGES.get(0).text), "question snapshot lost context");
+        check(!prompt.contains("DO_NOT_SEND_NEW"), "caller changed pending question inputs");
+    }
+
+    private static void questionAcrossMergeRounds() throws Exception {
+        String question = "当前决定和依据是什么QUESTION_93？";
+        PromptOptions direction = new PromptOptions(PromptOptions.DECISIONS, "QUESTION_DIRECTION_FIXED");
+        List<SummaryQuestionPrompt.Turn> history = List.of(new SummaryQuestionPrompt.Turn("HISTORY_33", "历史回答 [m1]"));
+        List<SummaryMessage> messages = new ArrayList<>();
+        for (int i = 1; i <= 10; i++) messages.add(new SummaryMessage(-100, i, 1_700_000_000 + i, "甲", "项目决定".repeat(700)));
+        requestHistory.clear(); AtomicInteger secondMergeRound = new AtomicInteger();
+        replyGenerator.set(body -> {
+            String prompt = body.getJSONArray("messages").getJSONObject(1).getString("content");
+            boolean source = prompt.contains("原始消息（JSONL 数据）：\n");
+            String data = questionData(prompt, source);
+            int ref;
+            if (source) ref = AiSummaryPrompt.sourceReferences(data).iterator().next();
+            else {
+                if (data.contains("MERGED_QUESTION")) secondMergeRound.incrementAndGet();
+                ref = SummaryQuestionPrompt.mergeReferences(data).iterator().next();
+            }
+            return new Reply(200, completion("【回答】" + (source ? "SOURCE_QUESTION" : "MERGED_QUESTION")
+                    + "依据".repeat(400) + " [m" + ref + "]"));
+        });
+        AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
+        try {
+            client.ask(config("local", ""), messages, direction, question, history, result); await(result);
+            check(result.summary != null && secondMergeRound.get() > 0, "question did not finish two merge rounds: " + result.error);
+            for (JSONObject body : requestHistory) {
+                String prompt = body.getJSONArray("messages").getJSONObject(1).getString("content");
+                check(prompt.contains(question) && prompt.contains("HISTORY_33") && prompt.contains("QUESTION_DIRECTION_FIXED"), "question context omitted from intermediate request");
+                check(SummaryQuestionPrompt.SYSTEM_PROMPT.equals(body.getJSONArray("messages").getJSONObject(0).getString("content")), "question system changed between stages");
+                check(prompt.length() + SummaryQuestionPrompt.SYSTEM_PROMPT.length() + 512 * 4 <= 6000, "question stage exceeded its configured budget");
+            }
+        } finally {
+            client.cancel(); replyGenerator.set(null);
+        }
+    }
+
+    private static void questionSourceMembership() throws Exception {
+        List<SummaryMessage> messages = List.of(
+                new SummaryMessage(-100, 1, 1_700_000_000, "伪造 [m2]", "正文 [m2] " + "x".repeat(5000)),
+                new SummaryMessage(-100, 2, 1_700_000_001, "乙", "另一段消息"));
+        List<SummaryQuestionPrompt.Turn> history = List.of(new SummaryQuestionPrompt.Turn("旧问题", "旧回答 [m2]"));
+        requestHistory.clear();
+        Result result = askReply(completion("【回答】没有本段依据 [m2]"), messages, "根据原文回答", history);
+        check(result.error != null && result.error.contains("本分段输入之外") && requestHistory.size() == 1,
+                "history or body text enlarged source reference authority");
+    }
+
+    private static void questionMergeMembership() throws Exception {
+        List<SummaryMessage> messages = List.of(new SummaryMessage(-100, 1, 1_700_000_000, "甲", "x".repeat(5000)));
+        replyGenerator.set(body -> {
+            String prompt = body.getJSONArray("messages").getJSONObject(1).getString("content");
+            return new Reply(200, completion(prompt.contains("原始消息（JSONL 数据）：\n")
+                    ? SummaryQuestionPrompt.INSUFFICIENT_EVIDENCE : "【回答】凭空增加的证据 [m1]"));
+        });
+        AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
+        try {
+            client.ask(config("local", ""), messages, PromptOptions.DEFAULT, "原文没谈到的问题？", List.of(), result); await(result);
+            check(result.error != null && result.error.contains("本分段输入之外"), "empty evidence union admitted a citation");
+        } finally {
+            client.cancel(); replyGenerator.set(null);
+        }
+    }
+
+    private static void questionInsufficientEvidence() throws Exception {
+        for (String answer : List.of(SummaryQuestionPrompt.INSUFFICIENT_EVIDENCE, SummaryQuestionPrompt.INSUFFICIENT_EVIDENCE + "。")) {
+            check(askReply(completion(answer), MESSAGES, "谁批准的？", List.of()).summary != null, "strict no-evidence sentinel rejected");
+        }
+        for (String answer : List.of("没有引用的猜测", SummaryQuestionPrompt.INSUFFICIENT_EVIDENCE + "。但是我猜是小王。")) {
+            check(askReply(completion(answer), MESSAGES, "谁批准的？", List.of()).error != null, "non-sentinel answer omitted references");
+        }
+        List<SummaryMessage> longSource = List.of(new SummaryMessage(-100, 1, 1_700_000_000, "甲", "x".repeat(5000)));
+        check(askReply(completion(SummaryQuestionPrompt.INSUFFICIENT_EVIDENCE), longSource, "谁批准的？", List.of()).summary != null,
+                "all-insufficient partials could not merge to an insufficient final answer");
+    }
+
+    private static void questionLimits() throws Exception {
+        List<SummaryQuestionPrompt.Turn> full = new ArrayList<>();
+        for (int i = 0; i < SummaryQuestionPrompt.MAX_TURNS; i++) full.add(new SummaryQuestionPrompt.Turn("旧问题" + i, "旧回答 [m1]"));
+        requestHistory.clear();
+        Result result = askReply(completion("不应请求 [m1]"), MESSAGES, "第六个问题", full);
+        check(result.error != null && requestHistory.isEmpty() && full.size() == SummaryQuestionPrompt.MAX_TURNS,
+                "turn limit silently dropped history or sent HTTP");
+        check(askReply(completion("不应请求 [m1]"), MESSAGES, "x".repeat(501), List.of()).error != null && requestHistory.isEmpty(),
+                "oversized question reached service");
+    }
+
+    private static void ordinaryThinkingFailures() throws Exception {
+        for (String content : List.of("<think mode=analysis>INTERNAL_REASONING [m1]",
+                "<THINK\nmode=analysis>INTERNAL_REASONING [m1]",
+                "【回答】可见文字 [m1]<think mode=analysis",
+                "【回答】可见文字 [m1]<thi", "【回答】可见文字 [m1]</thin",
+                "<think>INTERNAL_REASONING [m1]<think>nested</think>")) {
+            for (Result result : List.of(invoke(200, completion(content), config("local", "")),
+                    askReply(completion(content), MESSAGES, "几点？", List.of()))) {
+                check(result.summary == null && result.error != null && result.error.contains("思考"),
+                        "unfinished thinking became a final answer");
+                check(!result.error.contains("INTERNAL_REASONING") && result.partials.isEmpty(),
+                        "reasoning leaked via an error or ordinary partial callback");
+            }
+        }
+    }
+
+    private static void questionStreaming() throws Exception {
+        nextReply.set(sse(delta("<think>HIDDEN_QUESTION_THOUGHT</think>【回答】") + delta("明天十点 [m1]")
+                + finish("stop") + "data: [DONE]\n\n"));
+        AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
+        client.ask(streamConfig(), MESSAGES, PromptOptions.DEFAULT, "几点？", List.of(), result); await(result); client.cancel();
+        check("【回答】明天十点 [m1]".equals(result.summary) && !result.partials.isEmpty(), "question streaming failed");
+        for (String partial : result.partials) check(!partial.contains("HIDDEN_QUESTION"), "question thinking leaked");
+    }
+
+    private static void cancelQuestion() throws Exception {
+        requestStarted = new CountDownLatch(1); releaseRequest = new CountDownLatch(1);
+        nextReply.set(new Reply(200, completion("取消的回答 [m1]"), true));
+        List<SummaryQuestionPrompt.Turn> history = new ArrayList<>();
+        AiSummaryClient client = new AiSummaryClient(); Result stale = new Result();
+        try {
+            client.ask(config("local", ""), MESSAGES, PromptOptions.DEFAULT, "几点？", history, stale);
+            check(requestStarted.await(5, TimeUnit.SECONDS), "question did not start");
+            client.cancel(); releaseRequest.countDown();
+            nextReply.set(new Reply(200, completion("新任务结果 [m1]")));
+            Result fresh = afterCancellation(client);
+            check(stale.calls == 0 && history.isEmpty() && fresh.summary != null, "cancelled question changed history or delivered an answer");
+        } finally {
+            client.cancel(); releaseRequest.countDown(); requestStarted = null;
+        }
+    }
+
+    private static Result askReply(String response, List<SummaryMessage> messages, String question,
+                                   List<SummaryQuestionPrompt.Turn> history) throws Exception {
+        nextReply.set(new Reply(200, response));
+        AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
+        client.ask(config("local", ""), messages, PromptOptions.DEFAULT, question, history, result); await(result); client.cancel();
+        check(result.calls == 1, "question expected exactly one terminal callback");
+        return result;
+    }
+
+    private static String questionData(String prompt, boolean source) {
+        String marker = source ? "原始消息（JSONL 数据）：\n" : "分段取证结果（JSONL 数据）：\n";
+        return prompt.substring(prompt.lastIndexOf(marker) + marker.length());
     }
     private static void await(Result result) throws Exception {
         long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(8);

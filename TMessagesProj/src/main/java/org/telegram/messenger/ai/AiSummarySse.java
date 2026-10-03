@@ -48,6 +48,13 @@ final class AiSummarySse {
         }
     }
 
+    /** Ordinary completions must apply the same reasoning boundaries as streamed completions. */
+    static String stripThinking(String content) throws Failure {
+        VisibleText text = new VisibleText();
+        text.append(content);
+        return text.finish();
+    }
+
     static Result read(InputStream input, int byteLimit, Cancellation cancellation, Listener listener)
             throws IOException, JSONException {
         InputStream bounded = new FilterInputStream(input) {
@@ -240,7 +247,7 @@ final class AiSummarySse {
         private static boolean trustedHeading(String value) {
             String text = value.trim();
             return text.startsWith("【话题】") || text.startsWith("【结论】") || text.startsWith("【待办】")
-                    || text.startsWith("## 话题") || text.startsWith("### 话题");
+                    || text.startsWith("【回答】") || text.startsWith("## 话题") || text.startsWith("### 话题");
         }
 
         private static boolean attributes(String value, String tag) {

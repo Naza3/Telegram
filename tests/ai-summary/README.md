@@ -57,7 +57,9 @@ The tests cover:
   per-stage references, and cancellation before or after queued callbacks.
   Diagnostic failures cover selected JSON/plain-text explanations, credential
   redaction, HTML/payload suppression, and isolation from summary/question
-  errors. A contract fixture based on `Naza3/MNN` local API commit `097ebe3`
+  errors. Connection probes use the configured output budget; a length-limited
+  response reports API reachability without claiming complete generation or
+  exposing the response text. A contract fixture based on `Naza3/MNN` local API commit `097ebe3`
   exercises the connection probe and ordinary/streaming summaries and questions:
   the old `temperature` option is rejected, while current requests preserve
   the model, message roles and output limits without that unsupported option.

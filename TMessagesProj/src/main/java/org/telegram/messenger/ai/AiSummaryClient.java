@@ -103,7 +103,7 @@ public final class AiSummaryClient {
     });
     private static final int CONNECT_TIMEOUT_MS = 15_000;
     private static final int READ_TIMEOUT_MS = 300_000;
-    private static final int DIAGNOSTIC_TIMEOUT_MS = 60_000;
+    private static final int DIAGNOSTIC_TIMEOUT_MS = READ_TIMEOUT_MS;
     private static final int MAX_RESPONSE_BYTES = 1_048_576;
     private static final int MAX_ERROR_BYTES = 16_384;
     private static final int MAX_MODEL_REQUESTS = 128;
@@ -142,7 +142,7 @@ public final class AiSummaryClient {
                 endpoint = acquireEndpoint(config, request);
                 long started = System.nanoTime();
                 Completion result = complete(config, "This is a connection test. Reply only OK, without reasoning.",
-                        "Reply OK.", 64, diagnosticTimeoutMs, request, false, null);
+                        "Reply OK.", config.maxOutputTokens, diagnosticTimeoutMs, request, false, null);
                 DiagnosticResult diagnostic = new DiagnosticResult(
                         Math.max(0, (System.nanoTime() - started) / 1_000_000L), result.reportedModel);
                 endpoint.close();
@@ -157,7 +157,11 @@ public final class AiSummaryClient {
                             failure.contentType, config.apiKey);
                 }
                 final DiagnosticErrorInfo diagnosticInfo = info;
-                deliver(request, () -> callback.onError(describeError(error), diagnosticInfo));
+                final String diagnosticError = error instanceof OutputLimitException
+                        ? "模型 API 已响应，但服务端报告达到输出上限（本次设置 " + config.maxOutputTokens
+                                + " tokens），未完成文本生成验证。请提高最大输出 tokens 后重试。"
+                        : describeError(error);
+                deliver(request, () -> callback.onError(diagnosticError, diagnosticInfo));
             } finally {
                 if (endpoint != null) endpoint.close();
                 finishTask(request);
@@ -465,7 +469,7 @@ public final class AiSummaryClient {
             JSONObject choice = choices.getJSONObject(0);
             String finish = choice.optString("finish_reason");
             if ("length".equals(finish)) {
-                throw new SummaryException("模型输出达到长度上限，结果不完整。请提高最大输出 tokens、关闭长思考模式或减少消息数量后重试。");
+                throw new OutputLimitException();
             }
             if ("content_filter".equals(finish)) {
                 throw new SummaryException("模型服务未能生成这批消息的总结。");
@@ -632,6 +636,12 @@ public final class AiSummaryClient {
     private static class SummaryException extends Exception {
         SummaryException(String message) {
             super(message);
+        }
+    }
+
+    private static final class OutputLimitException extends SummaryException {
+        OutputLimitException() {
+            super("模型输出达到长度上限，结果不完整。请提高最大输出 tokens、关闭长思考模式或减少消息数量后重试。");
         }
     }
 

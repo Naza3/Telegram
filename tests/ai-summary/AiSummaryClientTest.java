@@ -143,7 +143,7 @@ public final class AiSummaryClientTest {
                 check(result.error == null && result.result.elapsedMs >= 0, "expected diagnostic success");
                 check("server-loaded-model".equals(result.result.reportedModel), "request model confused with reported model");
                 JSONObject body = lastBody.get();
-                check(!body.getBoolean("stream") && body.getInt("max_tokens") == 64, "probe must be short and non-streaming");
+                check(!body.getBoolean("stream") && body.getInt("max_tokens") == 512, "probe must use configured output limit and remain non-streaming");
                 check(body.getJSONArray("messages").length() == 2, "unexpected test message count");
                 check("Reply OK.".equals(body.getJSONArray("messages").getJSONObject(1).getString("content")), "probe is not fixed text");
                 check(!body.toString().contains(MESSAGES.get(0).text), "chat content leaked into probe");
@@ -185,6 +185,9 @@ public final class AiSummaryClientTest {
                 check(result.error.contains("未启动") || result.error.contains("拒绝连接"), "connection refusal not identified");
             });
             test("diagnostic read timeout is actionable", AiSummaryClientTest::diagnosticTimeout);
+            test("diagnostic sends the configured 64, 512, 1024 or 2048 output limit", AiSummaryClientTest::diagnosticConfiguredOutputLimit);
+            test("diagnostic length termination reports its configured limit without accepting or exposing content", AiSummaryClientTest::diagnosticOutputLimitFailure);
+            test("summary and question length termination retain incomplete-result errors", AiSummaryClientTest::chatOutputLimitFailure);
             test("diagnostic cancellation suppresses an already queued callback", AiSummaryClientTest::cancelDiagnostic);
             test("diagnostic HTTP errors expose only selected safe explanations", AiSummaryClientTest::diagnosticHttpDetails);
             test("diagnostic errors hide HTML, opaque JSON and payload echoes", AiSummaryClientTest::diagnosticHttpUnknownFormats);
@@ -438,7 +441,7 @@ public final class AiSummaryClientTest {
                 JSONObject body = requestHistory.get(i);
                 check("mnn-local".equals(body.getString("model")) && body.getJSONArray("messages").length() == 2,
                         "configured model or prompt structure was changed");
-                check(body.getInt("max_tokens") == (i == 0 ? 64 : 512), "output limit changed between paths");
+                check(body.getInt("max_tokens") == 512, "configured output limit changed between paths");
                 check("system".equals(body.getJSONArray("messages").getJSONObject(0).getString("role"))
                         && "user".equals(body.getJSONArray("messages").getJSONObject(1).getString("role")), "message roles changed");
             }
@@ -477,6 +480,56 @@ public final class AiSummaryClientTest {
         if (characters > 32768) return "Message text exceeds 32768 characters";
         if (body.has("stream") && !(body.opt("stream") instanceof Boolean)) return "stream must be a boolean";
         return null;
+    }
+
+    private static void diagnosticConfiguredOutputLimit() throws Exception {
+        requestHistory.clear();
+        for (int limit : List.of(64, 512, 1024, 2048)) {
+            AiSummarySettings.Config settings = new AiSummarySettings.Config(base, "mnn-local", "", limit, true);
+            Diagnostic result = diagnose(200, completion("OK"), settings);
+            check(result.result != null && result.error == null, "configured probe failed");
+            JSONObject body = lastBody.get();
+            check(body.getInt("max_tokens") == limit && !body.getBoolean("stream"), "probe ignored its configured output limit or streamed");
+            check(body.getJSONArray("messages").length() == 2
+                    && "Reply OK.".equals(body.getJSONArray("messages").getJSONObject(1).getString("content")), "probe stopped using fixed text");
+            check(!body.toString().contains(MESSAGES.get(0).text) && mnnLocalRequestFailure(body) == null,
+                    "probe included chat or an unsupported MNN option");
+        }
+        check(requestHistory.size() == 4, "configured probe silently retried");
+    }
+
+    private static void diagnosticOutputLimitFailure() throws Exception {
+        ArrayList<JSONObject> choices = new ArrayList<>();
+        choices.add(new JSONObject().put("finish_reason", "length"));
+        for (Object content : List.of(JSONObject.NULL, "", "OK", "<think>PRIVATE_DIAGNOSTIC_THOUGHT",
+                "<think>PRIVATE_DIAGNOSTIC_THOUGHT</think>OK")) {
+            choices.add(new JSONObject().put("finish_reason", "length")
+                    .put("message", new JSONObject().put("content", content)));
+        }
+        requestHistory.clear();
+        for (int limit : List.of(64, 512, 1024, 2048)) {
+            for (JSONObject choice : choices) {
+                String response = new JSONObject().put("choices", new org.json.JSONArray().put(choice)).toString();
+                Diagnostic result = diagnose(200, response, new AiSummarySettings.Config(base, "mnn-local", "", limit));
+                check(result.result == null && result.error != null && result.info == null, "truncated probe succeeded or exposed response details");
+                check(result.error.contains("模型 API 已响应") && result.error.contains("服务端报告达到输出上限（本次设置 " + limit + " tokens）")
+                        && result.error.contains("未完成文本生成验证"), "probe limit error did not identify configured limit and incomplete validation");
+                check(!result.error.contains("PRIVATE_DIAGNOSTIC_THOUGHT") && !result.error.contains("OK"), "truncated content leaked into probe error");
+                check(lastBody.get().getInt("max_tokens") == limit, "reported output limit differs from the transmitted limit");
+            }
+        }
+        check(requestHistory.size() == 4 * choices.size(), "truncated probe retried automatically");
+    }
+
+    private static void chatOutputLimitFailure() throws Exception {
+        String response = new JSONObject().put("choices", new org.json.JSONArray().put(new JSONObject()
+                .put("finish_reason", "length").put("message", new JSONObject().put("content", "PRIVATE_TRUNCATED_ANSWER [m1]")))).toString();
+        Result summary = invoke(200, response, config("local", ""));
+        Result question = askReply(response, MESSAGES, "几点？", List.of());
+        for (Result result : List.of(summary, question)) {
+            check(result.summary == null && result.error != null && result.error.contains("结果不完整"), "truncated chat result was accepted");
+            check(!result.error.contains("测试回复") && !result.error.contains("PRIVATE_TRUNCATED_ANSWER"), "diagnostic wording or server content leaked into chat error");
+        }
     }
 
     private static void diagnosticTimeout() throws Exception {

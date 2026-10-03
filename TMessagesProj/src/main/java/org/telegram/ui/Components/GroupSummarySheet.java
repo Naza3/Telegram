@@ -1152,7 +1152,8 @@ public final class GroupSummarySheet {
         addText("上下文字符预算（2048–32000）", true);
         EditTextBoldCursor contextBudget = edit("6000", Integer.toString(config.inputCharacterBudget),
                 InputType.TYPE_CLASS_NUMBER);
-        addText("这是保守的字符估计，不是模型 token 数。预算会预留规则、补充要求和输出空间；较大预算可能增加手机内存及耗时。", false);
+        addText("这是保守的字符估计，不是模型 token 数。输出按每 token 预留 4 字符，此外还需容纳规则、补充要求和聊天内容。", false);
+        addText("常用搭配（最大输出 / 字符预算）：512 / 6000、1024 / 12000、2048 / 16000。较大预算可能增加手机内存及耗时。", false);
         CheckBox streaming = new CheckBox(context);
         streaming.setText("流式显示（需要服务支持）");
         streaming.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 16);
@@ -1234,6 +1235,7 @@ public final class GroupSummarySheet {
         clearContent();
         addText("正在测试 MNN API 连接…", true);
         addText("使用当前填写的接口配置发送简短测试文本，不读取聊天消息，也不保存设置。", false);
+        addText("本次最大输出：" + config.maxOutputTokens + " tokens。手机推理可能需要较长时间，可随时取消测试。", false);
         addText("请保持 Telegram 在前台，并确保 MNN Chat 已加载模型、开启 API 服务。", false);
         addAction("取消测试并返回设置", () -> returnToSettings(config));
         client = new AiSummaryClient();

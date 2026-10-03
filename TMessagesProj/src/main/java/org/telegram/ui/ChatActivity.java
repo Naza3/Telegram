@@ -874,6 +874,9 @@ public class ChatActivity extends BaseFragment implements
     private LongSparseArray<MessageObject> conversionMessages = new LongSparseArray<>();
     public ArrayList<MessageObject> messages = new ArrayList<>();
     private GroupSummarySheet groupSummarySheet;
+    private long summaryUnreadTopicId = -1;
+    private int summaryUnreadLowerId = -1;
+    private int summaryUnreadUpperId = -1;
     private SparseArray<MessageObject> waitingForReplies = new SparseArray<>();
     private LongSparseArray<ArrayList<MessageObject>> polls = new LongSparseArray<>();
     private LongSparseArray<MessageObject.GroupedMessages> groupedMessagesMap = new LongSparseArray<>();
@@ -1418,6 +1421,40 @@ public class ChatActivity extends BaseFragment implements
         return chatMode == 0 && currentChat != null && currentEncryptedChat == null
             && !ChatObject.isChannelAndNotMegaGroup(currentChat) && !ChatObject.isMonoForum(currentChat)
             && (threadMessageId == 0 || isTopic) && !isReport() && !inPreviewMode && !isPeerNoForwards();
+    }
+
+    /** Capture before opening/reading this chat changes Telegram's read marker. */
+    private void captureSummaryUnreadBoundary() {
+        summaryUnreadTopicId = getTopicId();
+        summaryUnreadLowerId = -1;
+        summaryUnreadUpperId = -1;
+        if (dialog_id >= 0 || !canSummarizeGroup()) return;
+        int lower;
+        int upper;
+        if (summaryUnreadTopicId != 0) {
+            TLRPC.TL_forumTopic topic = forumTopic;
+            if (topic == null || topic.id != summaryUnreadTopicId) {
+                topic = getMessagesController().getTopicsController().findTopic(-dialog_id, summaryUnreadTopicId);
+            }
+            if (topic == null) return;
+            lower = topic.read_inbox_max_id;
+            upper = topic.top_message;
+            if (topic.unread_count == 0) lower = Math.max(lower, upper);
+        } else {
+            // A forum has separate read cursors for its topics, not one reliable group boundary.
+            if (ChatObject.isForum(currentChat)) return;
+            TLRPC.Dialog source = getMessagesController().dialogs_dict.get(dialog_id);
+            if (source == null) return;
+            lower = source.read_inbox_max_id;
+            upper = source.top_message;
+            Integer knownRead = getMessagesController().dialogs_read_inbox_max.get(dialog_id);
+            if (knownRead != null) lower = Math.max(lower, knownRead);
+            if (source.unread_count == 0) lower = Math.max(lower, upper);
+        }
+        // Missing or internally inconsistent cached boundaries are not an unread snapshot.
+        if (lower < 0 || upper < lower || upper <= 0) return;
+        summaryUnreadLowerId = lower;
+        summaryUnreadUpperId = upper;
     }
 
     public SendMessageChatArguments getMessageChatSendParams() {
@@ -2752,6 +2789,7 @@ public class ChatActivity extends BaseFragment implements
                 isSubscriberSuggestions = !ChatObject.canManageMonoForum(currentAccount, currentChat);
             }
             dialog_id = -chatId;
+            captureSummaryUnreadBoundary();
             if (ChatObject.isChannel(currentChat)) {
                 if (ChatObject.isNotInChat(currentChat) && !ChatObject.isMonoForum(currentChat) && !isThreadChat() && !isInScheduleMode()) {
                     waitingForGetDifference = true;
@@ -3726,7 +3764,9 @@ public class ChatActivity extends BaseFragment implements
                             groupSummarySheet.dismiss();
                         }
                         final long summaryTopicId = getTopicId();
-                        groupSummarySheet = GroupSummarySheet.show(ChatActivity.this, currentAccount, dialog_id, summaryTopicId, (sourceDialogId, messageId) -> {
+                        groupSummarySheet = GroupSummarySheet.show(ChatActivity.this, currentAccount, dialog_id, summaryTopicId,
+                            summaryUnreadTopicId == summaryTopicId ? summaryUnreadLowerId : -1,
+                            summaryUnreadTopicId == summaryTopicId ? summaryUnreadUpperId : -1, (sourceDialogId, messageId) -> {
                             if (!isFinished && summaryTopicId == getTopicId() && sourceDialogId == dialog_id) {
                                 scrollToMessageId(messageId, 0, true, 0, true, 0);
                             }
@@ -9993,6 +10033,10 @@ public class ChatActivity extends BaseFragment implements
         });
         topicsTabs.setOnTopicSelected((topicId, fromMessage) -> {
             if (topicId == getTopicId()) return;
+            if (groupSummarySheet != null) {
+                groupSummarySheet.dismiss();
+                groupSummarySheet = null;
+            }
             hasSendingMessagesInBotForum = false;
             if (updateStreamingTopic != null) {
                 AndroidUtilities.cancelRunOnUIThread(updateStreamingTopic);
@@ -10060,6 +10104,7 @@ public class ChatActivity extends BaseFragment implements
                 isComments = false;
             }
 
+            captureSummaryUnreadBoundary();
             if (chatAdapter != null) {
                 if (chatAdapter.botForumStartThreadRow >= 0 && !chatAdapter.needBotForumInfoRow()) {
                     chatAdapter.notifyItemRemoved(chatAdapter.botForumStartThreadRow);

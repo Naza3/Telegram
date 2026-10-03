@@ -42,12 +42,15 @@ import org.telegram.messenger.ai.PromptOptions;
 import org.telegram.messenger.ai.PromptPreferences;
 import org.telegram.messenger.ai.SummaryHistoryLoader;
 import org.telegram.messenger.ai.SummaryMessage;
+import org.telegram.messenger.ai.SummaryStateStore;
 import org.telegram.ui.ActionBar.AlertDialog;
 import org.telegram.ui.ActionBar.BaseFragment;
 import org.telegram.ui.ActionBar.Theme;
 
 import java.util.ArrayList;
 import java.util.Locale;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -58,6 +61,32 @@ public final class GroupSummarySheet {
         void open(long dialogId, int messageId);
     }
 
+    private enum RangeMode { RECENT, TODAY, SINCE, UNREAD, REPLAY }
+
+    private static final class RangeRequest {
+        final RangeMode mode;
+        final int count;
+        final int expectedCursor;
+        final int lower;
+        final int upper;
+        final boolean initialize;
+        final SummaryHistoryLoader.Result replayHistory;
+        final ArrayList<SummaryMessage> replayMessages;
+
+        RangeRequest(RangeMode mode, int count, int expectedCursor, int lower, int upper,
+                     boolean initialize, SummaryHistoryLoader.Result replayHistory,
+                     ArrayList<SummaryMessage> replayMessages) {
+            this.mode = mode;
+            this.count = count;
+            this.expectedCursor = expectedCursor;
+            this.lower = lower;
+            this.upper = upper;
+            this.initialize = initialize;
+            this.replayHistory = replayHistory;
+            this.replayMessages = replayMessages == null ? null : new ArrayList<>(replayMessages);
+        }
+    }
+
     private static final Pattern REFERENCE = Pattern.compile("\\[m([0-9]+)\\]");
     private static final Pattern HEADING = Pattern.compile("(?m)^(?:#{1,6}\\s*)?(?:\\*\\*)?【?(话题|结论|待办)】?(?:\\*\\*)?[：:]?\\s*$");
 
@@ -66,6 +95,8 @@ public final class GroupSummarySheet {
     private final long ownerId;
     private final long dialogId;
     private final long topicId;
+    private final int unreadLower;
+    private final int unreadUpper;
     private final SourceNavigator navigator;
     private final Context context;
     private final Theme.ResourcesProvider resourcesProvider;
@@ -96,13 +127,26 @@ public final class GroupSummarySheet {
     private boolean promptLoaded;
     private String recentCountText = "100";
     private int recentCount = 100;
-    private boolean today;
+    private RangeMode rangeMode = RangeMode.RECENT;
+    private SummaryStateStore.State summaryState;
+    private SummaryStateStore.CompletionToken completionToken;
+    private RangeRequest summaryRange;
+    private SummaryHistoryLoader.Result summaryHistory;
+    private SummaryHistoryLoader.Result lastSuccessfulHistory;
+    private ArrayList<SummaryMessage> lastSuccessfulSources;
+    private boolean resultCommitted;
+    private String completionNotice;
     private boolean closed;
     private int operation;
 
     /** The caller should also dismiss the returned handle when its fragment is destroyed. */
     public static GroupSummarySheet show(BaseFragment fragment, int account, long dialogId,
                                          long topicId, SourceNavigator navigator) {
+        return show(fragment, account, dialogId, topicId, -1, -1, navigator);
+    }
+
+    public static GroupSummarySheet show(BaseFragment fragment, int account, long dialogId,
+                                         long topicId, int unreadLower, int unreadUpper, SourceNavigator navigator) {
         if (fragment == null || fragment.isFinished || fragment.getParentActivity() == null) {
             return null;
         }
@@ -110,7 +154,8 @@ public final class GroupSummarySheet {
                 || UserConfig.getInstance(account).getClientUserId() == 0) {
             return null;
         }
-        GroupSummarySheet sheet = new GroupSummarySheet(fragment, account, dialogId, topicId, navigator);
+        GroupSummarySheet sheet = new GroupSummarySheet(fragment, account, dialogId, topicId,
+                unreadLower, unreadUpper, navigator);
         sheet.showSelection();
         if (sheet.closed) {
             return null;
@@ -129,12 +174,15 @@ public final class GroupSummarySheet {
     }
 
     private GroupSummarySheet(BaseFragment fragment, int account, long dialogId, long topicId,
+                              int unreadLower, int unreadUpper,
                               SourceNavigator navigator) {
         this.fragment = fragment;
         this.account = account;
         ownerId = UserConfig.getInstance(account).getClientUserId();
         this.dialogId = dialogId;
         this.topicId = topicId;
+        this.unreadLower = unreadLower;
+        this.unreadUpper = unreadUpper;
         this.navigator = navigator;
         context = fragment.getParentActivity();
         resourcesProvider = fragment.getResourceProvider();
@@ -167,6 +215,9 @@ public final class GroupSummarySheet {
         sessionPrompt = null;
         summaryPrompt = null;
         summaryConfig = null;
+        lastSuccessfulSources = null;
+        lastSuccessfulHistory = null;
+        summaryHistory = null;
         content.removeAllViews();
     }
 
@@ -175,6 +226,13 @@ public final class GroupSummarySheet {
         stopProgressUpdates();
         streamingDraft = null;
         summaryInferenceStarted = false;
+        if (completionToken != null) {
+            completionToken.cancel();
+            completionToken = null;
+            // A commit may have won before its UI callback. Always reload authoritative state
+            // when leaving a task so the next incremental batch cannot use a stale cursor.
+            summaryState = null;
+        }
         if (historyLoader != null) {
             historyLoader.cancel();
             historyLoader = null;
@@ -300,6 +358,10 @@ public final class GroupSummarySheet {
             loadPromptPreferences();
             return;
         }
+        if (summaryState == null) {
+            loadSummaryState(false);
+            return;
+        }
         addText(topicId == 0 ? "选择本群的文字消息范围" : "仅总结当前话题的文字消息", true);
         if (settingsNotice != null) {
             addText(settingsNotice, false);
@@ -307,25 +369,48 @@ public final class GroupSummarySheet {
 
         RadioGroup choices = new RadioGroup(context);
         choices.setOrientation(RadioGroup.VERTICAL);
-        RadioButton recent = radio("最近 N 条文字消息");
-        recent.setId(View.generateViewId());
-        RadioButton day = radio("当日文字消息");
-        day.setId(View.generateViewId());
-        choices.addView(recent, new RadioGroup.LayoutParams(-1, dp(46)));
-        choices.addView(day, new RadioGroup.LayoutParams(-1, dp(46)));
-        choices.check(today ? day.getId() : recent.getId());
+        for (RangeMode mode : new RangeMode[] {RangeMode.RECENT, RangeMode.TODAY, RangeMode.SINCE, RangeMode.UNREAD}) {
+            RadioButton option = radio(mode == RangeMode.RECENT ? "最近 N 条文字消息"
+                    : mode == RangeMode.TODAY ? "当日文字消息"
+                    : mode == RangeMode.SINCE ? "上次总结之后" : "进入聊天时的未读消息");
+            option.setId(View.generateViewId());
+            option.setTag(mode);
+            if (mode == RangeMode.UNREAD && !hasUnreadSnapshot()) {
+                option.setEnabled(false);
+                option.setAlpha(0.5f);
+            }
+            choices.addView(option, new RadioGroup.LayoutParams(-1, dp(46)));
+            if (mode == rangeMode) choices.check(option.getId());
+        }
         content.addView(choices, LayoutHelper.createLinear(-1, -2, 0, 4, 0, 4));
 
         EditTextBoldCursor count = edit("条数（1–" + SummaryHistoryLoader.MAX_RECENT_COUNT + "）", recentCountText,
                 InputType.TYPE_CLASS_NUMBER);
-        count.setEnabled(!today);
-        count.setAlpha(today ? 0.5f : 1f);
+        TextView rangeNote = addText("", false);
+        Runnable updateRange = () -> {
+            count.setEnabled(rangeMode != RangeMode.TODAY);
+            count.setAlpha(rangeMode == RangeMode.TODAY ? 0.5f : 1f);
+            count.setHint((rangeMode == RangeMode.UNREAD || rangeMode == RangeMode.SINCE && summaryState.cursor > 0
+                    ? "每批历史条数" : "文字条数") + "（1–" + SummaryHistoryLoader.MAX_RECENT_COUNT + "）");
+            rangeNote.setText(rangeMode == RangeMode.SINCE
+                    ? summaryState.cursor == 0
+                        ? "尚无增量起点。本次以最近 N 条文字初始化，之前的历史不包含；成功后从该位置继续补齐新消息。"
+                        : "从已记录位置之后按时间先后分批补齐。每批历史条数包含媒体和服务消息，但只有文字会发送给模型。"
+                    : rangeMode == RangeMode.UNREAD
+                        ? "固定本次进入聊天时的未读边界；每批条数包含非文字消息。不改变 Telegram 已读状态，也不移动增量进度。"
+                    : rangeMode == RangeMode.TODAY
+                        ? "按手机时区从今天 00:00 起读取，范围截至开始时；不移动增量进度。"
+                        : "仅总结最近 N 条文字，不移动增量进度。需要建立增量起点时请选择“上次总结之后”。");
+        };
         choices.setOnCheckedChangeListener((group, checkedId) -> {
-            today = checkedId == day.getId();
-            count.setEnabled(!today);
-            count.setAlpha(today ? 0.5f : 1f);
+            RadioButton checked = choices.findViewById(checkedId);
+            rangeMode = (RangeMode) checked.getTag();
+            updateRange.run();
         });
-        addText("当日按手机时区从 00:00 起计算；读取范围截至开始总结时。只处理文字，不读取图片、语音或文件内容。", false);
+        updateRange.run();
+        if (!hasUnreadSnapshot()) {
+            addText("本次未取得可靠的进入聊天前未读边界，因此未读范围不可用；可重新进入聊天后再试。", false);
+        }
         addText("选中的文字将发送到你设置的 MNN Chat API 服务。结果仅在这里显示，点击引用可返回原消息。", false);
 
         PromptOptions direction = effectivePrompt();
@@ -349,7 +434,7 @@ public final class GroupSummarySheet {
         });
         addAction("开始总结", () -> {
             recentCountText = count.getText().toString().trim();
-            if (!today) {
+            if (rangeMode != RangeMode.TODAY) {
                 try {
                     recentCount = Integer.parseInt(recentCountText);
                 } catch (NumberFormatException ignored) {
@@ -362,6 +447,61 @@ public final class GroupSummarySheet {
                 }
             }
             startSummary();
+        });
+        if (lastSuccessfulHistory != null && lastSuccessfulSources != null) {
+            addAction("用当前方向重做上次成功范围", () -> {
+                recentCountText = count.getText().toString();
+                RangeRequest request = new RangeRequest(RangeMode.REPLAY, recentCount, summaryState.cursor,
+                        lastSuccessfulHistory.lowerExclusiveId, lastSuccessfulHistory.coveredThroughId,
+                        false, lastSuccessfulHistory, lastSuccessfulSources);
+                startSummary(request);
+            });
+            addText("重做使用本面板保留的原文快照，不移动增量进度；关闭面板后该快照不保留。", false);
+        }
+        if (summaryState.completedAt > 0) {
+            addAction("按已保存范围分批重读并重做", () -> {
+                recentCountText = count.getText().toString();
+                startSummary(new RangeRequest(RangeMode.REPLAY, SummaryHistoryLoader.MAX_RECENT_COUNT,
+                        summaryState.cursor, summaryState.lastLowerExclusive, summaryState.lastUpperInclusive,
+                        false, null, null));
+            });
+            addText("摘要正文不持久化。可按记录范围每批最多 500 条历史重新生成；重新读取的原文可能已编辑或删除，不移动增量进度。", false);
+        }
+    }
+
+    private boolean hasUnreadSnapshot() {
+        return unreadLower >= 0 && unreadUpper >= unreadLower;
+    }
+
+    private void loadSummaryState(boolean reset) {
+        if (closed || !checkAccountOwner()) return;
+        cancelWork();
+        final int generation = operation;
+        clearContent();
+        addText(reset ? "正在清除本聊天的总结进度…" : "正在读取总结进度…", true);
+        Utilities.globalQueue.postRunnable(() -> {
+            if (!sameAccountOwner()) {
+                AndroidUtilities.runOnUIThread(this::dismiss);
+                return;
+            }
+            try {
+                if (reset) SummaryStateStore.clear(account, ownerId, dialogId, topicId);
+                SummaryStateStore.State state = SummaryStateStore.load(account, ownerId, dialogId, topicId);
+                AndroidUtilities.runOnUIThread(() -> {
+                    if (!active(generation)) return;
+                    summaryState = state;
+                    showSelection();
+                });
+            } catch (RuntimeException ignored) {
+                AndroidUtilities.runOnUIThread(() -> {
+                    if (!active(generation)) return;
+                    clearContent();
+                    addText("无法读取或更新本聊天的总结进度。", true);
+                    addText("可以重试；如果本地记录已损坏，可清除后重新选择增量起点。这不会修改 Telegram 消息或已读状态。", false);
+                    addAction("重试读取", () -> loadSummaryState(false));
+                    addAction("清除本聊天进度并重新选择起点", () -> loadSummaryState(true));
+                });
+            }
         });
     }
 
@@ -774,114 +914,233 @@ public final class GroupSummarySheet {
     }
 
     private void startSummary() {
-        final PromptOptions prompt = effectivePrompt();
-        loadSettings(config -> startSummary(config, prompt));
+        if (summaryState == null) {
+            loadSummaryState(false);
+            return;
+        }
+        RangeRequest request = new RangeRequest(rangeMode, recentCount, summaryState.cursor,
+                rangeMode == RangeMode.UNREAD ? unreadLower : summaryState.cursor,
+                rangeMode == RangeMode.UNREAD ? unreadUpper : -1,
+                rangeMode == RangeMode.SINCE && summaryState.cursor == 0, null, null);
+        startSummary(request);
     }
 
-    private void startSummary(AiSummarySettings.Config config, PromptOptions prompt) {
-        if (closed || fragment.isFinished || !checkAccountOwner()) {
-            return;
-        }
+    private void startSummary(RangeRequest request) {
+        final PromptOptions prompt = effectivePrompt();
+        summaryRange = request;
+        summaryHistory = null;
+        sourceMessages = null;
+        summaryConfig = null;
+        summaryPrompt = prompt;
+        loadSettings(config -> startSummary(config, prompt, request));
+    }
+
+    private void startSummary(AiSummarySettings.Config config, PromptOptions prompt, RangeRequest request) {
+        if (closed || fragment.isFinished || !checkAccountOwner()) return;
         if (MessagesController.getInstance(account).isPeerNoForwards(dialogId)) {
             showSelection();
-            return;
-        }
-        String settingsError = AiSummarySettings.validate(config);
-        if (settingsError != null) {
-            showError(settingsError);
             return;
         }
         cancelWork();
         sourceMessages = null;
         coverageNote = null;
+        summaryHistory = null;
+        completionNotice = null;
+        resultCommitted = false;
+        summaryRange = request;
         summaryPrompt = prompt;
         summaryConfig = config;
+        String settingsError = AiSummarySettings.validate(config);
+        if (settingsError != null) {
+            showError(settingsError);
+            return;
+        }
+        completionToken = new SummaryStateStore.CompletionToken();
         summaryStartedAt = SystemClock.elapsedRealtime();
         lastPartialUpdateAt = 0;
         final int generation = operation;
         clearContent();
         progressStatus = addText("正在读取文字消息…", true);
         progressElapsed = addText("已耗时 0 秒", false);
-        addText(today ? "读取今天 00:00 起的文字消息。" : "读取最近 " + recentCount + " 条文字消息。", false);
-        addText("正在确定可读取范围，暂时没有完整消息总量。", false);
+        addText(request.mode == RangeMode.TODAY ? "读取今天 00:00 起的文字消息。"
+                : request.mode == RangeMode.RECENT || request.initialize ? "读取最近 " + request.count + " 条文字消息。"
+                : request.mode == RangeMode.REPLAY ? "重做已记录的范围，不改变增量进度。"
+                : "从固定下界开始读取下一批，最多 " + request.count + " 条历史消息；只总结文字。", false);
         addAction("取消并返回", this::showSelection);
         startProgressTicker(generation);
-
+        if (request.replayHistory != null) {
+            onHistoryLoaded(request.replayHistory, request.replayMessages, generation);
+            return;
+        }
         historyLoader = new SummaryHistoryLoader(account, dialogId, topicId);
         SummaryHistoryLoader.Callback callback = new SummaryHistoryLoader.Callback() {
-            @Override
-            public void onLoaded(SummaryHistoryLoader.Result result) {
-                if (!active(generation)) {
-                    return;
-                }
-                historyLoader = null;
-                sourceMessages = new ArrayList<>(result.messages);
-                coverageNote = result.coverageNote;
-                if (sourceMessages.isEmpty()) {
-                    showError("所选范围内没有可总结的文字消息。");
-                    return;
-                }
-                if (MessagesController.getInstance(account).isPeerNoForwards(dialogId)) {
-                    showError("此群已启用内容保护，无法用于 AI 总结。");
-                    return;
-                }
-                clearContent();
-                progressStatus = addText("正在生成话题、结论与待办…", true);
-                progressElapsed = addText("已耗时 " + Math.max(0L,
-                        (SystemClock.elapsedRealtime() - summaryStartedAt) / 1000) + " 秒", false);
-                addText("已读取 " + sourceMessages.size() + " 条文字消息。", false);
-                addText(coverageNote, false);
-                addText("手机上的本地模型可能需要一些时间。保持 MNN Chat API 服务运行。", false);
-                addText("请保持 Telegram 在前台；关闭面板或离开页面会取消总结。", false);
-                partialLabel = addText("生成中，尚未完成或校验", true);
-                partialLabel.setVisibility(View.GONE);
-                partialAnswer = addText("", false);
-                partialAnswer.setTextColor(color(Theme.key_dialogTextBlack));
-                partialAnswer.setLinksClickable(false);
-                partialAnswer.setVisibility(View.GONE);
-                addAction("取消并返回", GroupSummarySheet.this::showSelection);
-                summaryInferenceStarted = true;
-                client = new AiSummaryClient();
-                client.summarize(config, sourceMessages, prompt, new AiSummaryClient.Callback() {
-                    @Override
-                    public void onProgress(AiSummaryClient.Progress progress) {
-                        if (active(generation)) updateSummaryProgress(progress);
-                    }
-
-                    @Override
-                    public void onPartial(String text) {
-                        if (active(generation)) updatePartialAnswer(text, generation);
-                    }
-
-                    @Override
-                    public void onSuccess(String summary) {
-                        if (active(generation)) {
-                            client = null;
-                            showResult(summary);
-                        }
-                    }
-
-                    @Override
-                    public void onError(String error) {
-                        if (active(generation)) {
-                            showError(error);
-                        }
-                    }
-                });
+            @Override public void onLoaded(SummaryHistoryLoader.Result result) {
+                onHistoryLoaded(result, null, generation);
             }
-
-            @Override
-            public void onError(String error) {
-                if (active(generation)) {
-                    showError(error);
+            @Override public void onProgress(int scanned, int textCount) {
+                if (active(generation) && progressStatus != null) {
+                    progressStatus.setText("正在读取：已扫描 " + scanned + " 条，收集 " + textCount + " 条文字（总量待定）");
                 }
+            }
+            @Override public void onError(String error) {
+                if (active(generation)) showError(error);
             }
         };
-        if (today) {
+        if (request.mode == RangeMode.TODAY) {
             historyLoader.loadToday(callback);
+        } else if (request.mode == RangeMode.SINCE && !request.initialize && request.upper < 0) {
+            historyLoader.loadSince(request.lower, request.count, callback);
+        } else if (request.mode == RangeMode.UNREAD) {
+            historyLoader.loadUnread(request.lower, request.upper, request.count, callback);
+        } else if (request.mode == RangeMode.REPLAY || request.mode == RangeMode.SINCE && !request.initialize) {
+            historyLoader.loadRange(request.lower, request.upper, request.count, callback);
         } else {
-            historyLoader.loadRecent(recentCount, callback);
+            historyLoader.loadRecent(request.count, callback);
         }
+    }
+
+    private void onHistoryLoaded(SummaryHistoryLoader.Result result, ArrayList<SummaryMessage> replay, int generation) {
+        if (!active(generation)) return;
+        historyLoader = null;
+        summaryHistory = result;
+        sourceMessages = new ArrayList<>(replay == null ? result.messages : replay);
+        coverageNote = result.coverageNote;
+        if (summaryRange.replayHistory != null) {
+            coverageNote += summaryRange.mode == RangeMode.REPLAY
+                    ? "\n本次重做复用本面板已读取的原文快照，未重新读取消息，不改变已保存进度。"
+                    : "\n本次重试使用相同的原文快照，未重新读取消息。";
+        }
+        if (MessagesController.getInstance(account).isPeerNoForwards(dialogId)) {
+            showError("此群已启用内容保护，无法用于 AI 总结。");
+            return;
+        }
+        if (sourceMessages.isEmpty()) {
+            completeSummary("本批没有可总结的文字消息。已扫描 " + result.scannedMessageCount
+                    + " 条历史消息，未调用模型。", generation);
+            return;
+        }
+        clearContent();
+        progressStatus = addText("正在生成话题、结论与待办…", true);
+        progressElapsed = addText("已耗时 " + Math.max(0L,
+                (SystemClock.elapsedRealtime() - summaryStartedAt) / 1000) + " 秒", false);
+        addText("已读取 " + sourceMessages.size() + " 条文字消息。", false);
+        addText(coverageNote, false);
+        addText("手机上的本地模型可能需要一些时间。保持 MNN Chat API 服务运行。", false);
+        addText("请保持 Telegram 在前台；关闭面板或离开页面会取消总结。", false);
+        partialLabel = addText("生成中，尚未完成或校验", true);
+        partialLabel.setVisibility(View.GONE);
+        partialAnswer = addText("", false);
+        partialAnswer.setTextColor(color(Theme.key_dialogTextBlack));
+        partialAnswer.setLinksClickable(false);
+        partialAnswer.setVisibility(View.GONE);
+        addAction("取消并返回", this::showSelection);
+        summaryInferenceStarted = true;
+        client = new AiSummaryClient();
+        client.summarize(summaryConfig, sourceMessages, summaryPrompt, new AiSummaryClient.Callback() {
+            @Override public void onProgress(AiSummaryClient.Progress progress) {
+                if (active(generation)) updateSummaryProgress(progress);
+            }
+            @Override public void onPartial(String text) {
+                if (active(generation)) updatePartialAnswer(text, generation);
+            }
+            @Override public void onSuccess(String summary) {
+                if (active(generation)) {
+                    client = null;
+                    completeSummary(summary, generation);
+                }
+            }
+            @Override public void onError(String error) {
+                if (active(generation)) showError(error);
+            }
+        });
+    }
+
+    private void completeSummary(String summary, int generation) {
+        if (!active(generation)) return;
+        stopProgressUpdates();
+        streamingDraft = null;
+        summaryInferenceStarted = false;
+        if (!summaryHistory.complete) {
+            completionNotice = "此次仅覆盖部分范围，未保存完成记录，也未更新增量进度。";
+            showResult(summary);
+            return;
+        }
+        if (summaryRange.mode == RangeMode.REPLAY) {
+            completionNotice = "重做完成；已保存的增量进度和原始恢复范围保持不变。";
+            lastSuccessfulHistory = summaryHistory;
+            lastSuccessfulSources = new ArrayList<>(sourceMessages);
+            showResult(summary);
+            return;
+        }
+        final SummaryHistoryLoader.Result history = summaryHistory;
+        final RangeRequest range = summaryRange;
+        final PromptOptions prompt = summaryPrompt;
+        final ArrayList<SummaryMessage> sources = new ArrayList<>(sourceMessages);
+        final SummaryStateStore.CompletionToken token = completionToken;
+        final boolean advance = range.mode == RangeMode.SINCE && history.coveredThroughId > 0;
+        clearContent();
+        addText("正在保存本批完成记录…", true);
+        addText("完整结果和覆盖记录确认后才更新增量进度。摘要正文及原文不会写入该进度记录。", false);
+        addText("返回时会重新读取进度；如果记录已经提交，返回不会撤销该进度。", false);
+        addAction("返回范围选择", this::showSelection);
+        Utilities.globalQueue.postRunnable(() -> {
+            if (!sameAccountOwner()) {
+                AndroidUtilities.runOnUIThread(this::dismiss);
+                return;
+            }
+            try {
+                boolean committed = SummaryStateStore.recordSuccess(account, ownerId, dialogId, topicId,
+                        range.expectedCursor, history.lowerExclusiveId, history.coveredThroughId,
+                        history.complete, advance, sources.size(), summary, promptRevision(prompt), token);
+                if (!committed) return;
+                SummaryStateStore.State state = SummaryStateStore.load(account, ownerId, dialogId, topicId);
+                AndroidUtilities.runOnUIThread(() -> {
+                    if (!active(generation)) return;
+                    summaryState = state;
+                    resultCommitted = true;
+                    lastSuccessfulHistory = history;
+                    lastSuccessfulSources = sources;
+                    completionNotice = advance ? "本批完整完成，增量进度已保存。"
+                            : "本批完成记录已保存，增量进度保持不变。";
+                    showResult(summary);
+                });
+            } catch (RuntimeException ignored) {
+                AndroidUtilities.runOnUIThread(() -> {
+                    if (!active(generation)) return;
+                    summaryState = null;
+                    completionNotice = "摘要已生成，但无法确认完成记录已保存。返回范围选择后重新读取进度，不能把本批视为已补齐。";
+                    showResult(summary);
+                });
+            }
+        });
+    }
+
+    private static String promptRevision(PromptOptions prompt) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256").digest((prompt.templateId + "\n"
+                    + prompt.templateVersion + "\n" + prompt.builtinRulesVersion + "\n"
+                    + prompt.customInstructions).getBytes(StandardCharsets.UTF_8));
+            StringBuilder value = new StringBuilder();
+            for (byte b : digest) value.append(String.format(Locale.US, "%02x", b & 255));
+            return value.toString();
+        } catch (java.security.NoSuchAlgorithmException impossible) {
+            throw new IllegalStateException(impossible);
+        }
+    }
+
+    private void continueBatch() {
+        if (summaryHistory == null || !summaryHistory.complete || !summaryHistory.hasMore) return;
+        if (summaryRange.mode == RangeMode.SINCE && (summaryState == null
+                || summaryState.cursor != summaryHistory.coveredThroughId)) {
+            summaryState = null;
+            showSelection();
+            return;
+        }
+        int upper = summaryRange.mode == RangeMode.REPLAY ? summaryRange.upper : summaryHistory.upperInclusiveId;
+        RangeRequest next = new RangeRequest(summaryRange.mode, summaryRange.count,
+                summaryState == null ? summaryRange.expectedCursor : summaryState.cursor,
+                summaryHistory.coveredThroughId, upper, false, null, null);
+        startSummary(next);
     }
 
     private void showError(String message) {
@@ -889,6 +1148,11 @@ public final class GroupSummarySheet {
         final boolean allowPlainRetry = summaryInferenceStarted && summaryConfig != null && summaryConfig.stream;
         final AiSummarySettings.Config failedConfig = summaryConfig;
         final PromptOptions failedPrompt = summaryPrompt;
+        final RangeRequest originalRange = summaryRange;
+        final RangeRequest failedRange = originalRange != null && summaryHistory != null && sourceMessages != null
+                ? new RangeRequest(originalRange.mode, originalRange.count, originalRange.expectedCursor,
+                    originalRange.lower, originalRange.upper, originalRange.initialize, summaryHistory, sourceMessages)
+                : originalRange;
         cancelWork();
         clearContent();
         addText("暂时无法完成总结", true);
@@ -901,12 +1165,15 @@ public final class GroupSummarySheet {
             TextView partial = addText(unfinished, false);
             partial.setLinksClickable(false);
         }
-        addAction("重试", this::startSummary);
+        addAction("重试", () -> {
+            if (failedRange == null) startSummary();
+            else startSummary(failedRange);
+        });
         if (allowPlainRetry) {
             addAction("改用普通模式重新运行", () -> startSummary(new AiSummarySettings.Config(
                     failedConfig.baseUrl, failedConfig.model, failedConfig.apiKey, failedConfig.maxOutputTokens,
-                    false, failedConfig.inputCharacterBudget), failedPrompt));
-            addText("仅本次改用普通模式，不修改已保存设置；重新运行会再次读取所选范围。", false);
+                    false, failedConfig.inputCharacterBudget), failedPrompt, failedRange));
+            addText("仅本次改用普通模式，不修改已保存设置；已成功读取的原文快照保持不变。", false);
         }
         addAction("MNN API 设置", this::showSettings);
         addAction("返回范围选择", this::showSelection);
@@ -917,8 +1184,9 @@ public final class GroupSummarySheet {
         streamingDraft = null;
         summaryInferenceStarted = false;
         clearContent();
-        addText("已完成 · 总耗时 " + Math.max(0L,
+        addText((summaryHistory != null && !summaryHistory.complete ? "部分覆盖" : "已生成") + " · 总耗时 " + Math.max(0L,
                 (SystemClock.elapsedRealtime() - summaryStartedAt) / 1000) + " 秒", false);
+        if (completionNotice != null) addText(completionNotice, true);
         if (summaryPrompt != null) {
             addText("总结方向：" + PromptOptions.templateLabel(summaryPrompt.templateId), false);
         }
@@ -929,6 +1197,12 @@ public final class GroupSummarySheet {
         result.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 16);
         result.setMovementMethod(LinkMovementMethod.getInstance());
         result.setLinksClickable(true);
+        if (summaryHistory != null && summaryHistory.complete && summaryHistory.hasMore
+                && (summaryRange.mode == RangeMode.SINCE || summaryRange.mode == RangeMode.UNREAD
+                    ? resultCommitted : summaryRange.mode == RangeMode.REPLAY
+                        && summaryRange.upper > summaryHistory.coveredThroughId)) {
+            addAction("继续下一批", this::continueBatch);
+        }
         addAction("重新选择范围", this::showSelection);
     }
 

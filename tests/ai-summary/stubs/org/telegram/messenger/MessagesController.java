@@ -11,6 +11,7 @@ public final class MessagesController {
     public final Map<Long, TLRPC.Chat> chats = new HashMap<>();
     public final Map<Long, TLRPC.User> users = new HashMap<>();
     public final Map<Long, TLRPC.ChatFull> fullChats = new HashMap<>();
+    public final Map<Long, TLRPC.InputPeer> inputPeerOverrides = new HashMap<>();
     public static MessagesController getInstance(int account) {
         if (INSTANCES[account] == null) INSTANCES[account] = new MessagesController();
         return INSTANCES[account];
@@ -23,9 +24,11 @@ public final class MessagesController {
     public TLRPC.User getUser(long id) { return users.get(id); }
     public TLRPC.ChatFull getChatFull(long id) { return fullChats.get(id); }
     public TLRPC.InputPeer getInputPeer(long id) {
+        if (inputPeerOverrides.containsKey(id)) return inputPeerOverrides.get(id);
         TLRPC.InputPeer peer;
         if (id < 0 && ChatObject.isChannel(getChat(-id))) {
             peer = new TLRPC.TL_inputPeerChannel(); peer.channel_id = -id;
+            peer.access_hash = getChat(-id).access_hash;
         } else if (id < 0) {
             peer = new TLRPC.TL_inputPeerChat(); peer.chat_id = -id;
         } else {

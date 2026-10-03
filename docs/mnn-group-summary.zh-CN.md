@@ -27,7 +27,7 @@
 
 请保持 MNN Chat 的本机 API 可用。更改过端口时以 MNN 设置页为准。支持普通和 SSE 流式 Chat Completions；本轮所有分段和合并请求均遵循流式开关，多分块时显示各请求进度，仅最终回答显示正文流，中间摘要不作为完整结果展示。未完成正文不开放引用，断流后可明确选择普通模式重试。流式改变传输和可见进度，不等于模型推理加速。
 
-MNN 使用当前已加载的模型，填写模型名不会替 MNN 切换模型。本次实际对接的是 [Naza3/MNN 的 feature/mnn-chat-local-api 分支](https://github.com/Naza3/MNN/tree/feature/mnn-chat-local-api)，核对提交 `097ebe312c34d2391c55b2dfe3df05265b1c13ee`。它会将 `max_tokens` 应用于原生推理，接受范围为 1–2048；此前针对其他 MNN 版本“可能忽略该参数”的说明不适用于这个分支。
+MNN 使用当前已加载的模型，填写模型名不会替 MNN 切换模型。配套服务是 [Naza3/MNN 的 feature/mnn-chat-local-api 分支](https://github.com/Naza3/MNN/tree/feature/mnn-chat-local-api)，此前接口核对依据为提交 `097ebe312c34d2391c55b2dfe3df05265b1c13ee`，后续 API 思考设置改动见下文。它会将 `max_tokens` 应用于原生推理，接受范围为 1–2048；此前针对其他 MNN 版本“可能忽略该参数”的说明不适用于这个分支。
 
 该接口明确拒绝 `temperature`、`top_p`、工具调用等未支持参数。客户端现在只发送模型名称（非空时）、`messages`、`max_tokens` 和 `stream`，不再自动附加 `temperature: 0.2`；采样行为由 MNN 服务决定。单次请求还受 64 KiB 请求体、32768 字符消息正文等限制，建议先使用默认 `6000` 上下文字符预算。服务端支持纯文本，不接受媒体内容或 MNN 媒体标签。
 
@@ -53,9 +53,15 @@ API Key 在 Android 6.0+ 使用 AndroidKeyStore 加密保存；旧版本或加�
 
 此前连接测试将输出上限写死为 `64`，所以即使设置为 `512`，测试仍可能返回长度限制错误；此问题已修复。服务返回 `finish_reason=length` 时，新提示会区分“API 已响应”和“完整文本生成尚未验证”，并显示本次设置值，不把截断的正文当成测试成功。可从 `512` 调到 `1024` 或 `2048` 后重试；本次 MNN 分支最高接受 `2048`。思考过程可能占用输出预算，但关闭思考仍不能保证一定在给定上限内结束；本地服务以生成 token 计数达到上限来标记 `length`。
 
-已核对的 MNN 分支会新建独立 API 模型会话（`useCustomConfig=false`），使用基础 `config.json`，不加载聊天页的 `custom_config`；聊天页思考开关写入的正是后者。因此，聊天页“关闭思考”不能作为 API 已关闭思考的依据，也不能据此断言用户的 API 开启了思考，实际还取决于模型配置、`context.json` 和模板。Telegram 的流式选择和提示词不会直接修改 MNN 会话的思考设置。
+最新用户反馈：新版 Telegram 的连接测试成功；随后仍用 `2000` 输出 tokens／`32000` 上下文字符预算、通用模板、空补充要求、开启流式，总结最近两条短文字。界面接收字符数超过 `5000` 且继续增加，用户确认检测到思考内容，但回答正文为空。这支持继续排查 API 会话的思考行为；字符数不是 token 数，不能据此认定全部接收字符都是思考内容或 `max_tokens` 被忽略。此为用户观察，尚未独立真机复现，也不能用连接测试成功代替总结完成验证。
 
-另已准备仅作用于 API 会话的 MNN 配套补丁方案：在原生模型加载成功后临时设置 `jinja.context.enable_thinking=false`，避免加载中的 `context.json` 再次覆盖；不调用会写聊天配置的 `updateThinking`。现有高级设置保存的仍是 `custom_config`，不能当作已修改 API 的基础配置。该补丁仅保存在本地，**未应用、未推送、未构建为 MNN APK**；本轮 Telegram APK 不包含它，也不保证所有模型模板支持此开关。
+此前核对的 MNN 提交 `097ebe312c34d2391c55b2dfe3df05265b1c13ee` 会新建独立 API 模型会话（`useCustomConfig=false`），使用基础 `config.json`，不加载聊天页的 `custom_config`；聊天页思考开关写入的正是后者。因此，聊天页“关闭思考”不能作为 API 已关闭思考的依据，也不能据此断言用户手机上的 API 开启了思考。Telegram 的流式选择和提示词不会直接修改 MNN 会话的思考设置。
+
+MNN 配套改动已应用并推送至[提交 `35affe5d9d94e7e843bac4daecee1d2ddf60123f`](https://github.com/Naza3/MNN/commit/35affe5d9d94e7e843bac4daecee1d2ddf60123f)：在原生模型加载成功后，为 API 会话临时设置 `jinja.context.enable_thinking=false`，避免加载中的 `context.json` 再次覆盖；不调用会写聊天配置的 `updateThinking`。现有高级设置保存的仍是 `custom_config`，不能当作已修改 API 的基础配置。[MNN CI 37133978173](https://github.com/Naza3/MNN/actions/runs/37133978173) 已成功：原生编译、API／完整 App 测试、release lint、APK 审计及签名检查全部通过。未真机验证用户模型对该开关的支持和性能变化。这是独立 MNN 应用的改动，下面提供的 Telegram APK 不包含它。
+
+**配套 MNN 下载：[0.8.3-localapi.4（834）未签名 ARM64 APK](https://github.com/Naza3/MNN/actions/runs/37133978173/artifacts/11278242921)**。登录 GitHub 下载 ZIP，解压 `app-standard-release-unsigned.apk`；此前自行签名安装的用户需用原密钥签名后覆盖更新，不要卸载旧版绕过签名不匹配。停止旧 API，完成更新后重新启动 API，再用相同两条短消息复测；Telegram 保持 `2000`／`32000`、通用模板、空补充要求与流式开启。
+
+本次 MNN 云端报告确认：51 项构建辅助测试、85 项 API 专项测试及 531 项完整 App 测试（含专项），均无失败、错误或跳过。未签名 APK 为 32,547,449 字节，SHA-256 为 `ee492c538460b1a6796adf7e91e6eeb7c0f9670f534f741a47e3564fb8bb00ba`；重签名后哈希会改变。产物于 2026-10-17 16:03 UTC 左右到期。[审计报告与源码／许可说明包](https://github.com/Naza3/MNN/actions/runs/37133978173/artifacts/11278497383)请与再分发的 APK 一起保留。
 
 ### 输出上限与上下文预算如何搭配
 
@@ -234,7 +240,7 @@ CI 独立生成调试签名，并通过 Actions 缓存在后续构建间复用�
 - **[下载新版 APK 与 SHA-256 校验文件](https://github.com/Naza3/Telegram/actions/runs/37130095722/artifacts/11276861783)**：`Telegram-MNN-arm64-debug-9`，ZIP 为 62,511,865 字节。需登录 GitHub 下载并解压，安装 `Telegram-MNN-arm64-debug.apk`；到期时间为 2026-10-17 14:49:03 UTC。
 - [GitHub Actions 运行记录](https://github.com/Naza3/Telegram/actions/runs/37130095722)：**成功**，任务耗时 14 分 30 秒。配置和回归检查、完整 ARM64 构建、签名、16 KB 对齐与架构检查、上传全部通过，复用已有 CI 调试签名密钥。
 - GitHub 记录的 ZIP 产物摘要为 `sha256:1cdf1c243a9257841994e3b22e86c5f04d01a562cd0eb7ef800cec3742d54fe2`；它不是 APK 本身的哈希。APK 请使用压缩包内配套 `.sha256` 核对。
-- 真机上的历史持久性、UI、原消息跳转及 Qwen3.5-2B 耗时仍需验证。MNN 独立 API 思考补丁尚未应用，本 Telegram APK 不包含 MNN 端修改。
+- 真机上的历史持久性、UI、原消息跳转及 Qwen3.5-2B 耗时仍需验证。MNN 独立 API 思考改动已[另行推送](https://github.com/Naza3/MNN/commit/35affe5d9d94e7e843bac4daecee1d2ddf60123f)，其 [CI 37133978173](https://github.com/Naza3/MNN/actions/runs/37133978173) 已通过；本 Telegram APK 不包含 MNN 端修改。
 
 ## 此前构建：消息范围、群聊入口与截图修复（2026-10-03）
 

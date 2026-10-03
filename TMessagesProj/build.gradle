@@ -4,6 +4,18 @@ apply plugin: 'com.android.library'
 apply plugin: 'org.telegram.build-plugin'
 apply plugin: 'idea'
 
+// Use this fork's credentials; never fall back to the upstream application's ID.
+// Keep validation aligned with tools/check-telegram-api.py. Do not echo values.
+def telegramApiId = providers.environmentVariable('TELEGRAM_API_ID').orNull
+def telegramApiHash = providers.environmentVariable('TELEGRAM_API_HASH').orNull
+if (telegramApiId == null || !(telegramApiId ==~ /[1-9][0-9]{0,9}/) ||
+        Long.parseLong(telegramApiId) > Integer.MAX_VALUE) {
+    throw new GradleException('TELEGRAM_API_ID must be a positive decimal integer (maximum 2147483647, no whitespace or leading zeros). Configure your environment or GitHub Actions secret.')
+}
+if (telegramApiHash == null || !(telegramApiHash ==~ /[0-9a-fA-F]{32}/)) {
+    throw new GradleException('TELEGRAM_API_HASH must contain exactly 32 hexadecimal characters, with no whitespace. Configure your environment or GitHub Actions secret.')
+}
+
 idea {
     module {
         excludeDirs += [
@@ -142,6 +154,8 @@ android {
     defaultConfig {
         minSdkVersion 21
         targetSdkVersion 36
+        buildConfigField 'int', 'TELEGRAM_API_ID', telegramApiId
+        buildConfigField 'String', 'TELEGRAM_API_HASH', '"' + telegramApiHash + '"'
 
         vectorDrawables.generatedDensities = ['mdpi', 'hdpi', 'xhdpi', 'xxhdpi']
 

@@ -105,16 +105,36 @@ git submodule update --init --recursive --depth=1
 export JAVA_HOME=/workspace/toolchains/jdk-21
 export ANDROID_HOME=/workspace/android-sdk
 export GRADLE_USER_HOME=/workspace/gradle-cache
+# Read credentials without putting their values in shell history or terminal output.
+IFS= read -r -s -p 'Telegram API ID: ' TELEGRAM_API_ID; printf '\n'
+IFS= read -r -s -p 'Telegram API hash: ' TELEGRAM_API_HASH; printf '\n'
+export TELEGRAM_API_ID TELEGRAM_API_HASH
 bash tools/build-mnn-debug.sh
+unset TELEGRAM_API_ID TELEGRAM_API_HASH
 ```
 
 如果网络要求代理，按执行环境设置 Java/Gradle 的 HTTP、HTTPS 代理，并保留可信 CA 校验。本工作区代理为 `proxy:8080`。构建脚本使用 `tools/mnn-debug.init.gradle` 限制 ARM64，自动创建 `.local-build/debug.keystore`，仅覆盖 debug 签名。生成目录为 `TMessagesProj_App/build/outputs/apk/afat/debug/`，包名为 `org.telegram.messenger.beta`；该目录及本地密钥/缓存不入 Git。
 
-当前构建沿用仓库自带测试配置，不作为正式发行配置。正式使用按仓库 README 配置自有 `api_id`、签名和 Firebase 等参数。ADB 当前未检测到连接设备；真机验收仍需覆盖普通群、Topic、跨午夜、带链接文字、取消、错误 Key、MNN 未加载模型，以及引用跳转到尚未加载的消息。
+构建现在必须提供自有 `TELEGRAM_API_ID` 和 `TELEGRAM_API_HASH` 环境变量，不再回退到上游默认 API 配置。ID 必须是 1–2147483647 的十进制整数，不带前导零；hash 必须恰好为 32 位十六进制字符，两者都不能有空白。脚本在启动 Gradle 前校验，直接调用 Gradle 也会校验；Android Studio 需要从已设置这两个环境变量的环境启动，已有进程需重启。校验只能检查格式，不能证明凭据在 Telegram 服务端有效。
+
+此构建仍为调试版；正式发行还需按仓库 README 配置签名、应用身份和 Firebase 等参数。ADB 当前未检测到连接设备；真机验收仍需覆盖登录、普通群、Topic、跨午夜、带链接文字、取消、错误 Key、MNN 未加载模型，以及引用跳转到尚未加载的消息。
 
 ## GitHub Actions 构建与下载
 
 工作流位于 [`.github/workflows/mnn-debug-apk.yml`](../.github/workflows/mnn-debug-apk.yml)。推送到 `feature/mnn-group-summary` 后自动构建 ARM64 调试 APK；工作流也声明了 `workflow_dispatch`，但 GitHub 的手动运行入口需要该工作流存在于默认分支。若 Fork 的 Actions 尚未启用，先在仓库 **Actions** 页面启用，再推送新的提交或运行工作流。
+
+构建前打开 [Repository secrets 设置](https://github.com/Naza3/Telegram/settings/secrets/actions)，选择 **New repository secret**，添加下面两项（使用 Secrets，不是 Variables；不要写入源文件、工作流 YAML 或提交记录）：
+
+| Secret 名称 | 值 |
+| --- | --- |
+| `TELEGRAM_API_ID` | 你在 [my.telegram.org](https://my.telegram.org) 为此客户端申请的 `api_id` |
+| `TELEGRAM_API_HASH` | 同一应用的 `api_hash` |
+
+两个值只传入校验和构建步骤的环境变量。配置缺失或格式错误会在安装 Android 工具链前终止，不会生成继续沿用上游 API ID 的 APK。新增或修改 Secret 不会自动触发构建；配置后可在**使用新工作流的运行记录**中选择 **Re-run all jobs**，或推送新提交。重跑旧版本工作流不会自动使用这项接入。
+
+校验错误和构建摘要不显示凭据值；生成的 `BuildConfig` 位于忽略的构建目录，不修改源文件。构建脚本关闭 Gradle build/configuration cache，Actions 的 Gradle 缓存仅包含依赖和 wrapper，不缓存生成配置。Secrets 用于避免凭据进入 Git 和普通日志；Telegram 客户端必须携带 API 配置，因此它仍会包含在 APK 中。不要把手机验证码、二步验证密码或 MNN 的 API Key 填入这两项。
+
+自有 API 配置不会强制“发送验证码到已登录设备”。客户端已支持 Telegram 设备内验证码；短信、设备内消息等投递方式由 [Telegram 服务端选择](https://core.telegram.org/api/auth)。构建成功后仍需在手机上验证实际登录结果。
 
 1. 打开仓库的 [Actions 页面](https://github.com/Naza3/Telegram/actions)，进入对应提交的构建记录。
 2. 等构建成功，在记录底部的 **Artifacts** 下载 APK 压缩包；GitHub 通常要求登录后下载。

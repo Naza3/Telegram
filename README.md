@@ -38,7 +38,7 @@ You will require Android Studio 2025.1.4, Android NDK 27.2.12479018 and Android 
 3. Fill out RELEASE_KEY_PASSWORD, RELEASE_KEY_ALIAS, RELEASE_STORE_PASSWORD in gradle.properties to access your  release.keystore
 4.  Go to https://console.firebase.google.com/, create two android apps with application IDs org.telegram.messenger and org.telegram.messenger.beta, turn on firebase messaging and download google-services.json, which should be copied to the same folder as TMessagesProj.
 5. Open the project in the Studio (note that it should be opened, NOT imported).
-6. Fill out values in TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java – there’s a link for each of the variables showing where and which data to obtain.
+6. For this fork, set `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` in the build environment to your own Telegram API credentials. They are required and are compiled into generated `BuildConfig` fields; there is no upstream credential fallback. For GitHub Actions, create repository secrets with the same names. See [the fork's build instructions](docs/mnn-group-summary.zh-CN.md#github-actions-构建与下载). Configure the remaining values in TMessagesProj/src/main/java/org/telegram/messenger/BuildVars.java as appropriate for your app.
 7. You are ready to compile Telegram.
 
 ### Localization

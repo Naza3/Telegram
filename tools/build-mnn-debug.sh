@@ -2,6 +2,7 @@
 set -euo pipefail
 
 repo_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+python3 "$repo_dir/tools/check-telegram-api.py"
 task_dir="${MNN_BUILD_DIR:-$repo_dir/.local-build}"
 mkdir -p "$task_dir"
 task_dir="$(cd -- "$task_dir" && pwd)"
@@ -26,6 +27,7 @@ fi
 
 cd "$repo_dir"
 ./gradlew :TMessagesProj_App:assembleAfatDebug --no-daemon \
+    --no-build-cache --no-configuration-cache \
     --max-workers="${MNN_BUILD_WORKERS:-3}" --console=plain \
     -I "$repo_dir/tools/mnn-debug.init.gradle" \
     -DmnnDebugKeystore="$task_dir/debug.keystore" \

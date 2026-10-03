@@ -43,9 +43,11 @@ The tests cover:
 
 - `SummaryHistoryLoaderTest`: bounded recent-message pagination, short and
   overlapping pages, filtering while advancing cursors, fixed upper bounds,
-  chronological source references, local-day boundaries in a non-UTC timezone,
-  topic-root cursors, link-preview original text, cancellation, and account-slot
-  changes. Telegram replies and the Android main loop are queued test doubles.
+  chronological source references and endpoint message IDs, recent/latest probes
+  with `offset_date=0`, account Telegram-adjusted time with non-UTC local-day boundaries,
+  topic-root cursors, link-preview original text, readable channels/protected text,
+  ordinary auto-delete expiry, cancellation, and account-slot changes. Telegram
+  replies and the Android main loop are queued test doubles.
 - `SummaryHistoryRangeTest`: forward incremental batches, fixed unread bounds,
   sparse/overlapping IDs, media-only batches, per-topic scope, progress,
   pagination failures, and identity-based mention/reply metadata.
@@ -80,8 +82,9 @@ The tests cover:
   empty-text batches, corruption, scope isolation, and logout cleanup.
 - `SummarySourceVerifierTest`: current server message identity and content,
   per-account channel requests, topic matching, changed/deleted originals,
-  permissions, protected/TTL/media messages, malformed replies, timeout,
-  cancellation, and account changes.
+  actual read permissions, acceptance of readable `noforwards` text and unexpired
+  ordinary auto-delete messages, exclusion of expired text/media TTL, malformed
+  replies, timeout, cancellation, and account changes.
 - `SummaryResultCacheTest`: source/config/prompt identity, explicit-only reuse,
   scope/message invalidation, owner isolation, and entry/byte eviction limits.
 - `SummaryFilterTest`: all/focus-self/filter-self modes, identity-based mention
@@ -98,6 +101,37 @@ judges factual quality. See [fixture instructions](fixtures/README.md) for
 creating an unrun manual evaluation record, and
 [device validation](../../docs/mnn-device-validation.zh-CN.md) for the remaining
 phone/MNN checks.
+
+## Current revision evidence and limits
+
+The range/entry/capture revision `68737de` passed 12 JVM test classes: 56 HTTP cases and
+758 other core assertions. History loading passed 14 groups/90 assertions,
+history ranges 15 groups/103 assertions, and source verification 20 groups/182
+assertions. The 24-fixture structure validation and 7 build-configuration tests
+also passed. Android `compileDebugJavaWithJavac` passed in 1 minute 6 seconds;
+the local log is `/workspace/build-logs/mnn-history-ranges/android-compile.log`.
+The [full ARM64 APK and CI run 37125822349](https://github.com/Naza3/Telegram/actions/runs/37125822349) also passed, including signing, 16 KB alignment and ABI verification. The [APK and checksum artifact](https://github.com/Naza3/Telegram/actions/runs/37125822349/artifacts/11275577541) is tied to source `68737de922c3edb9e8023f3815fd44ff7d0c7e92`; device testing remains outstanding.
+
+Ordinary `ttl_period` text is checked against account Telegram-adjusted time when loaded
+or revalidated. Existing snapshots used for replay/questions do not automatically
+refresh as time passes; observed deletion events invalidate results and source
+clicks re-fetch the message. This revision adds no expiry scheduler and does not
+promise immediate cache deletion or inference cancellation at expiry.
+
+Telegram-adjusted time is the local clock plus Telegram's time difference, not a
+fresh server-time RPC for every operation. Changing the device clock does not
+guarantee immediate recalibration. Recent/latest probes use `offset_date=0`
+instead of a local date cutoff; today ranges combine adjusted time and phone timezone.
+
+The JVM harness does not exercise the new forum-all-topics/menu expansion UI or
+the Android capture policy. Screenshot/recording behavior, Story video surfaces,
+passcode dialogs and potentially visible recent-task previews require the device
+cases in the linked validation document. Capture changes do not change sharing,
+saving or passcode authentication rules.
+
+The successful [CI run for `a47966c`](https://github.com/Naza3/Telegram/actions/runs/37123873201)
+and [artifact 11274700253](https://github.com/Naza3/Telegram/actions/runs/37123873201/artifacts/11274700253)
+are an intermediate connection-probe fix, not a build containing this revision.
 
 The isolated `stubs/` directory models only the Telegram and Android members
 needed for these tests. The secret-store test double checks the settings-layer

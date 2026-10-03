@@ -38,12 +38,14 @@ import org.telegram.messenger.UserConfig;
 import org.telegram.messenger.Utilities;
 import org.telegram.messenger.ai.AiSummaryClient;
 import org.telegram.messenger.ai.AiSummarySettings;
+import org.telegram.messenger.ai.AiSummaryPrompt;
 import org.telegram.messenger.ai.PromptOptions;
 import org.telegram.messenger.ai.PromptPreferences;
 import org.telegram.messenger.ai.SummaryHistoryLoader;
 import org.telegram.messenger.ai.SummaryMessage;
 import org.telegram.messenger.ai.SummaryStateStore;
 import org.telegram.messenger.ai.SummarySourceVerifier;
+import org.telegram.messenger.ai.SummaryResultCache;
 import org.telegram.ui.ActionBar.AlertDialog;
 import org.telegram.ui.ActionBar.BaseFragment;
 import org.telegram.ui.ActionBar.Theme;
@@ -58,7 +60,7 @@ import java.security.MessageDigest;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/** An account-scoped, explicit user action. Summaries are kept only in this dialog. */
+/** An account-scoped, explicit user action. Source snapshots stay in this dialog. */
 public final class GroupSummarySheet {
 
     public interface SourceNavigator {
@@ -104,6 +106,32 @@ public final class GroupSummarySheet {
 
         boolean changed(SummaryMessage source) {
             return !usable || source.editDate != editDate || !source.text.equals(text);
+        }
+    }
+
+    private static final class CachedResult {
+        final SummaryResultCache.Key key;
+        final ArrayList<SummaryMessage> sources;
+        final SummaryHistoryLoader.Result history;
+        final RangeRequest range;
+        final AiSummarySettings.Config config;
+        final PromptOptions prompt;
+        final String coverage;
+        final long generatedAt;
+        final long elapsedMs;
+
+        CachedResult(SummaryResultCache.Key key, ArrayList<SummaryMessage> sources,
+                     SummaryHistoryLoader.Result history, RangeRequest range, AiSummarySettings.Config config,
+                     PromptOptions prompt, String coverage, long generatedAt, long elapsedMs) {
+            this.key = key;
+            this.sources = new ArrayList<>(sources);
+            this.history = history;
+            this.range = range;
+            this.config = config;
+            this.prompt = prompt;
+            this.coverage = coverage;
+            this.generatedAt = generatedAt;
+            this.elapsedMs = elapsedMs;
         }
     }
 
@@ -162,6 +190,8 @@ public final class GroupSummarySheet {
     private AlertDialog sourceDialog;
     private LinearLayout sourceContent;
     private int sourceOperation;
+    private CachedResult cachedResult;
+    private boolean viewingCachedResult;
     private boolean closed;
     private int operation;
 
@@ -244,6 +274,7 @@ public final class GroupSummarySheet {
         lastSuccessfulSources = null;
         lastSuccessfulHistory = null;
         summaryHistory = null;
+        cachedResult = null;
         content.removeAllViews();
     }
 
@@ -275,6 +306,7 @@ public final class GroupSummarySheet {
         if (closed) return;
         if (!checkAccountOwner()) return;
         SourceUpdate update = new SourceUpdate(null, 0, false);
+        invalidateCachedSource(messageId, update);
         if (historyLoader != null) pendingSourceUpdates.put(messageId, update);
         if (sourceChanged(sourceMessages, messageId, update)
                 || sourceChanged(lastSuccessfulSources, messageId, update)
@@ -287,6 +319,7 @@ public final class GroupSummarySheet {
         if (closed) return;
         if (!checkAccountOwner()) return;
         SourceUpdate update = new SourceUpdate(text, editDate, usable);
+        invalidateCachedSource(messageId, update);
         if (historyLoader != null) pendingSourceUpdates.put(messageId, update);
         if (sourceChanged(sourceMessages, messageId, update)
                 || sourceChanged(lastSuccessfulSources, messageId, update)
@@ -310,6 +343,7 @@ public final class GroupSummarySheet {
     private void invalidateSources(String reason, boolean accessRevoked) {
         if (closed || !checkAccountOwner()) return;
         cancelWork();
+        clearCachedResult();
         sourceSnapshotInvalid = true;
         sourceMessages = null;
         summaryHistory = null;
@@ -323,6 +357,64 @@ public final class GroupSummarySheet {
         addText(accessRevoked ? "当前聊天内容不可用于总结" : "摘要已过期", true);
         addText(reason, false);
         if (!accessRevoked) addAction("重新读取并选择范围", this::showSelection);
+    }
+
+    private void invalidateCachedSource(int messageId, SourceUpdate update) {
+        if (cachedResult != null && sourceChanged(cachedResult.sources, messageId, update)) clearCachedResult();
+    }
+
+    private void clearCachedResult() {
+        if (cachedResult != null) SummaryResultCache.getInstance().invalidate(cachedResult.key);
+        cachedResult = null;
+        viewingCachedResult = false;
+    }
+
+    private void cacheCompletedResult(String summary) {
+        if (sourceSnapshotInvalid || summaryHistory == null || !summaryHistory.complete
+                || sourceMessages == null || sourceMessages.isEmpty()
+                || summaryRange == null || !resultCommitted && summaryRange.mode != RangeMode.REPLAY) return;
+        try {
+            SummaryResultCache.Key key = SummaryResultCache.key(account, ownerId, dialogId, topicId,
+                    sourceMessages, summaryPrompt, summaryConfig, null);
+            long generatedAt = System.currentTimeMillis();
+            if (SummaryResultCache.getInstance().put(key, summary, generatedAt)) {
+                cachedResult = new CachedResult(key, sourceMessages, summaryHistory, summaryRange,
+                        summaryConfig, summaryPrompt, coverageNote, generatedAt,
+                        Math.max(0L, SystemClock.elapsedRealtime() - summaryStartedAt));
+            }
+        } catch (RuntimeException ignored) {
+            // Optional, bounded memory caching must not turn a completed task into a failure.
+        }
+    }
+
+    private void viewExistingResult() {
+        if (cachedResult == null || closed || !checkAccountOwner()) return;
+        if (MessagesController.getInstance(account).isPeerNoForwards(dialogId)) {
+            onAccessRevoked();
+            return;
+        }
+        CachedResult snapshot = cachedResult;
+        SummaryResultCache.Entry entry = SummaryResultCache.getInstance().get(snapshot.key, true);
+        if (entry == null) {
+            cachedResult = null;
+            settingsNotice = "已有结果已失效或已被清理，请重新生成。";
+            showSelection();
+            return;
+        }
+        cancelWork();
+        sourceSnapshotInvalid = false;
+        viewingCachedResult = true;
+        sourceMessages = new ArrayList<>(snapshot.sources);
+        summaryHistory = snapshot.history;
+        summaryRange = snapshot.range;
+        summaryConfig = snapshot.config;
+        summaryPrompt = snapshot.prompt;
+        coverageNote = snapshot.coverage;
+        summaryStartedAt = SystemClock.elapsedRealtime() - snapshot.elapsedMs;
+        resultCommitted = false;
+        completionNotice = "已有结果，生成于 " + new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
+                .format(new Date(entry.generatedAtMillis)) + "。这是当时原文和配置生成的历史结果，不代表当前最新消息或模型。";
+        showResult(entry.summary);
     }
 
     private void closeSourcePreview() {
@@ -538,6 +630,10 @@ public final class GroupSummarySheet {
         addText(topicId == 0 ? "选择本群的文字消息范围" : "仅总结当前话题的文字消息", true);
         if (settingsNotice != null) {
             addText(settingsNotice, false);
+        }
+        if (cachedResult != null) {
+            addAction("查看已有结果（" + new SimpleDateFormat("MM-dd HH:mm", Locale.getDefault())
+                    .format(new Date(cachedResult.generatedAt)) + "）", this::viewExistingResult);
         }
 
         RadioGroup choices = new RadioGroup(context);
@@ -933,6 +1029,10 @@ public final class GroupSummarySheet {
         EditTextBoldCursor outputTokens = edit("512", Integer.toString(config.maxOutputTokens),
                 InputType.TYPE_CLASS_NUMBER);
         addText("服务端支持时生效；较大的值会增加手机推理耗时。", false);
+        addText("上下文字符预算（2048–32000）", true);
+        EditTextBoldCursor contextBudget = edit("6000", Integer.toString(config.inputCharacterBudget),
+                InputType.TYPE_CLASS_NUMBER);
+        addText("这是保守的字符估计，不是模型 token 数。预算会预留规则、补充要求和输出空间；较大预算可能增加手机内存及耗时。", false);
         CheckBox streaming = new CheckBox(context);
         streaming.setText("流式显示（需要服务支持）");
         streaming.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 16);
@@ -952,15 +1052,15 @@ public final class GroupSummarySheet {
         validation.setTextColor(color(Theme.key_text_RedRegular));
         validation.setVisibility(View.GONE);
         addAction("测试连接", () -> {
-            AiSummarySettings.Config snapshot = readSettingsInput(address, model, key, outputTokens, validation,
-                    streaming.isChecked(), config.inputCharacterBudget);
+            AiSummarySettings.Config snapshot = readSettingsInput(address, model, key, outputTokens, contextBudget,
+                    validation, streaming.isChecked());
             if (snapshot != null) {
                 testConnection(snapshot);
             }
         });
         addAction("保存设置", () -> {
-            AiSummarySettings.Config updated = readSettingsInput(address, model, key, outputTokens, validation,
-                    streaming.isChecked(), config.inputCharacterBudget);
+            AiSummarySettings.Config updated = readSettingsInput(address, model, key, outputTokens, contextBudget,
+                    validation, streaming.isChecked());
             if (updated != null) {
                 saveSettings(updated);
             }
@@ -970,7 +1070,7 @@ public final class GroupSummarySheet {
 
     private AiSummarySettings.Config readSettingsInput(EditTextBoldCursor address, EditTextBoldCursor model,
                                                        EditTextBoldCursor key, EditTextBoldCursor outputTokens,
-                                                       TextView validation, boolean stream, int inputCharacterBudget) {
+                                                       EditTextBoldCursor contextBudget, TextView validation, boolean stream) {
         validation.setVisibility(View.GONE);
         int tokens;
         try {
@@ -981,6 +1081,17 @@ public final class GroupSummarySheet {
         if (tokens < 64 || tokens > 8192) {
             outputTokens.setError("请输入 64–8192 之间的值");
             outputTokens.requestFocus();
+            return null;
+        }
+        int inputCharacterBudget;
+        try {
+            inputCharacterBudget = Integer.parseInt(contextBudget.getText().toString().trim());
+        } catch (NumberFormatException ignored) {
+            inputCharacterBudget = 0;
+        }
+        if (inputCharacterBudget < 2048 || inputCharacterBudget > 32000) {
+            contextBudget.setError("请输入 2048–32000 之间的值");
+            contextBudget.requestFocus();
             return null;
         }
         AiSummarySettings.Config config = new AiSummarySettings.Config(address.getText().toString().trim(),
@@ -1120,6 +1231,7 @@ public final class GroupSummarySheet {
         summaryHistory = null;
         completionNotice = null;
         resultCommitted = false;
+        viewingCachedResult = false;
         sourceSnapshotInvalid = false;
         summaryRange = request;
         summaryPrompt = prompt;
@@ -1127,6 +1239,12 @@ public final class GroupSummarySheet {
         String settingsError = AiSummarySettings.validate(config);
         if (settingsError != null) {
             showError(settingsError);
+            return;
+        }
+        try {
+            AiSummaryPrompt.dataBudget(prompt, config.inputCharacterBudget, config.maxOutputTokens);
+        } catch (IllegalArgumentException error) {
+            showError(error.getMessage());
             return;
         }
         completionToken = new SummaryStateStore.CompletionToken();
@@ -1251,6 +1369,7 @@ public final class GroupSummarySheet {
             completionNotice = "重做完成；已保存的增量进度和原始恢复范围保持不变。";
             lastSuccessfulHistory = summaryHistory;
             lastSuccessfulSources = new ArrayList<>(sourceMessages);
+            cacheCompletedResult(summary);
             showResult(summary);
             return;
         }
@@ -1284,6 +1403,7 @@ public final class GroupSummarySheet {
                     lastSuccessfulSources = sources;
                     completionNotice = advance ? "本批完整完成，增量进度已保存。"
                             : "本批完成记录已保存，增量进度保持不变。";
+                    cacheCompletedResult(summary);
                     showResult(summary);
                 });
             } catch (RuntimeException ignored) {
@@ -1366,11 +1486,19 @@ public final class GroupSummarySheet {
         streamingDraft = null;
         summaryInferenceStarted = false;
         clearContent();
-        addText((summaryHistory != null && !summaryHistory.complete ? "部分覆盖" : "已生成") + " · 总耗时 " + Math.max(0L,
+        addText((viewingCachedResult ? "历史结果" : summaryHistory != null && !summaryHistory.complete ? "部分覆盖" : "已生成") + " · 生成耗时 " + Math.max(0L,
                 (SystemClock.elapsedRealtime() - summaryStartedAt) / 1000) + " 秒", false);
         if (completionNotice != null) addText(completionNotice, true);
         if (summaryPrompt != null) {
             addText("总结方向：" + PromptOptions.templateLabel(summaryPrompt.templateId), false);
+            if (!summaryPrompt.customInstructions.isEmpty()) {
+                addText("生成时补充要求：" + summaryPrompt.customInstructions, false);
+            }
+        }
+        if (viewingCachedResult && summaryConfig != null) {
+            addText("生成时请求模型：" + (summaryConfig.model.isEmpty() ? "服务当前模型（未指定名称）" : summaryConfig.model)
+                    + "；上下文预算 " + summaryConfig.inputCharacterBudget + " 字符；输出上限 "
+                    + summaryConfig.maxOutputTokens + " token。请求名称不代表已核实的实际模型版本。", false);
         }
         addText(coverageNote, false);
         addText("点击 [m数字] 先核验并预览原文，再选择跳回群聊；请结合原文核对模型生成的结论。", false);
@@ -1379,11 +1507,18 @@ public final class GroupSummarySheet {
         result.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 16);
         result.setMovementMethod(LinkMovementMethod.getInstance());
         result.setLinksClickable(true);
-        if (summaryHistory != null && summaryHistory.complete && summaryHistory.hasMore
+        if (!viewingCachedResult && summaryHistory != null && summaryHistory.complete && summaryHistory.hasMore
                 && (summaryRange.mode == RangeMode.SINCE || summaryRange.mode == RangeMode.UNREAD
                     ? resultCommitted : summaryRange.mode == RangeMode.REPLAY
                         && summaryRange.upper > summaryHistory.coveredThroughId)) {
             addAction("继续下一批", this::continueBatch);
+        }
+        if (viewingCachedResult && summaryHistory != null && sourceMessages != null) {
+            final RangeRequest regenerate = new RangeRequest(RangeMode.REPLAY, recentCount,
+                    summaryRange.expectedCursor, summaryHistory.lowerExclusiveId, summaryHistory.coveredThroughId,
+                    false, summaryHistory, sourceMessages);
+            addAction("按当前设置和方向重新生成", () -> startSummary(regenerate));
+            addText("重新调用模型，使用这份结果生成时的原文快照；若需最新消息，请重新选择范围。", false);
         }
         addAction("重新选择范围", this::showSelection);
     }

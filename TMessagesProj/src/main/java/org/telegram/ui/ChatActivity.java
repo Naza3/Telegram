@@ -20587,11 +20587,14 @@ public class ChatActivity extends BaseFragment implements
     /** Keep explicit saved-result views and an open summary consistent with observed source changes. */
     private void updateSummarySources(int id, int account, Object[] args) {
         if (account != currentAccount || dialog_id >= 0 || currentChat == null) return;
+        long owner = getUserConfig().getClientUserId();
         if (id == NotificationCenter.messagesDeleted && args.length >= 3 && !((Boolean) args[2])) {
             long channel = (Long) args[1];
             if (channel != (ChatObject.isChannel(currentChat) ? -dialog_id : 0)) return;
             ArrayList<Integer> deleted = (ArrayList<Integer>) args[0];
             for (int messageId : deleted) {
+                org.telegram.messenger.ai.SummaryResultCache.getInstance()
+                        .invalidateMessage(currentAccount, owner, dialog_id, messageId);
                 if (groupSummarySheet != null) groupSummarySheet.onSourceDeleted(messageId);
             }
         } else if (id == NotificationCenter.replaceMessagesObjects && (Long) args[0] == dialog_id) {
@@ -20599,6 +20602,8 @@ public class ChatActivity extends BaseFragment implements
             for (MessageObject message : replaced) {
                 if (message == null || message.messageOwner == null) continue;
                 TLRPC.Message source = message.messageOwner;
+                org.telegram.messenger.ai.SummaryResultCache.getInstance()
+                        .invalidateMessage(currentAccount, owner, dialog_id, source.id);
                 if (groupSummarySheet != null) {
                     groupSummarySheet.onSourceUpdated(source.id, source.message, source.edit_date,
                             org.telegram.messenger.ai.SummaryHistoryLoader.isUsableText(source));
@@ -20609,6 +20614,8 @@ public class ChatActivity extends BaseFragment implements
             TLRPC.Chat fresh = getMessagesController().getChat(-dialog_id);
             if (fresh != null && (fresh.noforwards || fresh.kicked || fresh.left || fresh.deactivated
                     || fresh instanceof TLRPC.TL_chatForbidden || fresh instanceof TLRPC.TL_channelForbidden)) {
+                // Access changes cover all topics, including entries generated in another topic.
+                org.telegram.messenger.ai.SummaryResultCache.getInstance().clearOwner(currentAccount, owner);
                 if (groupSummarySheet != null) groupSummarySheet.onAccessRevoked();
             }
         }

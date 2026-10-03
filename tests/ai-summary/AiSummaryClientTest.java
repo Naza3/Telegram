@@ -195,6 +195,15 @@ public final class AiSummaryClientTest {
                 check(result.result != null && !lastBody.get().getBoolean("stream"), "diagnostic should not depend on streaming");
             });
             test("cancelling a live SSE suppresses later partials and final callback", AiSummaryClientTest::cancelLiveStream);
+            test("configured budget reaches every source and merge request", AiSummaryClientTest::configuredBudget);
+            test("impossible input/output budget fails before sending messages", () -> {
+                requestHistory.clear();
+                AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
+                client.summarize(new AiSummarySettings.Config(base, "local", "", 8192, false, 2048), MESSAGES, result);
+                await(result); client.cancel();
+                check(result.error != null && requestHistory.isEmpty(), "over-budget request reached service");
+            });
+            test("same endpoint rejects concurrent tasks and releases after cancellation", AiSummaryClientTest::endpointConcurrency);
             System.out.println("AiSummaryClientTest: " + passed + " passed");
         } catch (Throwable error) {
             error.printStackTrace(); exit = 1;
@@ -226,8 +235,8 @@ public final class AiSummaryClientTest {
         client.summarize(config("local", ""), MESSAGES, stale);
         check(requestStarted.await(5, TimeUnit.SECONDS), "request did not begin");
         client.cancel(); releaseRequest.countDown();
-        Result fresh = new Result(); nextReply.set(new Reply(200, completion("新请求 [m1]")));
-        client.summarize(config("local", ""), MESSAGES, fresh); await(fresh);
+        nextReply.set(new Reply(200, completion("新请求 [m1]")));
+        Result fresh = afterCancellation(client);
         check(stale.calls == 0 && fresh.calls == 1 && "新请求 [m1]".equals(fresh.summary), "stale callback or failed replacement");
         client.cancel(); requestStarted = null; releaseRequest = null;
     }
@@ -292,7 +301,9 @@ public final class AiSummaryClientTest {
         for (int i = 1; i <= 10; i++) {
             messages.add(new SummaryMessage(-100, i, 1_700_000_000 + i, "甲", "项目进展".repeat(800)));
         }
-        int sourceCount = AiSummaryPrompt.sourceChunks(messages, options).size();
+        AiSummarySettings.Config taskConfig = config("local", "");
+        int sourceCount = AiSummaryPrompt.sourceChunks(messages, options,
+                taskConfig.inputCharacterBudget, taskConfig.maxOutputTokens).size();
         check(sourceCount >= 8, "fixture must exercise several source chunks");
         AtomicInteger secondMergeRound = new AtomicInteger();
         AtomicInteger sources = new AtomicInteger();
@@ -316,7 +327,7 @@ public final class AiSummaryClientTest {
         });
         AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
         try {
-            client.summarize(config("local", ""), messages, options, result); await(result);
+            client.summarize(taskConfig, messages, options, result); await(result);
             check(result.error == null && result.summary != null, "multi-round summary failed: " + result.error);
             check(sources.get() == sourceCount && secondMergeRound.get() >= 1, "did not exercise at least two merge rounds");
             for (JSONObject body : requestHistory) {
@@ -489,12 +500,72 @@ public final class AiSummaryClientTest {
             releaseStream.countDown();
             int partialCount = stale.partials.size(), progressCount = stale.progress.size();
             nextReply.set(new Reply(200, completion("新的普通请求 [m1]")));
-            Result fresh = new Result(); client.summarize(config("local", ""), MESSAGES, fresh); await(fresh);
+            Result fresh = afterCancellation(client);
             check(stale.calls == 0 && stale.partials.size() == partialCount && stale.progress.size() == progressCount,
                     "cancelled stream delivered a later callback");
             check(fresh.summary != null, "client did not recover after stream cancellation");
         } finally {
             client.cancel(); releaseStream.countDown(); server.removeContext(path);
+        }
+    }
+
+    private static Result afterCancellation(AiSummaryClient client) throws Exception {
+        long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (true) {
+            Result result = new Result();
+            client.summarize(config("local", ""), MESSAGES, result); await(result);
+            if (result.error == null || !result.error.contains("已有任务") || System.nanoTime() >= end) return result;
+            Thread.sleep(20); // The cancelled worker keeps its permit until transport cleanup ends.
+        }
+    }
+
+    private static void configuredBudget() throws Exception {
+        AiSummarySettings.Config taskConfig = new AiSummarySettings.Config(base, "local", "", 512, false, 5000);
+        PromptOptions direction = new PromptOptions(PromptOptions.DECISIONS, "预算测试方向");
+        List<SummaryMessage> messages = List.of(new SummaryMessage(-100, 1, 1_700_000_000, "甲", "长聊天".repeat(5000)));
+        int sources = AiSummaryPrompt.sourceChunks(messages, direction,
+                taskConfig.inputCharacterBudget, taskConfig.maxOutputTokens).size();
+        requestHistory.clear();
+        replyGenerator.set(body -> new Reply(200, completion("有效摘要".repeat(90) + " [m1]")));
+        AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
+        try {
+            client.summarize(taskConfig, messages, direction, result); await(result);
+            check(result.summary != null, "configured budget failed: " + result.error);
+            check(requestHistory.size() > sources, "fixture did not need merging");
+            for (JSONObject body : requestHistory) {
+                String system = body.getJSONArray("messages").getJSONObject(0).getString("content");
+                String prompt = body.getJSONArray("messages").getJSONObject(1).getString("content");
+                check(system.length() + prompt.length() + taskConfig.maxOutputTokens * 4 <= taskConfig.inputCharacterBudget,
+                        "a request ignored configured context/output reserves");
+                check(prompt.contains(direction.customInstructions), "budget path lost direction");
+            }
+        } finally {
+            client.cancel(); replyGenerator.set(null);
+        }
+    }
+
+    private static void endpointConcurrency() throws Exception {
+        requestStarted = new CountDownLatch(1); releaseRequest = new CountDownLatch(1);
+        nextReply.set(new Reply(200, completion("阻塞任务 [m1]"), true));
+        requestHistory.clear();
+        AiSummaryClient first = new AiSummaryClient(), second = new AiSummaryClient();
+        Result blocked = new Result();
+        try {
+            first.summarize(config("model-one", ""), MESSAGES, blocked);
+            check(requestStarted.await(5, TimeUnit.SECONDS), "first endpoint task did not start");
+            Result rejected = new Result(); second.summarize(config("model-two", ""), MESSAGES, rejected); await(rejected);
+            check(rejected.error != null && rejected.error.contains("已有任务"), "second client reached a busy endpoint");
+            Diagnostic probe = new Diagnostic();
+            second.testConnection(new AiSummarySettings.Config(base.replace("127.0.0.1", "localhost") + "/v1/", "", ""), probe);
+            await(probe);
+            check(probe.error != null && probe.error.contains("已有任务"), "diagnostic/localhost alias bypassed endpoint guard");
+            check(requestHistory.size() == 1, "busy operation sent another HTTP request");
+            first.cancel(); releaseRequest.countDown();
+            nextReply.set(new Reply(200, completion("取消后恢复 [m1]")));
+            Result fresh = afterCancellation(second);
+            check(fresh.summary != null && blocked.calls == 0, "cancel did not eventually release the endpoint");
+        } finally {
+            first.cancel(); second.cancel(); releaseRequest.countDown(); requestStarted = null;
         }
     }
     private static void await(Result result) throws Exception {

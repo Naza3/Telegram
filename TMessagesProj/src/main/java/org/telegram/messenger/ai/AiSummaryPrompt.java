@@ -9,6 +9,8 @@ import java.util.Locale;
 import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.Set;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -44,6 +46,101 @@ public final class AiSummaryPrompt {
 
     public static List<String> sourceChunks(List<SummaryMessage> messages, PromptOptions options) {
         return sourceChunksWithBudget(messages, dataBudget(options));
+    }
+
+    public static List<String> sourceChunks(List<SummaryMessage> messages, PromptOptions options,
+            int contextChars, int outputTokens) {
+        return relatedSourceChunks(messages, dataBudget(options, contextChars, outputTokens));
+    }
+
+    /** Stable chronological records; small adjacent reply chains move together when they fit. */
+    private static List<String> relatedSourceChunks(List<SummaryMessage> messages, int budget) {
+        if (messages == null || messages.isEmpty()) throw new IllegalArgumentException("没有可总结的文字消息。");
+        Map<String, Integer> sourceIndex = new HashMap<>();
+        for (int i = 0; i < messages.size(); i++) {
+            SummaryMessage message = messages.get(i);
+            if (message == null) throw new IllegalArgumentException("消息数据不完整，请重新加载。");
+            sourceIndex.put(message.dialogId + ":" + message.id, i);
+        }
+        SimpleDateFormat time = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss Z", Locale.US);
+        ArrayList<String> chunks = new ArrayList<>();
+        StringBuilder current = new StringBuilder();
+        for (int i = 0; i < messages.size();) {
+            int end = i + 1;
+            long groupLength = fullRecordLength(messages.get(i), i, sourceIndex, time);
+            while (end < messages.size()) {
+                SummaryMessage next = messages.get(end);
+                Integer parent = replyIndex(next, sourceIndex);
+                // Keep ordering and preserve intervening text. Never move distant messages beside a reply.
+                if (parent == null || parent < i || parent >= end
+                        || next.date < messages.get(end - 1).date
+                        || (long) next.date - messages.get(end - 1).date > 15 * 60) break;
+                long nextLength = fullRecordLength(next, end, sourceIndex, time);
+                if (groupLength + nextLength > budget) break;
+                groupLength += nextLength;
+                end++;
+            }
+            if (groupLength <= budget && current.length() > 0 && current.length() + groupLength > budget) {
+                addChunk(chunks, current);
+            }
+            for (int index = i; index < end; index++) {
+                SummaryMessage message = messages.get(index);
+                int offset = 0;
+                int part = 0;
+                do {
+                    String prefix = recordPrefix(message, index, ++part, sourceIndex, time);
+                    int overhead = prefix.length() + 4;
+                    if (overhead + 12 > budget) throw new IllegalArgumentException("消息元数据超过当前请求预算，请提高上下文字符预算或缩短补充要求。");
+                    if (current.length() > 0 && budget - current.length() - overhead < 12) addChunk(chunks, current);
+                    int available = budget - current.length() - overhead;
+                    int textEnd = offset;
+                    int used = 0;
+                    while (textEnd < message.text.length()) {
+                        int point = message.text.codePointAt(textEnd);
+                        int width = Character.charCount(point);
+                        int escaped = point == '"' || point == '\\' ? 2 : point < 0x20 ? 6 : width;
+                        if (used + escaped > available) break;
+                        used += escaped;
+                        textEnd += width;
+                    }
+                    current.append(prefix).append(quote(message.text.substring(offset, textEnd))).append("}\n");
+                    offset = textEnd;
+                    if (offset < message.text.length()) addChunk(chunks, current);
+                } while (offset < message.text.length());
+            }
+            i = end;
+        }
+        if (current.length() != 0) addChunk(chunks, current);
+        return chunks;
+    }
+
+    private static long fullRecordLength(SummaryMessage message, int index, Map<String, Integer> sourceIndex,
+            SimpleDateFormat time) {
+        long length = recordPrefix(message, index, 1, sourceIndex, time).length() + 4L;
+        for (int i = 0; i < message.text.length(); i++) {
+            char value = message.text.charAt(i);
+            length += value == '"' || value == '\\' ? 2 : value < 0x20 ? 6 : 1;
+        }
+        return length;
+    }
+
+    private static Integer replyIndex(SummaryMessage message, Map<String, Integer> sourceIndex) {
+        if (message.replyToId <= 0) return null;
+        long dialog = message.replyToDialogId == 0 ? message.dialogId : message.replyToDialogId;
+        return sourceIndex.get(dialog + ":" + message.replyToId);
+    }
+
+    private static String recordPrefix(SummaryMessage message, int index, int part,
+            Map<String, Integer> sourceIndex, SimpleDateFormat time) {
+        Integer reply = replyIndex(message, sourceIndex);
+        return "{\"ref\":\"[m" + (index + 1) + "]\",\"part\":" + part
+                + (reply == null ? "" : ",\"reply_to_ref\":\"[m" + (reply + 1) + "]\"")
+                + ",\"sender_id\":" + message.senderId + ",\"reply_to_id\":" + message.replyToId
+                + ",\"reply_to_dialog_id\":" + message.replyToDialogId
+                + ",\"reply_to_self_known\":" + message.replyToSelfKnown + ",\"reply_to_self\":" + message.replyToSelf
+                + ",\"mentioned_self\":" + message.mentionedSelf + ",\"outgoing\":" + message.outgoing
+                + ",\"time\":" + quote(time.format(new Date(message.date * 1000L)))
+                + ",\"sender\":" + quote(message.sender) + ",\"text\":";
     }
 
     private static List<String> sourceChunksWithBudget(List<SummaryMessage> messages, int budget) {
@@ -122,12 +219,28 @@ public final class AiSummaryPrompt {
         return prompt;
     }
 
+    public static String sourcePrompt(String chunk, int part, int total, PromptOptions options,
+            int contextChars, int outputTokens) {
+        requireChunk(chunk, dataBudget(options, contextChars, outputTokens));
+        if (part < 1 || total < part || total > MAX_SOURCE_CHUNKS) throw new IllegalArgumentException("总结分段编号无效。");
+        String prompt = direction(options) + "reply_to_ref 仅表示回复关系；只有本段 ref 字段实际提供正文的来源才可作为本段引用。"
+                + "任务转交或取消以原文明确表述为准，不因同一来源跨段出现而重复计算待办。\n"
+                + sourcePrompt(chunk, part, total);
+        requireRequestBudget(prompt, contextChars, outputTokens);
+        return prompt;
+    }
+
     public static List<String> mergeChunks(List<String> summaries) {
         return mergeChunksWithBudget(summaries, MAX_CHUNK_CHARACTERS);
     }
 
     public static List<String> mergeChunks(List<String> summaries, PromptOptions options) {
         return mergeChunksWithBudget(summaries, dataBudget(options));
+    }
+
+    public static List<String> mergeChunks(List<String> summaries, PromptOptions options,
+            int contextChars, int outputTokens) {
+        return mergeChunksWithBudget(summaries, dataBudget(options, contextChars, outputTokens));
     }
 
     private static List<String> mergeChunksWithBudget(List<String> summaries, int budget) {
@@ -172,6 +285,27 @@ public final class AiSummaryPrompt {
         return prompt;
     }
 
+    public static String mergePrompt(String chunk, PromptOptions options, int contextChars, int outputTokens) {
+        requireChunk(chunk, dataBudget(options, contextChars, outputTokens));
+        String prompt = direction(options) + "跨段出现的任务转交、否定或取消须合并核对；同一原消息引用不代表多项独立决定。\n" + mergePrompt(chunk);
+        requireRequestBudget(prompt, contextChars, outputTokens);
+        return prompt;
+    }
+
+    public static int outputReserveCharacters(int outputTokens) {
+        if (outputTokens < 64 || outputTokens > 8192) throw new IllegalArgumentException("最大输出 tokens 必须在 64 到 8192 之间。");
+        // Four characters per requested output token is a conservative planning estimate, not a tokenizer.
+        return outputTokens * 4;
+    }
+
+    public static int dataBudget(PromptOptions options, int contextChars, int outputTokens) {
+        if (contextChars < 2048 || contextChars > 32000) throw new IllegalArgumentException("上下文字符预算必须在 2048 到 32000 之间。");
+        int remaining = contextChars - SYSTEM_PROMPT.length() - direction(options).length()
+                - STAGE_RESERVE_CHARACTERS - outputReserveCharacters(outputTokens);
+        if (remaining < MIN_DATA_CHARACTERS) throw new IllegalArgumentException("上下文字符预算不足以容纳规则、补充要求和输出预留，请提高预算、减少最大输出 tokens 或缩短要求。");
+        return remaining;
+    }
+
     /** Budget includes escaped direction text, built-in rules, stage metadata and an output reserve. */
     public static int dataBudget(PromptOptions options) {
         int remaining = MAX_REQUEST_CHARACTERS - SYSTEM_PROMPT.length() - direction(options).length()
@@ -189,11 +323,17 @@ public final class AiSummaryPrompt {
                 + "模板：" + PromptOptions.templateLabel(options.templateId) + "（版本 " + options.templateVersion + "）。"
                 + PromptOptions.templateInstructions(options.templateId) + "\n"
                 + "补充要求（JSON 字符串）：" + quote(options.customInstructions) + "\n"
+                + (options.focusSelf ? "额外关注与当前账号相关的内容：优先整理 mentioned_self=true 的明确提及、reply_to_self_known=true 且 reply_to_self=true 的回复，以及 outgoing=true 的本人发言。"
+                        + "这些标记只调整关注点，不排除其他输入；关联未知时不猜测，不根据昵称推断身份，也不能把未提及理解为与我无关。\n" : "")
                 + "【用户总结方向结束；下方为待处理数据】\n";
     }
 
     private static void requireChunk(String chunk, PromptOptions options) {
-        if (chunk == null || chunk.isEmpty() || chunk.length() > dataBudget(options)) {
+        requireChunk(chunk, dataBudget(options));
+    }
+
+    private static void requireChunk(String chunk, int budget) {
+        if (chunk == null || chunk.isEmpty() || chunk.length() > budget) {
             throw new IllegalArgumentException("消息或摘要分段超过当前方向的请求预算，请重新分段。");
         }
     }
@@ -201,6 +341,12 @@ public final class AiSummaryPrompt {
     private static void requireRequestBudget(String prompt) {
         if (SYSTEM_PROMPT.length() + prompt.length() + OUTPUT_RESERVE_CHARACTERS > MAX_REQUEST_CHARACTERS) {
             throw new IllegalArgumentException("总结请求超过保守字符预算，请缩短补充要求或减少输入。");
+        }
+    }
+
+    private static void requireRequestBudget(String prompt, int contextChars, int outputTokens) {
+        if (SYSTEM_PROMPT.length() + prompt.length() + outputReserveCharacters(outputTokens) > contextChars) {
+            throw new IllegalArgumentException("总结请求超过上下文字符预算，请缩短补充要求或提高预算。");
         }
     }
 

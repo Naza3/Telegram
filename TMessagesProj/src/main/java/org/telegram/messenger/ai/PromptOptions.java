@@ -18,8 +18,14 @@ public final class PromptOptions {
     public final String customInstructions;
     public final int templateVersion;
     public final int builtinRulesVersion;
+    /** Session scope only: emphasize reliable self-related metadata without excluding any source. */
+    public final boolean focusSelf;
 
     public PromptOptions(String templateId, String customInstructions) {
+        this(templateId, customInstructions, false);
+    }
+
+    private PromptOptions(String templateId, String customInstructions, boolean focusSelf) {
         if (!GENERAL.equals(templateId) && !PROJECT.equals(templateId)
                 && !DECISIONS.equals(templateId) && !TODOS.equals(templateId)) {
             throw new IllegalArgumentException("总结模板无效，请重新选择。");
@@ -43,6 +49,11 @@ public final class PromptOptions {
         this.customInstructions = custom.trim();
         this.templateVersion = TEMPLATE_VERSION;
         this.builtinRulesVersion = BUILTIN_RULES_VERSION;
+        this.focusSelf = focusSelf;
+    }
+
+    public PromptOptions withFocusSelf(boolean enabled) {
+        return enabled == focusSelf ? this : new PromptOptions(templateId, customInstructions, enabled);
     }
 
     public static String templateLabel(String templateId) {
@@ -70,11 +81,12 @@ public final class PromptOptions {
         if (!(other instanceof PromptOptions)) return false;
         PromptOptions value = (PromptOptions) other;
         return templateVersion == value.templateVersion && builtinRulesVersion == value.builtinRulesVersion
+                && focusSelf == value.focusSelf
                 && templateId.equals(value.templateId) && customInstructions.equals(value.customInstructions);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(templateId, customInstructions, templateVersion, builtinRulesVersion);
+        return Objects.hash(templateId, customInstructions, templateVersion, builtinRulesVersion, focusSelf);
     }
 }

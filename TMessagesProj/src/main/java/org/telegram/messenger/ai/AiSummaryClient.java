@@ -16,10 +16,13 @@ import java.net.ConnectException;
 import java.net.SocketTimeoutException;
 import java.net.UnknownHostException;
 import java.net.URL;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -73,6 +76,7 @@ public final class AiSummaryClient {
     }
 
     private static final ExecutorService EXECUTOR = Executors.newFixedThreadPool(2);
+    private static final Set<String> ACTIVE_ENDPOINTS = new HashSet<>();
     // Closing an actively read HttpURLConnection can block on its stream lock; never do it on UI.
     private static final ExecutorService DISCONNECT_EXECUTOR = Executors.newCachedThreadPool(action -> {
         Thread thread = new Thread(action, "ai-summary-disconnect");
@@ -111,21 +115,26 @@ public final class AiSummaryClient {
         cancel();
         final int request = generation;
         task = EXECUTOR.submit(() -> {
+            EndpointLease endpoint = null;
             try {
                 String error = AiSummarySettings.validate(config);
                 if (error != null) {
                     throw new SummaryException(error);
                 }
+                endpoint = acquireEndpoint(config, request);
                 long started = System.nanoTime();
                 Completion result = complete(config, "This is a connection test. Reply only OK, without reasoning.",
                         "Reply OK.", 64, diagnosticTimeoutMs, request, false, null);
                 DiagnosticResult diagnostic = new DiagnosticResult(
                         Math.max(0, (System.nanoTime() - started) / 1_000_000L), result.reportedModel);
+                endpoint.close();
                 deliver(request, () -> callback.onSuccess(diagnostic));
             } catch (CancelledException ignored) {
             } catch (Exception error) {
+                if (endpoint != null) endpoint.close();
                 deliver(request, () -> callback.onError(describeError(error)));
             } finally {
+                if (endpoint != null) endpoint.close();
                 finishTask(request);
             }
         });
@@ -143,12 +152,15 @@ public final class AiSummaryClient {
         final PromptOptions direction = options; // Immutable and fixed for all source/merge requests.
         task = EXECUTOR.submit(() -> {
             long started = System.nanoTime();
+            EndpointLease endpoint = null;
             try {
                 String error = AiSummarySettings.validate(config);
                 if (error != null) {
                     throw new SummaryException(error);
                 }
-                List<String> chunks = AiSummaryPrompt.sourceChunks(snapshot, direction);
+                List<String> chunks = AiSummaryPrompt.sourceChunks(snapshot, direction,
+                        config.inputCharacterBudget, config.maxOutputTokens);
+                endpoint = acquireEndpoint(config, request);
                 int requestCount = chunks.size();
                 List<String> summaries = new ArrayList<>();
                 progress(request, callback, Stage.SOURCE, 0, chunks.size(), 0, started);
@@ -156,7 +168,8 @@ public final class AiSummaryClient {
                     checkActive(request);
                     String chunk = chunks.get(i);
                     String summary = complete(config,
-                            AiSummaryPrompt.sourcePrompt(chunk, i + 1, chunks.size(), direction), request,
+                            AiSummaryPrompt.sourcePrompt(chunk, i + 1, chunks.size(), direction,
+                                    config.inputCharacterBudget, config.maxOutputTokens), request,
                             chunks.size() == 1, callback);
                     AiSummaryPrompt.validateReferences(summary, AiSummaryPrompt.sourceReferences(chunk));
                     summaries.add(summary);
@@ -165,7 +178,8 @@ public final class AiSummaryClient {
                 int mergeRound = 0;
                 while (summaries.size() > 1) {
                     checkActive(request);
-                    List<String> mergeChunks = AiSummaryPrompt.mergeChunks(summaries, direction);
+                    List<String> mergeChunks = AiSummaryPrompt.mergeChunks(summaries, direction,
+                            config.inputCharacterBudget, config.maxOutputTokens);
                     requestCount += mergeChunks.size();
                     if (requestCount > MAX_MODEL_REQUESTS) {
                         throw new SummaryException("分段摘要无法在本次请求上限内完成合并。请减少消息数量后重试。");
@@ -174,7 +188,8 @@ public final class AiSummaryClient {
                     mergeRound++;
                     progress(request, callback, Stage.MERGE, 0, mergeChunks.size(), mergeRound, started);
                     for (String chunk : mergeChunks) {
-                        String summary = complete(config, AiSummaryPrompt.mergePrompt(chunk, direction), request,
+                        String summary = complete(config, AiSummaryPrompt.mergePrompt(chunk, direction,
+                                        config.inputCharacterBudget, config.maxOutputTokens), request,
                                 mergeChunks.size() == 1, callback);
                         // The chunk contains only summaries validated against their own inputs.
                         AiSummaryPrompt.validateReferences(summary, AiSummaryPrompt.references(chunk));
@@ -187,12 +202,15 @@ public final class AiSummaryClient {
                 progress(request, callback, Stage.VALIDATING, 0, 1, mergeRound, started);
                 AiSummaryPrompt.validateReferences(result, snapshot.size());
                 progress(request, callback, Stage.VALIDATING, 1, 1, mergeRound, started);
+                endpoint.close();
                 deliver(request, () -> callback.onSuccess(result));
             } catch (CancelledException ignored) {
                 // Cancellation is not an error and never delivers a stale callback.
             } catch (Exception error) {
+                if (endpoint != null) endpoint.close();
                 deliver(request, () -> callback.onError(describeError(error)));
             } finally {
+                if (endpoint != null) endpoint.close();
                 finishTask(request);
             }
         });
@@ -220,6 +238,48 @@ public final class AiSummaryClient {
     private synchronized void finishTask(int request) {
         if (request == generation) {
             task = null;
+        }
+    }
+
+    private EndpointLease acquireEndpoint(AiSummarySettings.Config config, int request)
+            throws SummaryException, CancelledException {
+        checkActive(request);
+        URI uri = URI.create(AiSummarySettings.completionUrl(config));
+        String scheme = uri.getScheme().toLowerCase(Locale.US);
+        String host = uri.getHost().toLowerCase(Locale.US);
+        if ("localhost".equals(host) || "[::1]".equals(host) || "::1".equals(host)) host = "127.0.0.1";
+        int port = uri.getPort() < 0 ? ("https".equals(scheme) ? 443 : 80) : uri.getPort();
+        String key = scheme + "://" + host + ":" + port + uri.getRawPath();
+        synchronized (ACTIVE_ENDPOINTS) {
+            if (!ACTIVE_ENDPOINTS.add(key)) {
+                throw new SummaryException("该模型服务已有任务正在运行。请等待完成或取消原任务后重试。");
+            }
+        }
+        EndpointLease lease = new EndpointLease(key);
+        try {
+            checkActive(request);
+            return lease;
+        } catch (CancelledException cancelled) {
+            lease.close();
+            throw cancelled;
+        }
+    }
+
+    private static final class EndpointLease {
+        final String key;
+        boolean closed;
+
+        EndpointLease(String key) {
+            this.key = key;
+        }
+
+        void close() {
+            synchronized (ACTIVE_ENDPOINTS) {
+                if (!closed) {
+                    ACTIVE_ENDPOINTS.remove(key);
+                    closed = true;
+                }
+            }
         }
     }
 

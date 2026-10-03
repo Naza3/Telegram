@@ -873,6 +873,7 @@ public class ChatActivity extends BaseFragment implements
     private SparseArray<ArrayList<MessageObject>> messagesByDaysSorted = new SparseArray<>();
     private LongSparseArray<MessageObject> conversionMessages = new LongSparseArray<>();
     public ArrayList<MessageObject> messages = new ArrayList<>();
+    private GroupSummarySheet groupSummarySheet;
     private SparseArray<MessageObject> waitingForReplies = new SparseArray<>();
     private LongSparseArray<ArrayList<MessageObject>> polls = new LongSparseArray<>();
     private LongSparseArray<MessageObject.GroupedMessages> groupedMessagesMap = new LongSparseArray<>();
@@ -1413,6 +1414,12 @@ public class ChatActivity extends BaseFragment implements
         return isTopic || chatMode == MODE_SAVED || chatMode == MODE_QUICK_REPLIES || chatMode == MODE_SUGGESTIONS ? threadMessageId : 0L;
     }
 
+    private boolean canSummarizeGroup() {
+        return chatMode == 0 && currentChat != null && currentEncryptedChat == null
+            && !ChatObject.isChannelAndNotMegaGroup(currentChat) && !ChatObject.isMonoForum(currentChat)
+            && (threadMessageId == 0 || isTopic) && !isReport() && !inPreviewMode && !isPeerNoForwards();
+    }
+
     public SendMessageChatArguments getMessageChatSendParams() {
         final SendMessageChatArguments.Builder builder = new SendMessageChatArguments.Builder();
         if (chatMode == MODE_WELCOME_MESSAGES) {
@@ -1686,6 +1693,7 @@ public class ChatActivity extends BaseFragment implements
     private final static int charge_fee = 72;
 
     private final static int chat_menu_topic_create = 73;
+    private final static int ai_group_summary = 75;
 
     private final static int id_chat_compose_panel = 1000;
 
@@ -3352,6 +3360,10 @@ public class ChatActivity extends BaseFragment implements
 
     @Override
     public void onFragmentDestroy() {
+        if (groupSummarySheet != null) {
+            groupSummarySheet.dismiss();
+            groupSummarySheet = null;
+        }
         super.onFragmentDestroy();
         if (messageMetricsView != null) {
             messageMetricsView.finish();
@@ -3707,6 +3719,18 @@ public class ChatActivity extends BaseFragment implements
                         if (!checkRecordLocked(true, true)) {
                             finishFragment();
                         }
+                    }
+                } else if (id == ai_group_summary) {
+                    if (canSummarizeGroup()) {
+                        if (groupSummarySheet != null) {
+                            groupSummarySheet.dismiss();
+                        }
+                        final long summaryTopicId = getTopicId();
+                        groupSummarySheet = GroupSummarySheet.show(ChatActivity.this, currentAccount, dialog_id, summaryTopicId, (sourceDialogId, messageId) -> {
+                            if (!isFinished && summaryTopicId == getTopicId() && sourceDialogId == dialog_id) {
+                                scrollToMessageId(messageId, 0, true, 0, true, 0);
+                            }
+                        });
                     }
                 } else if (id == view_as_topics) {
                     if (getUserConfig().getClientUserId() == dialog_id) {
@@ -4417,6 +4441,9 @@ public class ChatActivity extends BaseFragment implements
             }
             translateItem = headerItem.lazilyAddSubItem(translate, R.drawable.msg_translate, LocaleController.getString(R.string.TranslateMessage));
             updateTranslateItemVisibility();
+            if (canSummarizeGroup()) {
+                headerItem.lazilyAddSubItem(ai_group_summary, R.drawable.msg_list, getString(R.string.AiGroupSummary));
+            }
             if (currentChat != null && !currentChat.creator && !ChatObject.hasAdminRights(currentChat)) {
                 headerItem.lazilyAddSubItem(report, R.drawable.msg_report, LocaleController.getString(R.string.ReportChat));
             }

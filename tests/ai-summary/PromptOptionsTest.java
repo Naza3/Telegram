@@ -11,6 +11,7 @@ public final class PromptOptionsTest {
     public static void main(String[] args) {
         unicodeAndSnapshots();
         preferences();
+        priorRulesVersionKeepsSavedDirection();
         System.out.println("PromptOptionsTest: " + assertions + " assertions passed");
     }
 
@@ -102,6 +103,25 @@ public final class PromptOptionsTest {
         PromptPreferences.clearOwner(account, owner);
         PromptPreferences.clearOwner(account, replacementOwner);
         UserConfig.getInstance(account).setClientUserId(1000);
+    }
+
+    private static void priorRulesVersionKeepsSavedDirection() {
+        int account = 3;
+        long owner = 5003;
+        UserConfig.getInstance(account).setClientUserId(owner);
+        PromptPreferences.clearOwner(account, owner);
+        PromptOptions saved = new PromptOptions(PromptOptions.TODOS, "升级后仍保留任务取消与负责人");
+        PromptPreferences.save(account, owner, -10, 0, PromptPreferences.Scope.CHAT, saved);
+        String key = "local_ai_prompt_" + owner + "_chat_-10_topic_0";
+        org.json.JSONObject record = new org.json.JSONObject(MessagesController.getMainSettings(account).getString(key, ""));
+        check(record.getInt("rules_version") == 2, "new saved directions identify the compact-source rules version");
+        record.put("rules_version", 1);
+        MessagesController.getMainSettings(account).edit().putString(key, record.toString()).commit();
+        PromptPreferences.Resolved loaded = PromptPreferences.load(account, owner, -10, 0);
+        check(loaded.scope == PromptPreferences.Scope.CHAT && loaded.options.equals(saved), "version-one saved template and custom direction remain usable after the rule update");
+        check(loaded.options.builtinRulesVersion == 2, "a new request snapshots current rules rather than claiming to run old rules");
+        PromptPreferences.clearOwner(account, owner);
+        UserConfig.getInstance(account).setClientUserId(1003);
     }
 
     private static String repeat(String text, int count) { StringBuilder value = new StringBuilder(); for (int i = 0; i < count; i++) value.append(text); return value.toString(); }

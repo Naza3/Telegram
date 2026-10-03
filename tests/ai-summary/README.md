@@ -1,8 +1,9 @@
 # AI summary JVM regression harness
 
 This harness compiles all production Java sources in
-`org.telegram.messenger.ai` except `AiSummarySecretStore`, which uses a test
-double. It discovers and runs every top-level `*Test.java` in this directory.
+`org.telegram.messenger.ai` except the Android boundaries `AiSummarySecretStore`,
+`SummaryHistoryCipher`, and `SummaryHistoryStorage`, which use test doubles.
+It discovers and runs every top-level `*Test.java` in this directory.
 The tests do not contact Telegram, a user model, or an external HTTP service.
 
 From the repository root, with Java 17 or later, Bash, `curl`, `sha256sum`, and
@@ -57,6 +58,9 @@ The tests cover:
   HTTP 200 `Error:` response, thinking removal, SSE/UTF-8 fragmentation and
   completion markers, request/response budgets, same-endpoint concurrency,
   per-stage references, and cancellation before or after queued callbacks.
+  Request telemetry covers safe character counts, actual response transport,
+  observed thinking, empty SSE events, and intermediate streaming without
+  exposing intermediate summary text. Output-limit failures remain failures.
   Diagnostic failures cover selected JSON/plain-text explanations, credential
   redaction, HTML/payload suppression, and isolation from summary/question
   errors. Connection probes use the configured output budget; a length-limited
@@ -73,10 +77,17 @@ The tests cover:
 - `AiSummaryPromptTest`: lossless Unicode source splitting, source/merge
   budgets, prompt directions, injection boundaries, and reference validation.
 - `PromptOptionsTest`: templates, custom direction limits, immutable options,
-  preference scopes and precedence, owner isolation, and persistence rollback.
+  preference scopes and precedence, owner isolation, persistence rollback, and
+  preservation of saved directions when built-in rules advance to version 2.
 - `PromptBudgetTest`: configurable context/output estimates, reply-aware
   grouping, lossless long-message splitting, transfer/negation metadata, and
-  focus-self metadata.
+  focus-self metadata, omission of redundant defaults without changing known
+  reply facts, and brief output guidance for small source sets.
+- `SummaryHistoryStoreTest`: encrypted archive boundary, round trips, stable-ID
+  replacement, account/dialog/topic isolation, record and byte limits, failed
+  publication, corruption handling, scoped deletion, full reset, and logout.
+- `SummarySourceReferenceTest`: immutable message identity and SHA-256 text
+  fingerprints, Unicode matching, and rejection of malformed references.
 - `SummaryStateStoreTest`: atomic result/cursor metadata, continuous progress,
   stale/gapped/incomplete writes, cancellation, failed-commit rollback,
   empty-text batches, corruption, scope isolation, and logout cleanup.
@@ -103,6 +114,23 @@ creating an unrun manual evaluation record, and
 phone/MNN checks.
 
 ## Current revision evidence and limits
+
+The persistent-history and request-progress revision passed 14 JVM test classes:
+59 HTTP cases and 1,116 other core assertions. Archive storage passed 12 groups /
+78 assertions, source fingerprints 38 assertions, and current-source verification
+24 groups / 239 assertions. All 24 synthetic fixtures and 7 build-configuration
+tests passed. Android `compileDebugJavaWithJavac` passed in 1 minute 9 seconds;
+logs are in `/workspace/build-logs/mnn-history-page/`. Full APK CI is pending.
+Real phone persistence, Android Keystore behavior, and model latency remain untested.
+
+For the user's 32,000-character / 2,000-output-token settings, short ten-message
+inputs already fit one model request. Compact metadata and concise output guidance
+reduce input and requested verbosity; they do not prove the cause of a 200-second
+length-limited generation. MNN's independent API session does not inherit the
+chat UI's thinking preference. The prepared MNN patch is separate and has not
+been applied, built, or tested with a real model.
+
+### Previous APK baseline
 
 The range/entry/capture revision `68737de` passed 12 JVM test classes: 56 HTTP cases and
 758 other core assertions. History loading passed 14 groups/90 assertions,
@@ -136,6 +164,8 @@ are an intermediate connection-probe fix, not a build containing this revision.
 The isolated `stubs/` directory models only the Telegram and Android members
 needed for these tests. The secret-store test double checks the settings-layer
 boundary; it does **not** implement or verify Android Keystore encryption.
+History doubles similarly check archive behavior at the cipher/storage
+boundaries, not real AES-GCM keys, AtomicFile durability, or Android backup policy.
 These tests do not substitute for an Android Gradle build, real MTProto history
 validation, device UI/lifecycle checks, Android cleartext/TLS policy checks,
 Keystore persistence, or testing against an actual MNN service. They do not

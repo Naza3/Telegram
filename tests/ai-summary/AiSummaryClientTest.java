@@ -56,10 +56,12 @@ public final class AiSummaryClientTest {
         volatile int calls;
         final List<AiSummaryClient.Progress> progress = new CopyOnWriteArrayList<>();
         final List<String> partials = new CopyOnWriteArrayList<>();
+        final List<AiSummaryClient.RequestStatus> statuses = new CopyOnWriteArrayList<>();
         public void onSuccess(String value) { summary = value; calls++; }
         public void onError(String value) { error = value; calls++; }
         public void onProgress(AiSummaryClient.Progress value) { progress.add(value); }
         public void onPartial(String value) { partials.add(value); }
+        public void onRequestStatus(AiSummaryClient.RequestStatus value) { statuses.add(value); }
     }
     private static final class Diagnostic implements AiSummaryClient.DiagnosticCallback {
         volatile AiSummaryClient.DiagnosticResult result;
@@ -200,7 +202,10 @@ public final class AiSummaryClientTest {
             test("merge citations cannot reintroduce references absent from partials", AiSummaryClientTest::mergeReferenceMembership);
             test("caller list mutation cannot alter an in-flight source snapshot", AiSummaryClientTest::immutableSourceSnapshot);
             test("SSE decodes fragmented UTF-8 and hides split thinking blocks", AiSummaryClientTest::streamThinking);
-            test("only the final merge streams and every stage reports completed counts", AiSummaryClientTest::streamFinalOnly);
+            test("every request streams for observability but only the final merge displays text", AiSummaryClientTest::streamFinalOnly);
+            test("ordinary request reports sending, response and safe content counters", AiSummaryClientTest::ordinaryRequestStatus);
+            test("streaming status distinguishes headers and hidden reasoning from an answer", AiSummaryClientTest::streamRequestStatus);
+            test("ordinary and streaming length errors report the actual cap and observed reasoning", AiSummaryClientTest::observedOutputLimits);
             test("streaming failures never produce final success", AiSummaryClientTest::streamFailures);
             test("ordinary mode remains available when service ignores stream", () -> {
                 nextReply.set(new Reply(200, completion("【话题】结果 [m1]")));
@@ -273,10 +278,20 @@ public final class AiSummaryClientTest {
         AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
         client.summarize(config("local", ""), MESSAGES, result);
         long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-        while (AndroidUtilities.pendingImmediate() < 5 && System.nanoTime() < end) Thread.sleep(5);
-        check(AndroidUtilities.pendingImmediate() >= 5, "terminal callback did not queue after stage progress");
+        java.lang.reflect.Field taskField = AiSummaryClient.class.getDeclaredField("task");
+        taskField.setAccessible(true);
+        boolean finished = false;
+        while (System.nanoTime() < end) {
+            synchronized (client) {
+                java.util.concurrent.Future<?> task = (java.util.concurrent.Future<?>) taskField.get(client);
+                finished = task == null || task.isDone();
+            }
+            if (finished) break;
+            Thread.sleep(5);
+        }
+        check(finished && AndroidUtilities.pendingImmediate() > 0, "terminal callback did not queue");
         client.cancel(); AndroidUtilities.drain();
-        check(result.calls == 0, "cancelled queued callback delivered");
+        check(result.calls == 0 && result.statuses.isEmpty(), "cancelled queued callback delivered");
     }
 
     private static Result invoke(int status, String body, AiSummarySettings.Config config) throws Exception {
@@ -515,6 +530,10 @@ public final class AiSummaryClientTest {
                 check(result.error.contains("模型 API 已响应") && result.error.contains("服务端报告达到输出上限（本次设置 " + limit + " tokens）")
                         && result.error.contains("未完成文本生成验证"), "probe limit error did not identify configured limit and incomplete validation");
                 check(!result.error.contains("PRIVATE_DIAGNOSTIC_THOUGHT") && !result.error.contains("OK"), "truncated content leaked into probe error");
+                check(!result.error.contains("请提高") && result.error.contains("检查模型 API 配置"),
+                        "probe recommends increasing the cap without diagnosing generation");
+                check(result.error.contains("检测到思考内容") == choice.toString().contains("<think>"),
+                        "probe thinking advice must require observed reasoning");
                 check(lastBody.get().getInt("max_tokens") == limit, "reported output limit differs from the transmitted limit");
             }
         }
@@ -678,22 +697,136 @@ public final class AiSummaryClientTest {
             check(!partial.contains("NEVER_SHOW") && !partial.contains("<th") && !partial.contains("</th"), "reasoning fragment leaked");
         }
         check(lastBody.get().getBoolean("stream"), "stream flag was not sent");
+        check(result.statuses.get(result.statuses.size() - 1).reasoningObserved,
+                "split thinking markers were not reflected in safe progress");
+    }
+
+    private static void ordinaryRequestStatus() throws Exception {
+        requestStarted = new CountDownLatch(1); releaseRequest = new CountDownLatch(1);
+        String answer = "【话题】状态应只携带计数 [m1]";
+        nextReply.set(new Reply(200, completion(answer), true));
+        AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
+        try {
+            client.summarize(config("local", "STATUS_CREDENTIAL_SECRET"), MESSAGES, result);
+            check(requestStarted.await(5, TimeUnit.SECONDS), "ordinary request did not arrive");
+            AndroidUtilities.drain();
+            check(result.statuses.size() == 1 && result.statuses.get(0).phase == AiSummaryClient.RequestPhase.SENDING,
+                    "ordinary mode claimed a response before the server replied");
+            releaseRequest.countDown(); await(result);
+            check(answer.equals(result.summary), "ordinary status broke the answer");
+            check(result.statuses.size() == 3, "ordinary request status sequence is incomplete");
+            check(result.statuses.get(1).phase == AiSummaryClient.RequestPhase.RESPONSE
+                    && result.statuses.get(2).phase == AiSummaryClient.RequestPhase.CONTENT, "ordinary status order changed");
+            JSONObject body = lastBody.get();
+            int input = body.getJSONArray("messages").getJSONObject(0).getString("content").length()
+                    + body.getJSONArray("messages").getJSONObject(1).getString("content").length();
+            long elapsed = -1;
+            for (AiSummaryClient.RequestStatus status : result.statuses) {
+                check(!status.streaming && !status.reasoningObserved && status.inputCharacters == input
+                        && status.maxOutputTokens == 512 && status.elapsedMs >= elapsed, "inaccurate ordinary request statistics");
+                elapsed = status.elapsedMs;
+            }
+            check(result.statuses.get(2).receivedCharacters == answer.length(), "JSON framing counted as model content");
+            for (java.lang.reflect.Field field : AiSummaryClient.RequestStatus.class.getDeclaredFields()) {
+                check(field.getType().isPrimitive() || field.getType() == AiSummaryClient.RequestPhase.class,
+                        "request status can retain raw payload or credentials");
+            }
+        } finally {
+            client.cancel(); releaseRequest.countDown(); requestStarted = null; releaseRequest = null;
+        }
+    }
+
+    private static void streamRequestStatus() throws Exception {
+        CountDownLatch allowReasoning = new CountDownLatch(1), allowAnswer = new CountDownLatch(1);
+        String path = "/status-stream/v1/chat/completions";
+        String hidden = "STATUS_THOUGHT_SECRET", answer = "【话题】最终正文 [m1]";
+        server.createContext(path, exchange -> {
+            exchange.getRequestBody().readAllBytes();
+            exchange.getResponseHeaders().set("Content-Type", "text/event-stream");
+            exchange.sendResponseHeaders(200, 0);
+            try {
+                exchange.getResponseBody().write((": heartbeat\n\ndata: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n")
+                        .getBytes(StandardCharsets.UTF_8));
+                exchange.getResponseBody().flush();
+                allowReasoning.await(5, TimeUnit.SECONDS);
+                exchange.getResponseBody().write(("data: " + new JSONObject().put("choices", new org.json.JSONArray().put(
+                        new JSONObject().put("delta", new JSONObject().put("reasoning_content", hidden)))) + "\n\n")
+                        .getBytes(StandardCharsets.UTF_8));
+                exchange.getResponseBody().flush();
+                allowAnswer.await(5, TimeUnit.SECONDS);
+                exchange.getResponseBody().write((delta(answer) + finish("stop") + "data: [DONE]\n\n").getBytes(StandardCharsets.UTF_8));
+                exchange.getResponseBody().flush();
+            } catch (InterruptedException error) { Thread.currentThread().interrupt(); }
+            catch (IOException ignored) { }
+            finally { exchange.close(); }
+        });
+        AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
+        try {
+            client.summarize(new AiSummarySettings.Config(base + "/status-stream/v1", "local", "STATUS_AUTH_SECRET", 512, true), MESSAGES, result);
+            awaitStatus(() -> result.statuses.stream().anyMatch(status -> status.phase == AiSummaryClient.RequestPhase.RESPONSE));
+            check(result.statuses.size() == 2 && result.statuses.get(1).streaming
+                    && result.statuses.get(1).receivedCharacters == 0, "empty role or heartbeat counted as generated text");
+            check(result.partials.isEmpty(), "empty SSE event produced answer text");
+            allowReasoning.countDown();
+            awaitStatus(() -> result.statuses.stream().anyMatch(status -> status.reasoningObserved));
+            AiSummaryClient.RequestStatus reasoning = result.statuses.get(result.statuses.size() - 1);
+            check(reasoning.phase == AiSummaryClient.RequestPhase.CONTENT && reasoning.receivedCharacters == hidden.length()
+                    && result.partials.isEmpty() && result.calls == 0, "reasoning was invisible to status or exposed as answer");
+            allowAnswer.countDown(); await(result);
+            check(answer.equals(result.summary), "reasoning field contaminated final answer");
+            AiSummaryClient.RequestStatus last = result.statuses.get(result.statuses.size() - 1);
+            check(last.receivedCharacters == hidden.length() + answer.length() && last.reasoningObserved,
+                    "final accumulated content statistics were not flushed");
+            for (String partial : result.partials) check(!partial.contains(hidden), "reasoning field leaked in a partial");
+        } finally {
+            client.cancel(); allowReasoning.countDown(); allowAnswer.countDown(); server.removeContext(path);
+        }
+    }
+
+    private static void awaitStatus(java.util.function.BooleanSupplier condition) throws Exception {
+        long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (!condition.getAsBoolean() && System.nanoTime() < end) { AndroidUtilities.drain(); Thread.sleep(5); }
+        check(condition.getAsBoolean(), "request status did not arrive before timeout");
+    }
+
+    private static void observedOutputLimits() throws Exception {
+        for (boolean stream : new boolean[]{false, true}) for (int reasoning : new int[]{0, 1, 2}) {
+            JSONObject payload = new JSONObject().put("content", reasoning == 1 ? "<think>LIMIT_SECRET" : "LIMIT_ANSWER_SECRET [m1]");
+            if (reasoning == 2) payload.put("reasoning", "LIMIT_REASONING_SECRET");
+            JSONObject choice = new JSONObject().put("finish_reason", "length").put(stream ? "delta" : "message", payload);
+            String response = new JSONObject().put("choices", new org.json.JSONArray().put(choice)).toString();
+            nextReply.set(stream ? sse("data: " + response + "\n\ndata: [DONE]\n\n") : new Reply(200, response));
+            AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
+            try {
+                client.summarize(new AiSummarySettings.Config(base, "local", "LIMIT_AUTH_SECRET", 2000, stream, 32000), MESSAGES, result);
+                await(result);
+                check(result.summary == null && result.error.contains("2000 tokens") && result.error.contains("结果不完整"),
+                        "length error lost actual configured cap or accepted incomplete answer");
+                check(result.error.contains("检测到思考内容") == (reasoning != 0), "reasoning guidance was guessed or lost");
+                check(!result.error.contains("SECRET") && result.partials.isEmpty(), "truncated answer/reasoning/credential leaked");
+                check(result.statuses.get(result.statuses.size() - 1).reasoningObserved == (reasoning != 0),
+                        "truncated response lost its safe reasoning observation");
+            } finally { client.cancel(); }
+        }
     }
 
     private static void streamFinalOnly() throws Exception {
         List<SummaryMessage> messages = List.of(new SummaryMessage(-100, 1, 1_700_000_000, "甲", "x".repeat(5000)));
         requestHistory.clear();
-        replyGenerator.set(body -> body.getBoolean("stream")
-                ? sse(delta("【话题】最终合并 [m1]") + finish("stop") + "data: [DONE]\n\n")
-                : new Reply(200, completion("中间摘要 [m1]")));
+        replyGenerator.set(body -> sse(delta(body.getJSONArray("messages").getJSONObject(1).getString("content")
+                .contains("摘要数据（JSONL）：") ? "【话题】最终合并 [m1]" : "【话题】中间摘要不可显示 [m1]")
+                + finish("stop") + "data: [DONE]\n\n"));
         AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
         try {
             client.summarize(streamConfig(), messages, result); await(result);
             check(result.summary != null, "final streaming merge failed: " + result.error);
             check(requestHistory.size() > 2, "fixture needs multiple source requests");
             for (int i = 0; i < requestHistory.size(); i++) {
-                check(requestHistory.get(i).getBoolean("stream") == (i == requestHistory.size() - 1), "intermediate request streamed");
+                check(requestHistory.get(i).getBoolean("stream"), "intermediate request lost streaming observability");
             }
+            for (String partial : result.partials) check(!partial.contains("中间摘要"), "intermediate draft displayed as final answer");
+            check(result.statuses.stream().filter(status -> status.phase == AiSummaryClient.RequestPhase.SENDING).count()
+                    == requestHistory.size(), "request status missing for an intermediate stage");
             boolean source = false, merge = false, validating = false;
             for (AiSummaryClient.Progress progress : result.progress) {
                 check(progress.completed >= 0 && progress.completed <= progress.total && progress.elapsedMs >= 0, "invalid progress counts");
@@ -718,6 +851,9 @@ public final class AiSummaryClientTest {
                 "data: {malformed\n\n",
                 "data: [DONE]\n\n",
                 delta("<think>DO_NOT_ECHO_SECRET") + finish("stop") + "data: [DONE]\n\n",
+                delta("【话题】已完成 [m1]") + finish("stop")
+                        + "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"DO_NOT_ECHO_SECRET\"}}]}\n\n"
+                        + "data: [DONE]\n\n",
                 ":" + "x".repeat(1_048_576) + "\n\n"
         };
         for (String stream : streams) {
@@ -761,10 +897,11 @@ public final class AiSummaryClientTest {
             check(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - cancelStarted) < 1000,
                     "cancel blocked the caller while the server kept streaming open");
             releaseStream.countDown();
-            int partialCount = stale.partials.size(), progressCount = stale.progress.size();
+            int partialCount = stale.partials.size(), progressCount = stale.progress.size(), statusCount = stale.statuses.size();
             nextReply.set(new Reply(200, completion("新的普通请求 [m1]")));
             Result fresh = afterCancellation(client);
-            check(stale.calls == 0 && stale.partials.size() == partialCount && stale.progress.size() == progressCount,
+            check(stale.calls == 0 && stale.partials.size() == partialCount && stale.progress.size() == progressCount
+                    && stale.statuses.size() == statusCount,
                     "cancelled stream delivered a later callback");
             check(fresh.summary != null, "client did not recover after stream cancellation");
         } finally {

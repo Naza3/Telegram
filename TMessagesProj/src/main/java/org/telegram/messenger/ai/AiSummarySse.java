@@ -13,15 +13,19 @@ import java.io.InputStreamReader;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.util.Locale;
+import java.util.regex.Pattern;
 
 /** OpenAI SSE framing and incremental reasoning suppression; no Android or transport state. */
 final class AiSummarySse {
+    private static final Pattern THINK_TAG = Pattern.compile("</?think(?:\\s[^>]*)?>", Pattern.CASE_INSENSITIVE);
     interface Cancellation {
         void check() throws IOException;
     }
 
     interface Listener {
         void onText(String accumulatedText);
+        /** Counts received content/reasoning characters, never exposes reasoning text. */
+        default void onContent(int receivedCharacters, boolean reasoningObserved) { }
     }
 
     static final class Result {
@@ -36,15 +40,22 @@ final class AiSummarySse {
 
     static final class Failure extends IOException {
         final String serverDetail;
+        final boolean outputLimit;
+        final boolean reasoningObserved;
 
         Failure(String safeMessage) {
-            super(safeMessage);
-            serverDetail = null;
+            this(safeMessage, null, false, false);
         }
 
         Failure(String safeMessage, String serverDetail) {
+            this(safeMessage, serverDetail, false, false);
+        }
+
+        Failure(String safeMessage, String serverDetail, boolean outputLimit, boolean reasoningObserved) {
             super(safeMessage);
             this.serverDetail = serverDetail;
+            this.outputLimit = outputLimit;
+            this.reasoningObserved = reasoningObserved;
         }
     }
 
@@ -123,6 +134,8 @@ final class AiSummarySse {
         boolean finished;
         String model;
         String lastVisible = "";
+        int receivedCharacters;
+        boolean reasoningObserved;
 
         State(Listener listener) {
             this.listener = listener;
@@ -148,21 +161,37 @@ final class AiSummarySse {
             if (choices.length() == 0) return false; // Optional usage-only event.
             JSONObject choice = choices.getJSONObject(0);
             String finish = choice.optString("finish_reason", "");
-            if ("length".equals(finish)) {
-                throw new Failure("模型输出达到长度上限，流式结果不完整。请提高最大输出 tokens 或关闭长思考模式后重试。");
-            }
             if ("content_filter".equals(finish)) throw new Failure("模型服务未能生成这批消息的总结。");
-            if (!finish.isEmpty() && !"null".equals(finish) && !"stop".equals(finish)) {
+            boolean outputLimit = "length".equals(finish);
+            if (!finish.isEmpty() && !"null".equals(finish) && !"stop".equals(finish) && !outputLimit) {
                 throw new Failure("模型流式输出未正常结束。请关闭流式模式或更换模型后重试。");
             }
             JSONObject delta = choice.optJSONObject("delta");
-            if (delta == null && !"stop".equals(finish)) {
+            if (delta == null && !"stop".equals(finish) && !outputLimit) {
                 throw new Failure("流式响应缺少 delta。请确认服务兼容 SSE，或关闭流式模式。");
             }
             String content = delta == null ? "" : textContent(delta.opt("content"));
+            int reasoningCharacters = delta == null ? 0 : reasoningCharacters(delta);
+            if (finished && (!content.isEmpty() || reasoningCharacters > 0)) {
+                throw new Failure("模型在完成标记之后继续输出内容，响应格式异常。");
+            }
+            if (reasoningCharacters > 0) reasoningObserved = true;
             if (!content.isEmpty()) {
-                if (finished) throw new Failure("模型在完成标记之后继续输出正文，响应格式异常。");
-                text.append(content);
+                try {
+                    text.append(content);
+                } catch (Failure failure) {
+                    if (!outputLimit) throw failure;
+                }
+            }
+            reasoningObserved |= text.reasoningObserved;
+            if (!content.isEmpty() || reasoningCharacters > 0) {
+                receivedCharacters += content.length() + reasoningCharacters;
+                listener.onContent(receivedCharacters, reasoningObserved);
+            }
+            if (outputLimit) {
+                throw new Failure("模型输出达到长度上限，结果不完整。", null, true, reasoningObserved);
+            }
+            if (!content.isEmpty()) {
                 String visible = text.intermediate();
                 if (!visible.isEmpty() && !visible.equals(lastVisible)) {
                     lastVisible = visible;
@@ -173,19 +202,29 @@ final class AiSummarySse {
             return false;
         }
 
-        private static String textContent(Object value) {
-            if (value instanceof String) return (String) value;
-            if (value instanceof JSONArray) {
-                StringBuilder text = new StringBuilder();
-                JSONArray parts = (JSONArray) value;
-                for (int i = 0; i < parts.length(); i++) {
-                    JSONObject part = parts.optJSONObject(i);
-                    if (part != null && "text".equals(part.optString("type"))) text.append(part.optString("text"));
-                }
-                return text.toString();
+    }
+
+    static int reasoningCharacters(JSONObject message) {
+        return textContent(message.opt("reasoning_content")).length()
+                + textContent(message.opt("reasoning")).length();
+    }
+
+    static boolean containsThinkingTag(String content) {
+        return THINK_TAG.matcher(content).find();
+    }
+
+    static String textContent(Object value) {
+        if (value instanceof String) return (String) value;
+        if (value instanceof JSONArray) {
+            StringBuilder text = new StringBuilder();
+            JSONArray parts = (JSONArray) value;
+            for (int i = 0; i < parts.length(); i++) {
+                JSONObject part = parts.optJSONObject(i);
+                if (part != null && "text".equals(part.optString("type"))) text.append(part.optString("text"));
             }
-            return "";
+            return text.toString();
         }
+        return "";
     }
 
     /** Buffers incomplete think tags, including tags split across SSE events or UTF-8 reads. */
@@ -194,6 +233,7 @@ final class AiSummarySse {
         final StringBuilder tag = new StringBuilder();
         int thinkingDepth;
         boolean closedThinking;
+        boolean reasoningObserved;
 
         void append(String value) throws Failure {
             for (int i = 0; i < value.length(); i++) {
@@ -206,12 +246,14 @@ final class AiSummarySse {
                 while (tag.length() > 0) {
                     String lower = tag.toString().toLowerCase(Locale.US);
                     if ("<think>".equals(lower) || (attributes(lower, "<think") && lower.endsWith(">"))) {
+                        reasoningObserved = true;
                         if (thinkingDepth == 0 && !trustedHeading(visible.toString())) visible.setLength(0);
                         thinkingDepth++;
                         tag.setLength(0);
                         break;
                     }
                     if ("</think>".equals(lower) || (attributes(lower, "</think") && lower.endsWith(">"))) {
+                        reasoningObserved = true;
                         if (thinkingDepth > 0) thinkingDepth--;
                         else visible.setLength(0); // Some servers omit the initial opening think token.
                         closedThinking = true;

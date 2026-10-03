@@ -52,6 +52,10 @@ public final class SummarySourceVerifierTest {
         test("separate verifier GUIDs do not cancel each other", SummarySourceVerifierTest::independent);
         test("owner changes before send, during request and before delivery", SummarySourceVerifierTest::ownerChange);
         test("invalidated callback remains compatible with older callers", SummarySourceVerifierTest::defaultInvalidation);
+        test("persisted digest references verify fresh ordinary and channel messages", SummarySourceVerifierTest::savedReference);
+        test("persisted references reject changed text and substituted source identities", SummarySourceVerifierTest::savedReferenceChanges);
+        test("persisted references enforce scope, owner and cancellation", SummarySourceVerifierTest::savedReferenceLifecycle);
+        test("malformed legacy references retain asynchronous error callbacks", SummarySourceVerifierTest::malformedLegacyReference);
         System.out.println("SummarySourceVerifierTest: " + passed + " passed, " + assertions + " assertions");
     }
 
@@ -346,6 +350,86 @@ public final class SummarySourceVerifierTest {
         check(network.pending.isEmpty() && AndroidUtilities.pendingTimers() == 0, "default callback leaked resources");
     }
 
+    private static void savedReference() {
+        for (boolean channel : new boolean[]{false, true}) {
+            reset(channel);
+            SummarySourceReference reference = SummarySourceReference.from(expected());
+            // Reconstruct from persisted scalar fields; no original SummaryMessage is required.
+            reference = new SummarySourceReference(reference.dialogId, reference.id, reference.date,
+                    reference.editDate, reference.senderId, reference.textHash);
+            Result result = new Result(); verifier(0).verify(reference, result); AndroidUtilities.drain();
+            check(network.next().request instanceof TLRPC.TL_channels_getMessages == channel,
+                    "saved reference used wrong message RPC");
+            deliver(page(message())); success(result);
+            check(result.source.text.equals(expected().text), "fresh source text not returned after matching hash");
+        }
+    }
+
+    private static void savedReferenceChanges() {
+        reset(false);
+        Result edited = startReference(0);
+        TLRPC.Message changed = message(); changed.message = "Changed without a newer edit_date";
+        deliver(page(changed)); error(edited, "原消息已修改"); invalidated(edited);
+        reset(false);
+        Result missing = startReference(0); deliver(page()); error(missing, "已删除"); invalidated(missing);
+        reset(false);
+        Result peer = startReference(0); changed = message(); changed.peer_id.chat_id = 200;
+        deliver(page(changed)); error(peer, "群聊/话题范围"); invalidated(peer);
+        reset(true);
+        Result topic = startReference(42); changed = message(); changed.reply_to.forum_topic = true;
+        changed.reply_to.reply_to_top_id = 43; deliver(page(changed)); error(topic, "话题范围"); invalidated(topic);
+        SummarySourceReference source = SummarySourceReference.from(expected());
+        for (SummarySourceReference reference : new SummarySourceReference[]{
+                new SummarySourceReference(DIALOG, MESSAGE, source.date + 1, source.editDate, source.senderId, source.textHash),
+                new SummarySourceReference(DIALOG, MESSAGE, source.date, source.editDate + 1, source.senderId, source.textHash),
+                new SummarySourceReference(DIALOG, MESSAGE, source.date, source.editDate, source.senderId + 1, source.textHash),
+                new SummarySourceReference(DIALOG, MESSAGE, source.date, source.editDate, source.senderId, "0".repeat(64))}) {
+            reset(false); Result mismatch = new Result(); verifier(0).verify(reference, mismatch); AndroidUtilities.drain();
+            deliver(page(message())); error(mismatch, "原消息已修改"); invalidated(mismatch);
+        }
+        reset(false); network.currentTimeOverride = 10060;
+        Result expired = startReference(0); changed = message(); changed.ttl_period = 60;
+        deliver(page(changed)); error(expired, "过期"); invalidated(expired);
+    }
+
+    private static void savedReferenceLifecycle() {
+        SummarySourceReference reference = SummarySourceReference.from(expected());
+        reset(false); Result mismatch = new Result();
+        verifier(0).verify(new SummarySourceReference(-200, reference.id, reference.date, reference.editDate,
+                reference.senderId, reference.textHash), mismatch);
+        AndroidUtilities.drain(); error(mismatch, "群聊范围");
+        check(network.sent.isEmpty(), "cross-peer saved reference reached Telegram");
+        for (int account : new int[]{-1, UserConfig.MAX_ACCOUNT_COUNT}) {
+            reset(false); Result invalidAccount = new Result();
+            new SummarySourceVerifier(account, OWNER, DIALOG, 0).verify(reference, invalidAccount);
+            AndroidUtilities.drain(); error(invalidAccount, "账号已变化");
+            check(network.sent.isEmpty(), "invalid account used a network request");
+        }
+        reset(false); Result foreignOwner = new Result();
+        new SummarySourceVerifier(0, OWNER + 1, DIALOG, 0).verify(reference, foreignOwner);
+        AndroidUtilities.drain(); error(foreignOwner, "账号已变化");
+        check(network.sent.isEmpty(), "foreign owner used the active account");
+        reset(false); Result recycled = startReference(0); network.reply(page(message()), null);
+        UserConfig.getInstance(0).setClientUserId(OWNER + 1); AndroidUtilities.drain(); error(recycled, "账号已变化");
+        reset(false); SummarySourceVerifier verifier = verifier(0); Result cancelled = new Result();
+        verifier.verify(reference, cancelled); AndroidUtilities.drain();
+        ConnectionsManager.Pending pending = network.next(); verifier.cancel();
+        pending.delegate.run(page(message()), null); AndroidUtilities.drain();
+        check(cancelled.calls == 0 && network.pending.isEmpty() && AndroidUtilities.pendingTimers() == 0,
+                "cancelled persisted-reference verification delivered a callback");
+    }
+
+    private static void malformedLegacyReference() {
+        reset(false); Result invalidDate = new Result();
+        verifier(0).verify(new SummaryMessage(DIALOG, MESSAGE, -1, "", "original"), invalidDate);
+        check(invalidDate.calls == 0, "legacy reference validation unexpectedly became synchronous");
+        AndroidUtilities.drain(); error(invalidDate, "群聊范围");
+        check(network.sent.isEmpty(), "invalid legacy date reached Telegram");
+        Result missing = new Result(); verifier(0).verify((SummarySourceReference) null, missing);
+        AndroidUtilities.drain(); error(missing, "群聊范围");
+        check(network.sent.isEmpty(), "null saved reference reached Telegram");
+    }
+
     private static void rejectMessage(Consumer<TLRPC.Message> change, String expectedError) {
         reset(false); Result result = start(0); TLRPC.Message value = message(); change.accept(value);
         deliver(page(value)); error(result, expectedError);
@@ -360,6 +444,11 @@ public final class SummarySourceVerifierTest {
 
     private static Result start(long topic) {
         Result result = new Result(); verifier(topic).verify(expected(), result); AndroidUtilities.drain(); return result;
+    }
+
+    private static Result startReference(long topic) {
+        Result result = new Result(); verifier(topic).verify(SummarySourceReference.from(expected()), result);
+        AndroidUtilities.drain(); return result;
     }
 
     private static SummarySourceVerifier verifier(long topic) {

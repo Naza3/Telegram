@@ -37,6 +37,31 @@ public final class AiSummaryClient {
         /** Unvalidated accumulated text for display only; source links belong to onSuccess. */
         default void onPartial(String text) {
         }
+        /** Safe transport progress; contains no prompt, answer, reasoning text or credentials. */
+        default void onRequestStatus(RequestStatus status) { }
+    }
+
+    public enum RequestPhase { SENDING, RESPONSE, CONTENT }
+
+    public static final class RequestStatus {
+        public final RequestPhase phase;
+        /** Requested mode while sending; actual response mode after HTTP headers arrive. */
+        public final boolean streaming;
+        /** Java character counts, not token counts. Input includes both system and user text. */
+        public final int inputCharacters, maxOutputTokens, receivedCharacters;
+        public final boolean reasoningObserved;
+        public final long elapsedMs;
+
+        RequestStatus(RequestPhase phase, boolean streaming, int inputCharacters, int maxOutputTokens,
+                      int receivedCharacters, boolean reasoningObserved, long elapsedMs) {
+            this.phase = phase;
+            this.streaming = streaming;
+            this.inputCharacters = inputCharacters;
+            this.maxOutputTokens = maxOutputTokens;
+            this.receivedCharacters = receivedCharacters;
+            this.reasoningObserved = reasoningObserved;
+            this.elapsedMs = elapsedMs;
+        }
     }
 
     public enum Stage {
@@ -158,8 +183,7 @@ public final class AiSummaryClient {
                 }
                 final DiagnosticErrorInfo diagnosticInfo = info;
                 final String diagnosticError = error instanceof OutputLimitException
-                        ? "模型 API 已响应，但服务端报告达到输出上限（本次设置 " + config.maxOutputTokens
-                                + " tokens），未完成文本生成验证。请提高最大输出 tokens 后重试。"
+                        ? ((OutputLimitException) error).diagnosticMessage()
                         : describeError(error);
                 deliver(request, () -> callback.onError(diagnosticError, diagnosticInfo));
             } finally {
@@ -364,13 +388,22 @@ public final class AiSummaryClient {
                             Callback callback)
             throws IOException, JSONException, SummaryException, CancelledException {
         return complete(config, systemPrompt, prompt, config.maxOutputTokens,
-                readTimeoutMs, request, config.stream && finalRequest, callback).text;
+                readTimeoutMs, request, config.stream, callback, finalRequest).text;
     }
 
     private Completion complete(AiSummarySettings.Config config, String systemPrompt, String prompt,
                                 int maxOutputTokens, int timeoutMs, int request, boolean stream, Callback callback)
             throws IOException, JSONException, SummaryException, CancelledException {
+        return complete(config, systemPrompt, prompt, maxOutputTokens, timeoutMs, request, stream, callback, true);
+    }
+
+    private Completion complete(AiSummarySettings.Config config, String systemPrompt, String prompt,
+                                int maxOutputTokens, int timeoutMs, int request, boolean stream, Callback callback,
+                                boolean showPartial)
+            throws IOException, JSONException, SummaryException, CancelledException {
         checkActive(request);
+        RequestMonitor monitor = new RequestMonitor(request, callback, stream,
+                systemPrompt.length() + prompt.length(), maxOutputTokens);
         JSONObject body = new JSONObject();
         if (!config.model.isEmpty()) {
             body.put("model", config.model);
@@ -401,6 +434,7 @@ public final class AiSummaryClient {
                 current.setRequestProperty("Authorization", "Bearer " + config.apiKey);
             }
             current.setFixedLengthStreamingMode(encoded.length);
+            monitor.phase(RequestPhase.SENDING);
             try (OutputStream output = current.getOutputStream()) {
                 checkActive(request);
                 output.write(encoded);
@@ -416,6 +450,9 @@ public final class AiSummaryClient {
                         failureBody, current.getContentType());
             }
             String contentType = current.getContentType();
+            monitor.streaming = stream && contentType != null
+                    && contentType.toLowerCase(Locale.US).startsWith("text/event-stream");
+            monitor.phase(RequestPhase.RESPONSE);
             if (stream && contentType != null && contentType.toLowerCase(Locale.US).startsWith("text/event-stream")) {
                 AiSummarySse.Result result;
                 final long[] lastPartial = {0};
@@ -426,14 +463,20 @@ public final class AiSummaryClient {
                         } catch (CancelledException cancelled) {
                             throw new InterruptedIOException("Cancelled");
                         }
-                    }, text -> {
-                        long now = System.nanoTime();
-                        if (callback != null && now - lastPartial[0] >= 75_000_000L) {
-                            lastPartial[0] = now;
-                            deliver(request, () -> callback.onPartial(text));
+                    }, new AiSummarySse.Listener() {
+                        @Override public void onText(String text) {
+                            long now = System.nanoTime();
+                            if (showPartial && callback != null && now - lastPartial[0] >= 75_000_000L) {
+                                lastPartial[0] = now;
+                                deliver(request, () -> callback.onPartial(text));
+                            }
+                        }
+                        @Override public void onContent(int characters, boolean reasoningObserved) {
+                            monitor.content(characters, reasoningObserved, false);
                         }
                     });
                 } catch (AiSummarySse.Failure failure) {
+                    if (failure.outputLimit) throw new OutputLimitException(maxOutputTokens, failure.reasoningObserved);
                     throw new SummaryException(failure.serverDetail == null ? failure.getMessage()
                             : serverError(status, failure.serverDetail));
                 } catch (JSONException error) {
@@ -468,27 +511,16 @@ public final class AiSummaryClient {
             }
             JSONObject choice = choices.getJSONObject(0);
             String finish = choice.optString("finish_reason");
+            JSONObject message = choice.optJSONObject("message");
+            String answer = message == null ? "" : AiSummarySse.textContent(message.opt("content"));
+            int reasoningCharacters = message == null ? 0 : AiSummarySse.reasoningCharacters(message);
+            boolean reasoningObserved = reasoningCharacters > 0 || AiSummarySse.containsThinkingTag(answer);
+            monitor.content(answer.length() + reasoningCharacters, reasoningObserved, true);
             if ("length".equals(finish)) {
-                throw new OutputLimitException();
+                throw new OutputLimitException(maxOutputTokens, reasoningObserved);
             }
             if ("content_filter".equals(finish)) {
                 throw new SummaryException("模型服务未能生成这批消息的总结。");
-            }
-            JSONObject message = choice.optJSONObject("message");
-            Object content = message == null ? null : message.opt("content");
-            String answer = "";
-            if (content instanceof String) {
-                answer = (String) content;
-            } else if (content instanceof JSONArray) {
-                StringBuilder text = new StringBuilder();
-                JSONArray items = (JSONArray) content;
-                for (int i = 0; i < items.length(); i++) {
-                    JSONObject item = items.optJSONObject(i);
-                    if (item != null && "text".equals(item.optString("type"))) {
-                        text.append(item.optString("text"));
-                    }
-                }
-                answer = text.toString();
             }
             try {
                 answer = stripThinking(answer);
@@ -506,6 +538,7 @@ public final class AiSummaryClient {
             }
             return new Completion(answer, reportedModel(responseObject, config.apiKey));
         } finally {
+            monitor.flush();
             synchronized (this) {
                 if (connection == current) {
                     connection = null;
@@ -513,6 +546,46 @@ public final class AiSummaryClient {
             }
             current.disconnect();
         }
+    }
+
+    /** Per-request counters only; never retain content in progress objects. */
+    private final class RequestMonitor {
+        final int request, inputCharacters, maxOutputTokens;
+        final Callback callback;
+        final long started = System.nanoTime();
+        boolean streaming, reasoningObserved, lastReasoning;
+        int receivedCharacters, lastCharacters;
+        long lastUpdate;
+
+        RequestMonitor(int request, Callback callback, boolean streaming, int inputCharacters, int maxOutputTokens) {
+            this.request = request;
+            this.callback = callback;
+            this.streaming = streaming;
+            this.inputCharacters = inputCharacters;
+            this.maxOutputTokens = maxOutputTokens;
+        }
+
+        void phase(RequestPhase phase) {
+            if (callback == null) return;
+            RequestStatus status = new RequestStatus(phase, streaming, inputCharacters, maxOutputTokens,
+                    receivedCharacters, reasoningObserved, Math.max(0, (System.nanoTime() - started) / 1_000_000L));
+            deliver(request, () -> callback.onRequestStatus(status));
+        }
+
+        void content(int characters, boolean reasoning, boolean force) {
+            receivedCharacters = characters;
+            reasoningObserved |= reasoning;
+            long now = System.nanoTime();
+            if (characters > 0 && (characters != lastCharacters || reasoningObserved != lastReasoning)
+                    && (force || lastUpdate == 0 || reasoningObserved != lastReasoning || now - lastUpdate >= 250_000_000L)) {
+                lastUpdate = now;
+                lastCharacters = characters;
+                lastReasoning = reasoningObserved;
+                phase(RequestPhase.CONTENT);
+            }
+        }
+
+        void flush() { content(receivedCharacters, reasoningObserved, true); }
     }
 
     private String readErrorBody(HttpURLConnection current, int request) throws IOException, CancelledException {
@@ -640,8 +713,22 @@ public final class AiSummaryClient {
     }
 
     private static final class OutputLimitException extends SummaryException {
-        OutputLimitException() {
-            super("模型输出达到长度上限，结果不完整。请提高最大输出 tokens、关闭长思考模式或减少消息数量后重试。");
+        final int maxOutputTokens;
+        final boolean reasoningObserved;
+
+        OutputLimitException(int maxOutputTokens, boolean reasoningObserved) {
+            super("模型服务报告达到输出上限（本次设置 " + maxOutputTokens + " tokens），结果不完整。"
+                    + (reasoningObserved ? "检测到思考内容，需检查模型 API 思考设置。" : "")
+                    + "请缩短总结要求或检查模型 API 配置后重试；增加上限可能延长等待。");
+            this.maxOutputTokens = maxOutputTokens;
+            this.reasoningObserved = reasoningObserved;
+        }
+
+        String diagnosticMessage() {
+            return "模型 API 已响应，但服务端报告达到输出上限（本次设置 " + maxOutputTokens
+                    + " tokens），未完成文本生成验证。"
+                    + (reasoningObserved ? "检测到思考内容，需检查模型 API 思考设置。" : "")
+                    + "请检查模型 API 配置后重试；增加上限可能延长等待。";
         }
     }
 

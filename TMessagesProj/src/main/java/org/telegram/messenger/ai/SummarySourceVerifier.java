@@ -47,6 +47,19 @@ public final class SummarySourceVerifier {
     }
 
     public void verify(SummaryMessage expected, Callback callback) {
+        SummarySourceReference reference = null;
+        if (expected != null) {
+            try {
+                reference = SummarySourceReference.from(expected);
+            } catch (IllegalArgumentException ignored) {
+                // Preserve the original API's asynchronous invalid-reference error path.
+            }
+        }
+        verify(reference, callback);
+    }
+
+    /** Verifies a saved citation against fresh Telegram data without retaining cached original text. */
+    public void verify(SummarySourceReference expected, Callback callback) {
         if (callback == null) {
             throw new IllegalArgumentException("callback is required");
         }
@@ -189,7 +202,7 @@ public final class SummarySourceVerifier {
             return;
         }
         long senderId = DialogObject.getPeerDialogId(current.from_id);
-        if (!run.expected.text.equals(current.message) || run.expected.editDate != current.edit_date
+        if (!run.expected.matchesText(current.message) || run.expected.editDate != current.edit_date
                 || run.expected.date != current.date
                 || (run.expected.senderId != 0 && run.expected.senderId != senderId)) {
             invalidate(run, SOURCE_CHANGED);
@@ -289,13 +302,13 @@ public final class SummarySourceVerifier {
     private static final class Run {
         final int generation;
         final int guid = ConnectionsManager.generateClassGuid();
-        final SummaryMessage expected;
+        final SummarySourceReference expected;
         final Callback callback;
         final ConnectionsManager connections;
         boolean channel;
         Runnable timeout;
 
-        Run(int generation, SummaryMessage expected, Callback callback, ConnectionsManager connections) {
+        Run(int generation, SummarySourceReference expected, Callback callback, ConnectionsManager connections) {
             this.generation = generation;
             this.expected = expected;
             this.callback = callback;

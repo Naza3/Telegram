@@ -469,6 +469,13 @@ public class UserConfig extends BaseController {
         org.telegram.messenger.ai.PromptPreferences.clearOwner(currentAccount, summaryOwnerId);
         org.telegram.messenger.ai.SummaryStateStore.clearOwner(currentAccount, summaryOwnerId);
         org.telegram.messenger.ai.SummaryResultCache.getInstance().clearOwner(currentAccount, summaryOwnerId);
+        Utilities.globalQueue.postRunnable(() -> {
+            try {
+                org.telegram.messenger.ai.SummaryHistoryStore.clearOwner(currentAccount, summaryOwnerId);
+            } catch (RuntimeException error) {
+                FileLog.e(error);
+            }
+        });
         registeredForPush = false;
         contactsSavedCount = 0;
         lastSendMessageId = -210000;

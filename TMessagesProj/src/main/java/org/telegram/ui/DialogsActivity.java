@@ -13512,6 +13512,12 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
             args.putLong("user_id", UserConfig.getInstance(currentAccount).getClientUserId());
             presentFragment(new ChatActivity(args));
         });
+        if (initialDialogsType == DIALOGS_TYPE_DEFAULT && !onlySelect
+                && folderId == 0 && communityId == 0 && TextUtils.isEmpty(searchString)
+                && !searchIsShowed && !inPreviewMode && !actionBar.isActionModeShowed()) {
+            io.add(R.drawable.msg_recent, "AI 总结历史",
+                    () -> presentFragment(new SummaryHistoryActivity(currentAccount)));
+        }
         if (ApplicationLoader.applicationLoaderInstance != null) {
             ApplicationLoader.applicationLoaderInstance.addItemOptions(io);
         }

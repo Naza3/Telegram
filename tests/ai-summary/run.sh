@@ -17,12 +17,15 @@ fi
 mapfile -d '' stub_files < <(find "$test_dir/stubs" -name '*.java' -print0)
 mapfile -d '' test_files < <(find "$test_dir" -maxdepth 1 -name '*Test.java' -print0)
 production_dir="$repo_dir/TMessagesProj/src/main/java/org/telegram/messenger/ai"
-mapfile -d '' production_files < <(find "$production_dir" -maxdepth 1 -name '*.java' ! -name 'AiSummarySecretStore.java' -print0)
+mapfile -d '' production_files < <(find "$production_dir" -maxdepth 1 -name '*.java' \
+    ! -name 'AiSummarySecretStore.java' ! -name 'SummaryHistoryCipher.java' \
+    ! -name 'SummaryHistoryStorage.java' -print0)
 java -jar "$ecj_jar" -17 -encoding UTF-8 -warn:none -cp "$json_jar" -d "$classes_dir" \
     "${stub_files[@]}" "${test_files[@]}" \
     "${production_files[@]}"
 
 for test_file in "${test_files[@]}"; do
     test_class="$(basename -- "$test_file" .java)"
+    if [[ $# -gt 0 && "$test_class" != "$1" ]]; then continue; fi
     java --add-modules jdk.httpserver -cp "$classes_dir:$json_jar" "org.telegram.messenger.ai.$test_class"
 done

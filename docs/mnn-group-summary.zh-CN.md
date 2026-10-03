@@ -164,7 +164,16 @@ CI 使用 Ubuntu 24.04、JDK 21 和与本地相同的 SDK/NDK/CMake 版本，递
 
 CI 独立生成调试签名，并通过 Actions 缓存在后续构建间复用；不上传 keystore 到产物。缓存失效或被清理后会生成新的调试签名。CI 签名与之前的本地 APK 不同；如果手机安装提示签名冲突，需要先卸载旧的 Telegram Beta（卸载会清除该应用的本地数据）。正式分发应另行配置持久的私有签名密钥。
 
-## 自有 Telegram API 构建记录（2026-10-03）
+## 最新构建：MNN 接口与启动权限修复（2026-10-03）
+
+源码提交：`3e7d53ed62df926c6af59161189f00eb3d4f8793`，包含 MNN 请求参数与诊断修复 `eaacc782fbc05d370855f5ebede13977bb4a3e30`，以及上述启动权限提示／联系人感叹号修改。使用 Repository secrets 中的自有 Telegram API 配置。
+
+- **[下载最新 APK 与 SHA-256 校验文件](https://github.com/Naza3/Telegram/actions/runs/37122119618/artifacts/11274156614)**：`Telegram-MNN-arm64-debug-6`，ZIP 为 62,484,812 字节。需登录 GitHub 后下载、解压；产物到期时间为 2026-10-17 UTC。
+- [GitHub Actions 运行记录](https://github.com/Naza3/Telegram/actions/runs/37122119618)：**成功**，任务耗时 11 分 27 秒。配置校验、回归和样例校验、完整 ARM64 构建、签名／16 KB 对齐／架构检查和上传全部通过；复用已有 CI 调试签名密钥。
+- HTTP 回归现在包含 53 项用例，覆盖固定文本连接测试与普通／流式总结和追问，并验证 `temperature` 被拒的旧请求对照及诊断正文过滤。另以实际 MNN 提交的原始 Kotlin 解析函数完成 6 项前后对照；这只验证请求解析，不代表模型推理已实测。
+- 权限修改经独立调用链复核；本地 Android Java 编译通过，耗时 58 秒。没有连接手机，启动无弹窗、真实 MNN 普通／流式推理及 UI 行为仍需按 [真机验收表](mnn-device-validation.zh-CN.md) 复测。
+
+## 此前自有 Telegram API 构建记录（2026-10-03）
 
 源码提交：`3fa7dfe50ac0fde435b700f6e6e6e376d1bcdf38`。已移除上游 API ID/hash 回退，改由 `TELEGRAM_API_ID`、`TELEGRAM_API_HASH` Repository secrets 提供编译配置；登录验证码的投递逻辑未修改。
 

@@ -136,6 +136,8 @@ unset TELEGRAM_API_ID TELEGRAM_API_HASH
 
 自有 API 配置不会强制“发送验证码到已登录设备”。客户端已支持 Telegram 设备内验证码；短信、设备内消息等投递方式由 [Telegram 服务端选择](https://core.telegram.org/api/auth)。构建成功后仍需在手机上验证实际登录结果。
 
+安装使用新 API 配置的 APK 后，若登录页仍保留旧版的短信验证码步骤，先返回手机号输入页重新发起登录，让新请求使用新的 API 配置；更新 APK 不会改变此前已经发出的验证码的投递方式。
+
 1. 打开仓库的 [Actions 页面](https://github.com/Naza3/Telegram/actions)，进入对应提交的构建记录。
 2. 等构建成功，在记录底部的 **Artifacts** 下载 APK 压缩包；GitHub 通常要求登录后下载。
 3. 解压得到 `.apk` 和 `.sha256`，将 APK 传到 ARM64 安卓手机安装。产物保留时间以工作流的 `retention-days` 为准，过期后可重新构建。
@@ -144,7 +146,16 @@ CI 使用 Ubuntu 24.04、JDK 21 和与本地相同的 SDK/NDK/CMake 版本，递
 
 CI 独立生成调试签名，并通过 Actions 缓存在后续构建间复用；不上传 keystore 到产物。缓存失效或被清理后会生成新的调试签名。CI 签名与之前的本地 APK 不同；如果手机安装提示签名冲突，需要先卸载旧的 Telegram Beta（卸载会清除该应用的本地数据）。正式分发应另行配置持久的私有签名密钥。
 
-## S0–S7 集成构建记录
+## 自有 Telegram API 构建记录（2026-10-03）
+
+源码提交：`3fa7dfe50ac0fde435b700f6e6e6e376d1bcdf38`。已移除上游 API ID/hash 回退，改由 `TELEGRAM_API_ID`、`TELEGRAM_API_HASH` Repository secrets 提供编译配置；登录验证码的投递逻辑未修改。
+
+- [GitHub Actions 运行记录](https://github.com/Naza3/Telegram/actions/runs/37117842508)：**成功**。Secrets 校验、7 项配置测试、AI 回归与样例校验、完整 ARM64 APK 构建、签名／16 KB 对齐／架构检查和上传全部通过。复用了上一轮 CI 调试签名密钥。
+- [下载本次 APK 与 SHA-256 校验文件](https://github.com/Naza3/Telegram/actions/runs/37117842508/artifacts/11272192904)：产物 `Telegram-MNN-arm64-debug-4`，需登录 GitHub 后下载 ZIP 并解压；保留 14 天。
+- 本地用合成配置验证了有效值生成、无 clean 的凭据轮换、旧生成文件存在时缺失配置仍失败，以及非法 ID/hash 拦截和日志不回显。Android Java 编译通过，耗时 36 秒；没有分发使用合成配置的 APK。
+- 尚未在手机上验证真实登录或验证码投递渠道；Secrets 格式校验及构建成功不等于 Telegram 服务端凭据验收。
+
+## S0–S7 集成构建记录（此前使用上游测试配置）
 
 源码提交：`c40e71f6fb5685223824690fb3b9b9ae12eb1b96`。本次全套 JVM 回归包含 12 个测试类（47 项 HTTP／SSE／追问用例，其他核心合计 672 项断言）；24 组合成样例结构校验通过，模型调用次数为 0。
 

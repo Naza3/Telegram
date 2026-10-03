@@ -120,7 +120,10 @@ The persistent-history and request-progress revision passed 14 JVM test classes:
 78 assertions, source fingerprints 38 assertions, and current-source verification
 24 groups / 239 assertions. All 24 synthetic fixtures and 7 build-configuration
 tests passed. Android `compileDebugJavaWithJavac` passed in 1 minute 9 seconds;
-logs are in `/workspace/build-logs/mnn-history-page/`. Full APK CI is pending.
+logs are in `/workspace/build-logs/mnn-history-page/`. The [full APK CI](https://github.com/Naza3/Telegram/actions/runs/37130095722)
+passed in 14 minutes 30 seconds, including signing, 16 KB alignment and ARM64 ABI
+checks. The [APK and checksum](https://github.com/Naza3/Telegram/actions/runs/37130095722/artifacts/11276861783)
+correspond to source `4655df1a8f582f76a3041877698fc40ff0f71e3b`.
 Real phone persistence, Android Keystore behavior, and model latency remain untested.
 
 For the user's 32,000-character / 2,000-output-token settings, short ten-message

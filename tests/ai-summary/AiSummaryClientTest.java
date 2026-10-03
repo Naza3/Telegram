@@ -40,16 +40,26 @@ public final class AiSummaryClientTest {
         final int status;
         final String body;
         final boolean wait;
+        final String contentType;
+        final int fragmentBytes;
         Reply(int status, String body) { this(status, body, false); }
         Reply(int status, String body, boolean wait) {
+            this(status, body, wait, "application/json", 0);
+        }
+        Reply(int status, String body, boolean wait, String contentType, int fragmentBytes) {
             this.status = status; this.body = body; this.wait = wait;
+            this.contentType = contentType; this.fragmentBytes = fragmentBytes;
         }
     }
     private static final class Result implements AiSummaryClient.Callback {
         volatile String summary, error;
         volatile int calls;
+        final List<AiSummaryClient.Progress> progress = new CopyOnWriteArrayList<>();
+        final List<String> partials = new CopyOnWriteArrayList<>();
         public void onSuccess(String value) { summary = value; calls++; }
         public void onError(String value) { error = value; calls++; }
+        public void onProgress(AiSummaryClient.Progress value) { progress.add(value); }
+        public void onPartial(String value) { partials.add(value); }
     }
     private static final class Diagnostic implements AiSummaryClient.DiagnosticCallback {
         volatile AiSummaryClient.DiagnosticResult result;
@@ -170,6 +180,21 @@ public final class AiSummaryClientTest {
             test("source citations cannot escape their chunk via forged text", AiSummaryClientTest::sourceReferenceMembership);
             test("merge citations cannot reintroduce references absent from partials", AiSummaryClientTest::mergeReferenceMembership);
             test("caller list mutation cannot alter an in-flight source snapshot", AiSummaryClientTest::immutableSourceSnapshot);
+            test("SSE decodes fragmented UTF-8 and hides split thinking blocks", AiSummaryClientTest::streamThinking);
+            test("only the final merge streams and every stage reports completed counts", AiSummaryClientTest::streamFinalOnly);
+            test("streaming failures never produce final success", AiSummaryClientTest::streamFailures);
+            test("ordinary mode remains available when service ignores stream", () -> {
+                nextReply.set(new Reply(200, completion("【话题】结果 [m1]")));
+                AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
+                client.summarize(streamConfig(), MESSAGES, result); await(result); client.cancel();
+                check(result.summary == null && result.error.contains("关闭流式"), "ignored stream was silently accepted");
+                check(invoke(200, completion("普通结果 [m1]"), config("local", "")).summary != null, "ordinary retry unavailable");
+            });
+            test("diagnostics remain ordinary even when configured streaming", () -> {
+                Diagnostic result = diagnose(200, completion("OK"), streamConfig());
+                check(result.result != null && !lastBody.get().getBoolean("stream"), "diagnostic should not depend on streaming");
+            });
+            test("cancelling a live SSE suppresses later partials and final callback", AiSummaryClientTest::cancelLiveStream);
             System.out.println("AiSummaryClientTest: " + passed + " passed");
         } catch (Throwable error) {
             error.printStackTrace(); exit = 1;
@@ -212,8 +237,8 @@ public final class AiSummaryClientTest {
         AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
         client.summarize(config("local", ""), MESSAGES, result);
         long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
-        while (AndroidUtilities.pendingImmediate() == 0 && System.nanoTime() < end) Thread.sleep(5);
-        check(AndroidUtilities.pendingImmediate() > 0, "callback did not queue");
+        while (AndroidUtilities.pendingImmediate() < 5 && System.nanoTime() < end) Thread.sleep(5);
+        check(AndroidUtilities.pendingImmediate() >= 5, "terminal callback did not queue after stage progress");
         client.cancel(); AndroidUtilities.drain();
         check(result.calls == 0, "cancelled queued callback delivered");
     }
@@ -346,6 +371,132 @@ public final class AiSummaryClientTest {
         String marker = source ? "消息数据（JSONL）：\n" : "摘要数据（JSONL）：\n";
         return prompt.substring(prompt.lastIndexOf(marker) + marker.length());
     }
+
+    private static AiSummarySettings.Config streamConfig() {
+        return new AiSummarySettings.Config(base, "local", "", 512, true);
+    }
+
+    private static Reply sse(String body) {
+        return new Reply(200, body, false, "text/event-stream; charset=utf-8", 1);
+    }
+
+    private static String delta(String content) {
+        return "data: " + new JSONObject().put("choices", new org.json.JSONArray().put(
+                new JSONObject().put("delta", new JSONObject().put("content", content)))) + "\n\n";
+    }
+
+    private static String finish(String reason) {
+        return "data: " + new JSONObject().put("choices", new org.json.JSONArray().put(
+                new JSONObject().put("delta", new JSONObject()).put("finish_reason", reason))) + "\n\n";
+    }
+
+    private static void streamThinking() throws Exception {
+        String stream = ": keepalive\r\n\r\ndata:\r\n\r\n"
+                + "data: {\"choices\":[\ndata: {\"delta\":{\"role\":\"assistant\",\"reasoning_content\":\"NEVER_SHOW_FIELD\"}}]}\n\n"
+                + delta("<th") + delta("ink>NEVER_SHOW_THOUGHT") + delta("</thi") + delta("nk>")
+                + delta("【话题】中文😀") + delta(" [m1]") + finish("stop") + "data: [DONE]\n\n";
+        nextReply.set(sse(stream));
+        AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
+        client.summarize(streamConfig(), MESSAGES, result); await(result); client.cancel();
+        check("【话题】中文😀 [m1]".equals(result.summary), "split UTF-8/thinking corrupt final response: " + result.error);
+        check(!result.partials.isEmpty(), "no partial text was delivered");
+        for (String partial : result.partials) {
+            check(!partial.contains("NEVER_SHOW") && !partial.contains("<th") && !partial.contains("</th"), "reasoning fragment leaked");
+        }
+        check(lastBody.get().getBoolean("stream"), "stream flag was not sent");
+    }
+
+    private static void streamFinalOnly() throws Exception {
+        List<SummaryMessage> messages = List.of(new SummaryMessage(-100, 1, 1_700_000_000, "甲", "x".repeat(5000)));
+        requestHistory.clear();
+        replyGenerator.set(body -> body.getBoolean("stream")
+                ? sse(delta("【话题】最终合并 [m1]") + finish("stop") + "data: [DONE]\n\n")
+                : new Reply(200, completion("中间摘要 [m1]")));
+        AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
+        try {
+            client.summarize(streamConfig(), messages, result); await(result);
+            check(result.summary != null, "final streaming merge failed: " + result.error);
+            check(requestHistory.size() > 2, "fixture needs multiple source requests");
+            for (int i = 0; i < requestHistory.size(); i++) {
+                check(requestHistory.get(i).getBoolean("stream") == (i == requestHistory.size() - 1), "intermediate request streamed");
+            }
+            boolean source = false, merge = false, validating = false;
+            for (AiSummaryClient.Progress progress : result.progress) {
+                check(progress.completed >= 0 && progress.completed <= progress.total && progress.elapsedMs >= 0, "invalid progress counts");
+                if (progress.stage == AiSummaryClient.Stage.SOURCE) source = true;
+                if (progress.stage == AiSummaryClient.Stage.MERGE) {
+                    merge = true; check(progress.mergeRound >= 1, "merge rounds must start at one");
+                }
+                if (progress.stage == AiSummaryClient.Stage.VALIDATING && progress.completed == 1) validating = true;
+            }
+            check(source && merge && validating, "stage progress missing");
+        } finally {
+            client.cancel(); replyGenerator.set(null);
+        }
+    }
+
+    private static void streamFailures() throws Exception {
+        String[] streams = {
+                delta("【话题】截断 [m1]") + finish("length") + "data: [DONE]\n\n",
+                delta("【话题】连接断开 [m1]"),
+                "data: {\"error\":{\"code\":\"model_not_loaded\",\"message\":\"DO_NOT_ECHO_SECRET\"}}\n\n",
+                "event: error\ndata: DO_NOT_ECHO_SECRET\n\n",
+                "data: {malformed\n\n",
+                "data: [DONE]\n\n",
+                delta("<think>DO_NOT_ECHO_SECRET") + finish("stop") + "data: [DONE]\n\n",
+                ":" + "x".repeat(1_048_576) + "\n\n"
+        };
+        for (String stream : streams) {
+            // Large-limit case uses normal chunks to avoid a million individual socket writes.
+            nextReply.set(new Reply(200, stream, false, "text/event-stream", 0));
+            AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
+            client.summarize(streamConfig(), MESSAGES, result); await(result); client.cancel();
+            check(result.summary == null && result.error != null, "incomplete/error SSE returned success");
+            check(!result.error.contains("DO_NOT_ECHO_SECRET"), "server detail leaked");
+            for (String partial : result.partials) check(!partial.contains("DO_NOT_ECHO_SECRET"), "reasoning leaked to partial result");
+        }
+    }
+
+    private static void cancelLiveStream() throws Exception {
+        CountDownLatch releaseStream = new CountDownLatch(1);
+        String path = "/stream-cancel/v1/chat/completions";
+        server.createContext(path, exchange -> {
+            exchange.getRequestBody().readAllBytes();
+            exchange.getResponseHeaders().set("Content-Type", "text/event-stream");
+            exchange.sendResponseHeaders(200, 0);
+            try {
+                exchange.getResponseBody().write(delta("【话题】取消前的片段 [m1]").getBytes(StandardCharsets.UTF_8));
+                exchange.getResponseBody().flush();
+                releaseStream.await(5, TimeUnit.SECONDS);
+                exchange.getResponseBody().write((delta("不应再显示") + finish("stop") + "data: [DONE]\n\n").getBytes(StandardCharsets.UTF_8));
+            } catch (InterruptedException error) {
+                Thread.currentThread().interrupt();
+            } catch (IOException ignored) {
+            } finally {
+                exchange.close();
+            }
+        });
+        AiSummaryClient client = new AiSummaryClient(); Result stale = new Result();
+        try {
+            client.summarize(new AiSummarySettings.Config(base + "/stream-cancel/v1", "local", "", 512, true), MESSAGES, stale);
+            long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+            while (stale.partials.isEmpty() && System.nanoTime() < end) { AndroidUtilities.drain(); Thread.sleep(5); }
+            check(!stale.partials.isEmpty(), "stream did not deliver an initial partial");
+            long cancelStarted = System.nanoTime();
+            client.cancel();
+            check(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - cancelStarted) < 1000,
+                    "cancel blocked the caller while the server kept streaming open");
+            releaseStream.countDown();
+            int partialCount = stale.partials.size(), progressCount = stale.progress.size();
+            nextReply.set(new Reply(200, completion("新的普通请求 [m1]")));
+            Result fresh = new Result(); client.summarize(config("local", ""), MESSAGES, fresh); await(fresh);
+            check(stale.calls == 0 && stale.partials.size() == partialCount && stale.progress.size() == progressCount,
+                    "cancelled stream delivered a later callback");
+            check(fresh.summary != null, "client did not recover after stream cancellation");
+        } finally {
+            client.cancel(); releaseStream.countDown(); server.removeContext(path);
+        }
+    }
     private static void await(Result result) throws Exception {
         long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(8);
         while (result.calls == 0 && System.nanoTime() < end) { AndroidUtilities.drain(); Thread.sleep(5); }
@@ -363,13 +514,22 @@ public final class AiSummaryClientTest {
             try { releaseRequest.await(5, TimeUnit.SECONDS); } catch (InterruptedException error) { Thread.currentThread().interrupt(); }
         }
         if (reply.status == 302) exchange.getResponseHeaders().set("Location", base + "/redirect-target");
-        try { respond(exchange, reply.status, reply.body); } catch (IOException ignored) { exchange.close(); }
+        try { respond(exchange, reply.status, reply.body, reply.contentType, reply.fragmentBytes); } catch (IOException ignored) { exchange.close(); }
     }
     private static void respond(HttpExchange exchange, int status, String body) throws IOException {
+        respond(exchange, status, body, "application/json", 0);
+    }
+    private static void respond(HttpExchange exchange, int status, String body, String contentType, int fragmentBytes) throws IOException {
         byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
-        exchange.getResponseHeaders().set("Content-Type", "application/json");
+        exchange.getResponseHeaders().set("Content-Type", contentType);
         exchange.sendResponseHeaders(status, bytes.length);
-        exchange.getResponseBody().write(bytes); exchange.close();
+        if (fragmentBytes > 0) {
+            for (int i = 0; i < bytes.length; i += fragmentBytes) {
+                exchange.getResponseBody().write(bytes, i, Math.min(fragmentBytes, bytes.length - i));
+                exchange.getResponseBody().flush();
+            }
+        } else exchange.getResponseBody().write(bytes);
+        exchange.close();
     }
     private static String completion(String answer) { return new JSONObject().put("choices", new org.json.JSONArray().put(new JSONObject().put("finish_reason", "stop").put("message", new JSONObject().put("content", answer)))).toString(); }
     private static AiSummarySettings.Config config(String model, String key) { return new AiSummarySettings.Config(base, model, key); }

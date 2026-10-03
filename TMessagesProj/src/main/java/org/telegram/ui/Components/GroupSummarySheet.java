@@ -8,6 +8,7 @@ package org.telegram.ui.Components;
 
 import android.content.Context;
 import android.graphics.Typeface;
+import android.os.SystemClock;
 import android.text.Editable;
 import android.text.InputType;
 import android.text.SpannableStringBuilder;
@@ -25,6 +26,7 @@ import android.view.ViewParent;
 import android.view.WindowManager;
 import android.view.inputmethod.EditorInfo;
 import android.widget.LinearLayout;
+import android.widget.CheckBox;
 import android.widget.RadioButton;
 import android.widget.RadioGroup;
 import android.widget.ScrollView;
@@ -80,6 +82,17 @@ public final class GroupSummarySheet {
     private PromptPreferences.Scope savedPromptScope = PromptPreferences.Scope.BUILTIN;
     private PromptOptions sessionPrompt;
     private PromptOptions summaryPrompt;
+    private AiSummarySettings.Config summaryConfig;
+    private boolean summaryInferenceStarted;
+    private long summaryStartedAt;
+    private TextView progressStatus;
+    private TextView progressElapsed;
+    private TextView partialAnswer;
+    private TextView partialLabel;
+    private String streamingDraft;
+    private Runnable progressTicker;
+    private Runnable partialUpdate;
+    private long lastPartialUpdateAt;
     private boolean promptLoaded;
     private String recentCountText = "100";
     private int recentCount = 100;
@@ -153,11 +166,15 @@ public final class GroupSummarySheet {
         coverageNote = null;
         sessionPrompt = null;
         summaryPrompt = null;
+        summaryConfig = null;
         content.removeAllViews();
     }
 
     private void cancelWork() {
         operation++;
+        stopProgressUpdates();
+        streamingDraft = null;
+        summaryInferenceStarted = false;
         if (historyLoader != null) {
             historyLoader.cancel();
             historyLoader = null;
@@ -166,6 +183,68 @@ public final class GroupSummarySheet {
             client.cancel();
             client = null;
         }
+    }
+
+    private void stopProgressUpdates() {
+        if (progressTicker != null) {
+            AndroidUtilities.cancelRunOnUIThread(progressTicker);
+            progressTicker = null;
+        }
+        if (partialUpdate != null) {
+            AndroidUtilities.cancelRunOnUIThread(partialUpdate);
+            partialUpdate = null;
+        }
+        progressStatus = null;
+        progressElapsed = null;
+        partialAnswer = null;
+        partialLabel = null;
+    }
+
+    private void startProgressTicker(int generation) {
+        progressTicker = new Runnable() {
+            @Override
+            public void run() {
+                if (!active(generation)) return;
+                if (progressElapsed != null) {
+                    progressElapsed.setText("已耗时 " + Math.max(0L,
+                            (SystemClock.elapsedRealtime() - summaryStartedAt) / 1000) + " 秒");
+                }
+                AndroidUtilities.runOnUIThread(this, 1000);
+            }
+        };
+        progressTicker.run();
+    }
+
+    private void updateSummaryProgress(AiSummaryClient.Progress progress) {
+        if (progressStatus == null) return;
+        switch (progress.stage) {
+            case SOURCE:
+                progressStatus.setText("正在总结分段：已完成 " + progress.completed + " / " + progress.total);
+                break;
+            case MERGE:
+                progressStatus.setText("正在合并摘要（第 " + progress.mergeRound + " 轮）：已完成 "
+                        + progress.completed + " / " + progress.total);
+                break;
+            case VALIDATING:
+                progressStatus.setText("正在校验原文引用…");
+                break;
+        }
+    }
+
+    private void updatePartialAnswer(String text, int generation) {
+        streamingDraft = text;
+        if (partialUpdate != null) return;
+        partialUpdate = () -> {
+            partialUpdate = null;
+            if (!active(generation) || partialAnswer == null) return;
+            lastPartialUpdateAt = SystemClock.elapsedRealtime();
+            partialLabel.setVisibility(View.VISIBLE);
+            partialAnswer.setVisibility(View.VISIBLE);
+            // A partial response has no spans, links or source navigation until final validation.
+            partialAnswer.setText(streamingDraft);
+        };
+        AndroidUtilities.runOnUIThread(partialUpdate,
+                Math.max(0L, 150 - (SystemClock.elapsedRealtime() - lastPartialUpdateAt)));
     }
 
     private boolean active(int expectedOperation) {
@@ -541,6 +620,14 @@ public final class GroupSummarySheet {
         EditTextBoldCursor outputTokens = edit("512", Integer.toString(config.maxOutputTokens),
                 InputType.TYPE_CLASS_NUMBER);
         addText("服务端支持时生效；较大的值会增加手机推理耗时。", false);
+        CheckBox streaming = new CheckBox(context);
+        streaming.setText("流式显示（需要服务支持）");
+        streaming.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 16);
+        streaming.setTextColor(color(Theme.key_dialogTextBlack));
+        streaming.setChecked(config.stream);
+        streaming.setMinHeight(dp(48));
+        content.addView(streaming, LayoutHelper.createLinear(-1, -2, 0, 4, 0, 4));
+        addText("流式模式逐步展示最终回答；连接测试仍使用普通请求，不代表已验证流式支持。", false);
         addText("API Key（按 MNN 服务设置填写）", true);
         EditTextBoldCursor key = edit("服务关闭鉴权时可留空", config.apiKey,
                 InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
@@ -552,13 +639,15 @@ public final class GroupSummarySheet {
         validation.setTextColor(color(Theme.key_text_RedRegular));
         validation.setVisibility(View.GONE);
         addAction("测试连接", () -> {
-            AiSummarySettings.Config snapshot = readSettingsInput(address, model, key, outputTokens, validation);
+            AiSummarySettings.Config snapshot = readSettingsInput(address, model, key, outputTokens, validation,
+                    streaming.isChecked(), config.inputCharacterBudget);
             if (snapshot != null) {
                 testConnection(snapshot);
             }
         });
         addAction("保存设置", () -> {
-            AiSummarySettings.Config updated = readSettingsInput(address, model, key, outputTokens, validation);
+            AiSummarySettings.Config updated = readSettingsInput(address, model, key, outputTokens, validation,
+                    streaming.isChecked(), config.inputCharacterBudget);
             if (updated != null) {
                 saveSettings(updated);
             }
@@ -568,7 +657,7 @@ public final class GroupSummarySheet {
 
     private AiSummarySettings.Config readSettingsInput(EditTextBoldCursor address, EditTextBoldCursor model,
                                                        EditTextBoldCursor key, EditTextBoldCursor outputTokens,
-                                                       TextView validation) {
+                                                       TextView validation, boolean stream, int inputCharacterBudget) {
         validation.setVisibility(View.GONE);
         int tokens;
         try {
@@ -582,7 +671,7 @@ public final class GroupSummarySheet {
             return null;
         }
         AiSummarySettings.Config config = new AiSummarySettings.Config(address.getText().toString().trim(),
-                model.getText().toString().trim(), key.getText().toString().trim(), tokens);
+                model.getText().toString().trim(), key.getText().toString().trim(), tokens, stream, inputCharacterBudget);
         String error = AiSummarySettings.validate(config);
         if (error != null) {
             validation.setText(error);
@@ -706,11 +795,17 @@ public final class GroupSummarySheet {
         sourceMessages = null;
         coverageNote = null;
         summaryPrompt = prompt;
+        summaryConfig = config;
+        summaryStartedAt = SystemClock.elapsedRealtime();
+        lastPartialUpdateAt = 0;
         final int generation = operation;
         clearContent();
-        addText("正在读取文字消息…", true);
+        progressStatus = addText("正在读取文字消息…", true);
+        progressElapsed = addText("已耗时 0 秒", false);
         addText(today ? "读取今天 00:00 起的文字消息。" : "读取最近 " + recentCount + " 条文字消息。", false);
+        addText("正在确定可读取范围，暂时没有完整消息总量。", false);
         addAction("取消并返回", this::showSelection);
+        startProgressTicker(generation);
 
         historyLoader = new SummaryHistoryLoader(account, dialogId, topicId);
         SummaryHistoryLoader.Callback callback = new SummaryHistoryLoader.Callback() {
@@ -731,13 +826,33 @@ public final class GroupSummarySheet {
                     return;
                 }
                 clearContent();
-                addText("正在生成话题、结论与待办…", true);
+                progressStatus = addText("正在生成话题、结论与待办…", true);
+                progressElapsed = addText("已耗时 " + Math.max(0L,
+                        (SystemClock.elapsedRealtime() - summaryStartedAt) / 1000) + " 秒", false);
+                addText("已读取 " + sourceMessages.size() + " 条文字消息。", false);
                 addText(coverageNote, false);
                 addText("手机上的本地模型可能需要一些时间。保持 MNN Chat API 服务运行。", false);
                 addText("请保持 Telegram 在前台；关闭面板或离开页面会取消总结。", false);
+                partialLabel = addText("生成中，尚未完成或校验", true);
+                partialLabel.setVisibility(View.GONE);
+                partialAnswer = addText("", false);
+                partialAnswer.setTextColor(color(Theme.key_dialogTextBlack));
+                partialAnswer.setLinksClickable(false);
+                partialAnswer.setVisibility(View.GONE);
                 addAction("取消并返回", GroupSummarySheet.this::showSelection);
+                summaryInferenceStarted = true;
                 client = new AiSummaryClient();
                 client.summarize(config, sourceMessages, prompt, new AiSummaryClient.Callback() {
+                    @Override
+                    public void onProgress(AiSummaryClient.Progress progress) {
+                        if (active(generation)) updateSummaryProgress(progress);
+                    }
+
+                    @Override
+                    public void onPartial(String text) {
+                        if (active(generation)) updatePartialAnswer(text, generation);
+                    }
+
                     @Override
                     public void onSuccess(String summary) {
                         if (active(generation)) {
@@ -770,6 +885,10 @@ public final class GroupSummarySheet {
     }
 
     private void showError(String message) {
+        final String unfinished = streamingDraft;
+        final boolean allowPlainRetry = summaryInferenceStarted && summaryConfig != null && summaryConfig.stream;
+        final AiSummarySettings.Config failedConfig = summaryConfig;
+        final PromptOptions failedPrompt = summaryPrompt;
         cancelWork();
         clearContent();
         addText("暂时无法完成总结", true);
@@ -777,13 +896,29 @@ public final class GroupSummarySheet {
         if (coverageNote != null) {
             addText(coverageNote, false);
         }
+        if (unfinished != null && !unfinished.isEmpty()) {
+            addText("以下内容未完成，尚未通过引用校验", true);
+            TextView partial = addText(unfinished, false);
+            partial.setLinksClickable(false);
+        }
         addAction("重试", this::startSummary);
+        if (allowPlainRetry) {
+            addAction("改用普通模式重新运行", () -> startSummary(new AiSummarySettings.Config(
+                    failedConfig.baseUrl, failedConfig.model, failedConfig.apiKey, failedConfig.maxOutputTokens,
+                    false, failedConfig.inputCharacterBudget), failedPrompt));
+            addText("仅本次改用普通模式，不修改已保存设置；重新运行会再次读取所选范围。", false);
+        }
         addAction("MNN API 设置", this::showSettings);
         addAction("返回范围选择", this::showSelection);
     }
 
     private void showResult(String summary) {
+        stopProgressUpdates();
+        streamingDraft = null;
+        summaryInferenceStarted = false;
         clearContent();
+        addText("已完成 · 总耗时 " + Math.max(0L,
+                (SystemClock.elapsedRealtime() - summaryStartedAt) / 1000) + " 秒", false);
         if (summaryPrompt != null) {
             addText("总结方向：" + PromptOptions.templateLabel(summaryPrompt.templateId), false);
         }

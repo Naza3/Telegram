@@ -9,6 +9,7 @@ import org.telegram.messenger.AndroidUtilities;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InterruptedIOException;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.ConnectException;
@@ -23,11 +24,36 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 
-/** Non-streaming, cancellable OpenAI-compatible chat completions transport. */
+/** Cancellable OpenAI-compatible completions with optional streaming of the final answer. */
 public final class AiSummaryClient {
     public interface Callback {
         void onSuccess(String summary);
         void onError(String error);
+        default void onProgress(Progress progress) {
+        }
+        /** Unvalidated accumulated text for display only; source links belong to onSuccess. */
+        default void onPartial(String text) {
+        }
+    }
+
+    public enum Stage {
+        SOURCE, MERGE, VALIDATING
+    }
+
+    public static final class Progress {
+        public final Stage stage;
+        public final int completed;
+        public final int total;
+        public final int mergeRound;
+        public final long elapsedMs;
+
+        Progress(Stage stage, int completed, int total, int mergeRound, long elapsedMs) {
+            this.stage = stage;
+            this.completed = completed;
+            this.total = total;
+            this.mergeRound = mergeRound;
+            this.elapsedMs = elapsedMs;
+        }
     }
 
     public interface DiagnosticCallback {
@@ -47,6 +73,12 @@ public final class AiSummaryClient {
     }
 
     private static final ExecutorService EXECUTOR = Executors.newFixedThreadPool(2);
+    // Closing an actively read HttpURLConnection can block on its stream lock; never do it on UI.
+    private static final ExecutorService DISCONNECT_EXECUTOR = Executors.newCachedThreadPool(action -> {
+        Thread thread = new Thread(action, "ai-summary-disconnect");
+        thread.setDaemon(true);
+        return thread;
+    });
     private static final int CONNECT_TIMEOUT_MS = 15_000;
     private static final int READ_TIMEOUT_MS = 300_000;
     private static final int DIAGNOSTIC_TIMEOUT_MS = 60_000;
@@ -86,7 +118,7 @@ public final class AiSummaryClient {
                 }
                 long started = System.nanoTime();
                 Completion result = complete(config, "This is a connection test. Reply only OK, without reasoning.",
-                        "Reply OK.", 64, diagnosticTimeoutMs, request);
+                        "Reply OK.", 64, diagnosticTimeoutMs, request, false, null);
                 DiagnosticResult diagnostic = new DiagnosticResult(
                         Math.max(0, (System.nanoTime() - started) / 1_000_000L), result.reportedModel);
                 deliver(request, () -> callback.onSuccess(diagnostic));
@@ -110,6 +142,7 @@ public final class AiSummaryClient {
         final ArrayList<SummaryMessage> snapshot = messages == null ? null : new ArrayList<>(messages);
         final PromptOptions direction = options; // Immutable and fixed for all source/merge requests.
         task = EXECUTOR.submit(() -> {
+            long started = System.nanoTime();
             try {
                 String error = AiSummarySettings.validate(config);
                 if (error != null) {
@@ -118,14 +151,18 @@ public final class AiSummaryClient {
                 List<String> chunks = AiSummaryPrompt.sourceChunks(snapshot, direction);
                 int requestCount = chunks.size();
                 List<String> summaries = new ArrayList<>();
+                progress(request, callback, Stage.SOURCE, 0, chunks.size(), 0, started);
                 for (int i = 0; i < chunks.size(); i++) {
                     checkActive(request);
                     String chunk = chunks.get(i);
                     String summary = complete(config,
-                            AiSummaryPrompt.sourcePrompt(chunk, i + 1, chunks.size(), direction), request);
+                            AiSummaryPrompt.sourcePrompt(chunk, i + 1, chunks.size(), direction), request,
+                            chunks.size() == 1, callback);
                     AiSummaryPrompt.validateReferences(summary, AiSummaryPrompt.sourceReferences(chunk));
                     summaries.add(summary);
+                    progress(request, callback, Stage.SOURCE, i + 1, chunks.size(), 0, started);
                 }
+                int mergeRound = 0;
                 while (summaries.size() > 1) {
                     checkActive(request);
                     List<String> mergeChunks = AiSummaryPrompt.mergeChunks(summaries, direction);
@@ -134,16 +171,22 @@ public final class AiSummaryClient {
                         throw new SummaryException("分段摘要无法在本次请求上限内完成合并。请减少消息数量后重试。");
                     }
                     List<String> merged = new ArrayList<>();
+                    mergeRound++;
+                    progress(request, callback, Stage.MERGE, 0, mergeChunks.size(), mergeRound, started);
                     for (String chunk : mergeChunks) {
-                        String summary = complete(config, AiSummaryPrompt.mergePrompt(chunk, direction), request);
+                        String summary = complete(config, AiSummaryPrompt.mergePrompt(chunk, direction), request,
+                                mergeChunks.size() == 1, callback);
                         // The chunk contains only summaries validated against their own inputs.
                         AiSummaryPrompt.validateReferences(summary, AiSummaryPrompt.references(chunk));
                         merged.add(summary);
+                        progress(request, callback, Stage.MERGE, merged.size(), mergeChunks.size(), mergeRound, started);
                     }
                     summaries = merged;
                 }
                 String result = summaries.get(0);
+                progress(request, callback, Stage.VALIDATING, 0, 1, mergeRound, started);
                 AiSummaryPrompt.validateReferences(result, snapshot.size());
+                progress(request, callback, Stage.VALIDATING, 1, 1, mergeRound, started);
                 deliver(request, () -> callback.onSuccess(result));
             } catch (CancelledException ignored) {
                 // Cancellation is not an error and never delivers a stale callback.
@@ -162,8 +205,9 @@ public final class AiSummaryClient {
             task = null;
         }
         if (connection != null) {
-            connection.disconnect();
+            HttpURLConnection cancelled = connection;
             connection = null;
+            DISCONNECT_EXECUTOR.execute(cancelled::disconnect);
         }
     }
 
@@ -179,6 +223,13 @@ public final class AiSummaryClient {
         }
     }
 
+    private void progress(int request, Callback callback, Stage stage, int completed, int total,
+                          int mergeRound, long started) {
+        Progress progress = new Progress(stage, completed, total, mergeRound,
+                Math.max(0, (System.nanoTime() - started) / 1_000_000L));
+        deliver(request, () -> callback.onProgress(progress));
+    }
+
     private void deliver(int request, Runnable callback) {
         AndroidUtilities.runOnUIThread(() -> {
             synchronized (AiSummaryClient.this) {
@@ -189,21 +240,22 @@ public final class AiSummaryClient {
         });
     }
 
-    private String complete(AiSummarySettings.Config config, String prompt, int request)
+    private String complete(AiSummarySettings.Config config, String prompt, int request, boolean finalRequest,
+                            Callback callback)
             throws IOException, JSONException, SummaryException, CancelledException {
         return complete(config, AiSummaryPrompt.SYSTEM_PROMPT, prompt, config.maxOutputTokens,
-                readTimeoutMs, request).text;
+                readTimeoutMs, request, config.stream && finalRequest, callback).text;
     }
 
     private Completion complete(AiSummarySettings.Config config, String systemPrompt, String prompt,
-                                int maxOutputTokens, int timeoutMs, int request)
+                                int maxOutputTokens, int timeoutMs, int request, boolean stream, Callback callback)
             throws IOException, JSONException, SummaryException, CancelledException {
         checkActive(request);
         JSONObject body = new JSONObject();
         if (!config.model.isEmpty()) {
             body.put("model", config.model);
         }
-        body.put("stream", false);
+        body.put("stream", stream);
         body.put("temperature", 0.2);
         // Some MNN Chat releases accept but ignore this compatibility parameter.
         body.put("max_tokens", maxOutputTokens);
@@ -224,7 +276,7 @@ public final class AiSummaryClient {
             current.setUseCaches(false);
             current.setDoOutput(true);
             current.setRequestProperty("Content-Type", "application/json; charset=utf-8");
-            current.setRequestProperty("Accept", "application/json");
+            current.setRequestProperty("Accept", stream ? "text/event-stream" : "application/json");
             if (!config.apiKey.isEmpty()) {
                 current.setRequestProperty("Authorization", "Bearer " + config.apiKey);
             }
@@ -240,6 +292,36 @@ public final class AiSummaryClient {
                     throw new SummaryException(httpError(status));
                 }
                 throw new SummaryException(serverError(status, readErrorBody(current, request)));
+            }
+            String contentType = current.getContentType();
+            if (stream && contentType != null && contentType.toLowerCase(Locale.US).startsWith("text/event-stream")) {
+                AiSummarySse.Result result;
+                final long[] lastPartial = {0};
+                try {
+                    result = AiSummarySse.read(current.getInputStream(), MAX_RESPONSE_BYTES, () -> {
+                        try {
+                            checkActive(request);
+                        } catch (CancelledException cancelled) {
+                            throw new InterruptedIOException("Cancelled");
+                        }
+                    }, text -> {
+                        long now = System.nanoTime();
+                        if (callback != null && now - lastPartial[0] >= 75_000_000L) {
+                            lastPartial[0] = now;
+                            deliver(request, () -> callback.onPartial(text));
+                        }
+                    });
+                } catch (AiSummarySse.Failure failure) {
+                    throw new SummaryException(failure.serverDetail == null ? failure.getMessage()
+                            : serverError(status, failure.serverDetail));
+                } catch (JSONException error) {
+                    throw new SummaryException("流式响应格式不兼容。请关闭流式模式后重试。");
+                }
+                checkActive(request);
+                if (result.text.regionMatches(true, 0, "Error:", 0, 6)) {
+                    throw new SummaryException(serverError(status, result.text));
+                }
+                return new Completion(result.text, safeReportedModel(result.reportedModel, config.apiKey));
             }
             String response;
             try (InputStream input = current.getInputStream(); ByteArrayOutputStream buffer = new ByteArrayOutputStream()) {
@@ -293,6 +375,9 @@ public final class AiSummaryClient {
             if (answer.isEmpty()) {
                 throw new SummaryException("模型没有返回可用的总结正文。请检查模型，或关闭思考模式后重试。");
             }
+            if (stream) {
+                throw new SummaryException("模型服务返回了普通 JSON，未提供 SSE 流式响应。请关闭流式模式后重试。");
+            }
             return new Completion(answer, reportedModel(responseObject, config.apiKey));
         } finally {
             synchronized (this) {
@@ -328,7 +413,12 @@ public final class AiSummaryClient {
         if (!(value instanceof String)) {
             return null;
         }
-        String model = ((String) value).trim();
+        return safeReportedModel((String) value, apiKey);
+    }
+
+    private static String safeReportedModel(String value, String apiKey) {
+        if (value == null) return null;
+        String model = value.trim();
         if (model.isEmpty() || model.length() > 128 || (!apiKey.isEmpty() && model.contains(apiKey))) {
             return null;
         }

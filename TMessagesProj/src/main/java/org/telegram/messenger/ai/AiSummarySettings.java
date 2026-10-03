@@ -14,6 +14,8 @@ public final class AiSummarySettings {
     public static final String DEFAULT_BASE_URL = "http://127.0.0.1:8080/v1";
     public static final String DEFAULT_MODEL = "mnn-local";
     public static final int DEFAULT_MAX_OUTPUT_TOKENS = 512;
+    /** Conservative character estimate, not the model tokenizer's context limit. */
+    public static final int DEFAULT_INPUT_CHARACTER_BUDGET = 6000;
     private static final String PREFIX = "local_ai_summary_";
 
     private AiSummarySettings() {
@@ -24,16 +26,29 @@ public final class AiSummarySettings {
         public final String model;
         public final String apiKey;
         public final int maxOutputTokens;
+        public final boolean stream;
+        public final int inputCharacterBudget;
 
         public Config(String baseUrl, String model, String apiKey) {
             this(baseUrl, model, apiKey, DEFAULT_MAX_OUTPUT_TOKENS);
         }
 
         public Config(String baseUrl, String model, String apiKey, int maxOutputTokens) {
+            this(baseUrl, model, apiKey, maxOutputTokens, false);
+        }
+
+        public Config(String baseUrl, String model, String apiKey, int maxOutputTokens, boolean stream) {
+            this(baseUrl, model, apiKey, maxOutputTokens, stream, DEFAULT_INPUT_CHARACTER_BUDGET);
+        }
+
+        public Config(String baseUrl, String model, String apiKey, int maxOutputTokens,
+                      boolean stream, int inputCharacterBudget) {
             this.baseUrl = baseUrl == null ? "" : baseUrl.trim();
             this.model = model == null ? "" : model.trim();
             this.apiKey = apiKey == null ? "" : apiKey.trim();
             this.maxOutputTokens = maxOutputTokens;
+            this.stream = stream;
+            this.inputCharacterBudget = inputCharacterBudget;
         }
     }
 
@@ -52,7 +67,9 @@ public final class AiSummarySettings {
         return new Config(preferences.getString(PREFIX + "base_url", DEFAULT_BASE_URL),
                 preferences.getString(PREFIX + "model", DEFAULT_MODEL),
                 apiKey,
-                preferences.getInt(PREFIX + "max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS));
+                preferences.getInt(PREFIX + "max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS),
+                preferences.getInt(PREFIX + "stream", 0) == 1,
+                preferences.getInt(PREFIX + "input_character_budget", DEFAULT_INPUT_CHARACTER_BUDGET));
     }
 
     /** Returns whether the API key was persisted securely (false means session-only storage). */
@@ -72,6 +89,8 @@ public final class AiSummarySettings {
                 .putString(PREFIX + "base_url", config.baseUrl)
                 .putString(PREFIX + "model", config.model)
                 .putInt(PREFIX + "max_output_tokens", config.maxOutputTokens)
+                .putInt(PREFIX + "stream", config.stream ? 1 : 0)
+                .putInt(PREFIX + "input_character_budget", config.inputCharacterBudget)
                 .remove(PREFIX + "api_key")
                 .apply();
         return AiSummarySecretStore.save(account, ownerId, config.apiKey);
@@ -106,6 +125,9 @@ public final class AiSummarySettings {
         }
         if (config.maxOutputTokens < 64 || config.maxOutputTokens > 8192) {
             return "最大输出 tokens 必须在 64 到 8192 之间。";
+        }
+        if (config.inputCharacterBudget < 2048 || config.inputCharacterBudget > 32000) {
+            return "上下文字符预算须在 2048–32000 之间。这是保守估算，不是精确 token 数。";
         }
         if (containsControl(config.apiKey)) {
             return "API Key 不能包含换行或控制字符。";

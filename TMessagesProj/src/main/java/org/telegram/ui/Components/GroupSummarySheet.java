@@ -46,6 +46,7 @@ import org.telegram.messenger.ai.SummaryMessage;
 import org.telegram.messenger.ai.SummaryStateStore;
 import org.telegram.messenger.ai.SummarySourceVerifier;
 import org.telegram.messenger.ai.SummaryResultCache;
+import org.telegram.messenger.ai.SummaryFilter;
 import org.telegram.ui.ActionBar.AlertDialog;
 import org.telegram.ui.ActionBar.BaseFragment;
 import org.telegram.ui.ActionBar.Theme;
@@ -78,10 +79,17 @@ public final class GroupSummarySheet {
         final boolean initialize;
         final SummaryHistoryLoader.Result replayHistory;
         final ArrayList<SummaryMessage> replayMessages;
+        final SummaryFilter.Options filters;
 
         RangeRequest(RangeMode mode, int count, int expectedCursor, int lower, int upper,
                      boolean initialize, SummaryHistoryLoader.Result replayHistory,
                      ArrayList<SummaryMessage> replayMessages) {
+            this(mode, count, expectedCursor, lower, upper, initialize, replayHistory, replayMessages, null);
+        }
+
+        RangeRequest(RangeMode mode, int count, int expectedCursor, int lower, int upper,
+                     boolean initialize, SummaryHistoryLoader.Result replayHistory,
+                     ArrayList<SummaryMessage> replayMessages, SummaryFilter.Options filters) {
             this.mode = mode;
             this.count = count;
             this.expectedCursor = expectedCursor;
@@ -90,6 +98,7 @@ public final class GroupSummarySheet {
             this.initialize = initialize;
             this.replayHistory = replayHistory;
             this.replayMessages = replayMessages == null ? null : new ArrayList<>(replayMessages);
+            this.filters = filters;
         }
     }
 
@@ -192,6 +201,8 @@ public final class GroupSummarySheet {
     private int sourceOperation;
     private CachedResult cachedResult;
     private boolean viewingCachedResult;
+    private SummaryFilter.Options filterOptions = SummaryFilter.Options.DEFAULT;
+    private boolean summaryFiltered;
     private boolean closed;
     private int operation;
 
@@ -310,6 +321,8 @@ public final class GroupSummarySheet {
         if (historyLoader != null) pendingSourceUpdates.put(messageId, update);
         if (sourceChanged(sourceMessages, messageId, update)
                 || sourceChanged(lastSuccessfulSources, messageId, update)
+                || historySourceChanged(summaryHistory, messageId, update)
+                || historySourceChanged(lastSuccessfulHistory, messageId, update)
                 || summaryRange != null && sourceChanged(summaryRange.replayMessages, messageId, update)) {
             invalidateSources("原消息已删除，当前摘要及原文快照已过期。请重新读取消息后总结。", false);
         }
@@ -323,6 +336,8 @@ public final class GroupSummarySheet {
         if (historyLoader != null) pendingSourceUpdates.put(messageId, update);
         if (sourceChanged(sourceMessages, messageId, update)
                 || sourceChanged(lastSuccessfulSources, messageId, update)
+                || historySourceChanged(summaryHistory, messageId, update)
+                || historySourceChanged(lastSuccessfulHistory, messageId, update)
                 || summaryRange != null && sourceChanged(summaryRange.replayMessages, messageId, update)) {
             invalidateSources("原消息已修改或不再可用，当前摘要及原文快照已过期。请重新读取消息后总结。", false);
         }
@@ -338,6 +353,10 @@ public final class GroupSummarySheet {
             if (source.dialogId == dialogId && source.id == messageId && update.changed(source)) return true;
         }
         return false;
+    }
+
+    private boolean historySourceChanged(SummaryHistoryLoader.Result history, int messageId, SourceUpdate update) {
+        return history != null && sourceChanged(history.messages, messageId, update);
     }
 
     private void invalidateSources(String reason, boolean accessRevoked) {
@@ -360,7 +379,8 @@ public final class GroupSummarySheet {
     }
 
     private void invalidateCachedSource(int messageId, SourceUpdate update) {
-        if (cachedResult != null && sourceChanged(cachedResult.sources, messageId, update)) clearCachedResult();
+        if (cachedResult != null && (sourceChanged(cachedResult.sources, messageId, update)
+                || historySourceChanged(cachedResult.history, messageId, update))) clearCachedResult();
     }
 
     private void clearCachedResult() {
@@ -407,6 +427,7 @@ public final class GroupSummarySheet {
         sourceMessages = new ArrayList<>(snapshot.sources);
         summaryHistory = snapshot.history;
         summaryRange = snapshot.range;
+        summaryFiltered = snapshot.range.filters != null && snapshot.range.filters.hasFilters();
         summaryConfig = snapshot.config;
         summaryPrompt = snapshot.prompt;
         coverageNote = snapshot.coverage;
@@ -697,6 +718,15 @@ public final class GroupSummarySheet {
             showPromptEditor(effectivePrompt(), PromptPreferences.Scope.SESSION, null);
         });
 
+        addText("消息选择：" + filterLabel(filterOptions), false);
+        if (filterOptions.hasFilters()) {
+            addText("已启用实际消息筛选：本次不会建立或推进通用增量起点。要补齐全部消息，请恢复全部文字后运行。", true);
+        }
+        addAction("与我相关与筛选", () -> {
+            recentCountText = count.getText().toString();
+            showFilterEditor();
+        });
+
         addAction("MNN API 设置", () -> {
             recentCountText = count.getText().toString();
             showSettings();
@@ -722,10 +752,10 @@ public final class GroupSummarySheet {
                 recentCountText = count.getText().toString();
                 RangeRequest request = new RangeRequest(RangeMode.REPLAY, recentCount, summaryState.cursor,
                         lastSuccessfulHistory.lowerExclusiveId, lastSuccessfulHistory.coveredThroughId,
-                        false, lastSuccessfulHistory, lastSuccessfulSources);
+                        false, lastSuccessfulHistory, lastSuccessfulHistory.messages);
                 startSummary(request);
             });
-            addText("重做使用本面板保留的原文快照，不移动增量进度；关闭面板后该快照不保留。", false);
+            addText("重做使用上次成功范围的原始文字快照，重新应用当前筛选与方向，不移动增量进度；关闭面板后该快照不保留。", false);
         }
         if (summaryState.completedAt > 0) {
             addAction("按已保存范围分批重读并重做", () -> {
@@ -740,6 +770,71 @@ public final class GroupSummarySheet {
 
     private boolean hasUnreadSnapshot() {
         return unreadLower >= 0 && unreadUpper >= unreadLower;
+    }
+
+    private static String filterLabel(SummaryFilter.Options options) {
+        String label = options.mode == SummaryFilter.Mode.FOCUS_SELF ? "全部文字，重点关注与我相关"
+                : options.mode == SummaryFilter.Mode.FILTER_SELF ? "仅与我相关及必要上下文" : "全部文字";
+        if (options.senderId != 0) label += " · 成员 ID " + options.senderId;
+        if (!options.keyword.isEmpty()) label += " · 关键词：" + options.keyword;
+        return label;
+    }
+
+    private void showFilterEditor() {
+        cancelWork();
+        clearContent();
+        addText("与我相关与筛选", true);
+        addText("仅作用于本面板，先读取选定范围，再筛选其中的文字。", false);
+        RadioGroup modes = new RadioGroup(context);
+        modes.setOrientation(RadioGroup.VERTICAL);
+        for (SummaryFilter.Mode mode : SummaryFilter.Mode.values()) {
+            RadioButton option = radio(mode == SummaryFilter.Mode.ALL ? "总结全部文字"
+                    : mode == SummaryFilter.Mode.FOCUS_SELF ? "保留全部，重点关注与我相关" : "仅总结与我相关及必要上下文");
+            option.setId(View.generateViewId());
+            option.setTag(mode);
+            modes.addView(option, new RadioGroup.LayoutParams(-1, -2));
+            if (mode == filterOptions.mode) modes.check(option.getId());
+        }
+        content.addView(modes, LayoutHelper.createLinear(-1, -2, 0, 4, 0, 4));
+        addText("与我相关仅按明确 @ 我、已确认回复我、本人身份可确认的发言匹配，不猜测匿名身份。仅相关模式还会带入范围内前后各一条文字及明确回复的原文，作为必要上下文。", false);
+        addText("成员 ID（可留空）", true);
+        EditTextBoldCursor sender = edit("留空为全部成员", filterOptions.senderId == 0 ? "" : Long.toString(filterOptions.senderId),
+                InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_SIGNED);
+        addText("按 Telegram 真实发言者 ID 精确筛选；本人 ID：" + ownerId + "。不按显示名猜测成员。", false);
+        addText("正文关键词（可留空，最多 128 个字符）", true);
+        EditTextBoldCursor keyword = edit("不区分大小写的字面匹配", filterOptions.keyword, InputType.TYPE_CLASS_TEXT);
+        addText("成员、关键词和仅相关条件同时满足才匹配；额外上下文可能不满足条件。任何实际筛选都不会推进通用“上次总结之后”进度，零匹配也不会退回全部消息。", false);
+        TextView validation = addText("", false);
+        validation.setTextColor(color(Theme.key_text_RedRegular));
+        addAction("应用本次筛选", () -> {
+            long senderId = 0;
+            String senderText = sender.getText().toString().trim();
+            if (!senderText.isEmpty()) {
+                try {
+                    senderId = Long.parseLong(senderText);
+                } catch (NumberFormatException ignored) {
+                    sender.setError("请输入有效的 Telegram 成员 ID");
+                    return;
+                }
+                if (senderId == 0) {
+                    sender.setError("ID 不能为 0；全部成员请留空");
+                    return;
+                }
+            }
+            RadioButton selected = modes.findViewById(modes.getCheckedRadioButtonId());
+            try {
+                filterOptions = new SummaryFilter.Options((SummaryFilter.Mode) selected.getTag(), senderId,
+                        keyword.getText().toString());
+                showSelection();
+            } catch (IllegalArgumentException error) {
+                validation.setText(error.getMessage());
+            }
+        });
+        addAction("恢复全部文字", () -> {
+            filterOptions = SummaryFilter.Options.DEFAULT;
+            showSelection();
+        });
+        addAction("取消", this::showSelection);
     }
 
     private void loadSummaryState(boolean reset) {
@@ -1210,13 +1305,16 @@ public final class GroupSummarySheet {
     }
 
     private void startSummary(RangeRequest request) {
-        final PromptOptions prompt = effectivePrompt();
-        summaryRange = request;
+        final RangeRequest snapshot = request.filters == null
+                ? new RangeRequest(request.mode, request.count, request.expectedCursor, request.lower, request.upper,
+                    request.initialize, request.replayHistory, request.replayMessages, filterOptions) : request;
+        final PromptOptions prompt = effectivePrompt().withFocusSelf(snapshot.filters.mode == SummaryFilter.Mode.FOCUS_SELF);
+        summaryRange = snapshot;
         summaryHistory = null;
         sourceMessages = null;
         summaryConfig = null;
         summaryPrompt = prompt;
-        loadSettings(config -> startSummary(config, prompt, request));
+        loadSettings(config -> startSummary(config, prompt, snapshot));
     }
 
     private void startSummary(AiSummarySettings.Config config, PromptOptions prompt, RangeRequest request) {
@@ -1232,6 +1330,7 @@ public final class GroupSummarySheet {
         completionNotice = null;
         resultCommitted = false;
         viewingCachedResult = false;
+        summaryFiltered = request.filters != null && request.filters.hasFilters();
         sourceSnapshotInvalid = false;
         summaryRange = request;
         summaryPrompt = prompt;
@@ -1295,8 +1394,8 @@ public final class GroupSummarySheet {
         if (!active(generation)) return;
         historyLoader = null;
         summaryHistory = result;
-        sourceMessages = new ArrayList<>(replay == null ? result.messages : replay);
-        for (SummaryMessage source : sourceMessages) {
+        ArrayList<SummaryMessage> rawSources = new ArrayList<>(replay == null ? result.messages : replay);
+        for (SummaryMessage source : rawSources) {
             SourceUpdate update = pendingSourceUpdates.get(source.id);
             if (update != null && update.changed(source)) {
                 invalidateSources("读取期间原消息已变化，本次原文快照已过期。请重新读取消息。", false);
@@ -1305,6 +1404,10 @@ public final class GroupSummarySheet {
         }
         pendingSourceUpdates.clear();
         coverageNote = result.coverageNote;
+        SummaryFilter.Result filtered = SummaryFilter.apply(rawSources, ownerId, summaryRange.filters);
+        sourceMessages = filtered.messages;
+        summaryFiltered = filtered.filtered;
+        if (!filtered.coverageNote.isEmpty()) coverageNote += "\n" + filtered.coverageNote;
         if (summaryRange.replayHistory != null) {
             coverageNote += summaryRange.mode == RangeMode.REPLAY
                     ? "\n本次重做复用本面板已读取的原文快照，未重新读取消息，不改变已保存进度。"
@@ -1315,7 +1418,8 @@ public final class GroupSummarySheet {
             return;
         }
         if (sourceMessages.isEmpty()) {
-            completeSummary("本批没有可总结的文字消息。已扫描 " + result.scannedMessageCount
+            completeSummary(summaryFiltered ? "本次范围内没有匹配当前条件的文字消息，未调用模型；通用增量进度保持不变。"
+                    : "本批没有可总结的文字消息。已扫描 " + result.scannedMessageCount
                     + " 条历史消息，未调用模型。", generation);
             return;
         }
@@ -1378,10 +1482,11 @@ public final class GroupSummarySheet {
         final PromptOptions prompt = summaryPrompt;
         final ArrayList<SummaryMessage> sources = new ArrayList<>(sourceMessages);
         final SummaryStateStore.CompletionToken token = completionToken;
-        final boolean advance = range.mode == RangeMode.SINCE && history.coveredThroughId > 0;
+        final boolean advance = range.mode == RangeMode.SINCE && !summaryFiltered && history.coveredThroughId > 0;
         clearContent();
         addText("正在保存本批完成记录…", true);
-        addText("完整结果和覆盖记录确认后才更新增量进度。摘要正文及原文不会写入该进度记录。", false);
+        addText(advance ? "完整结果和覆盖记录确认后才更新增量进度。摘要正文及原文不会写入该进度记录。"
+                : "只保存本批完成范围，通用增量进度保持不变。摘要正文及原文不会写入该进度记录。", false);
         addText("返回时会重新读取进度；如果记录已经提交，返回不会撤销该进度。", false);
         addAction("返回范围选择", this::showSelection);
         Utilities.globalQueue.postRunnable(() -> {
@@ -1421,7 +1526,7 @@ public final class GroupSummarySheet {
         try {
             byte[] digest = MessageDigest.getInstance("SHA-256").digest((prompt.templateId + "\n"
                     + prompt.templateVersion + "\n" + prompt.builtinRulesVersion + "\n"
-                    + prompt.customInstructions).getBytes(StandardCharsets.UTF_8));
+                    + prompt.customInstructions + "\nfocusSelf=" + prompt.focusSelf).getBytes(StandardCharsets.UTF_8));
             StringBuilder value = new StringBuilder();
             for (byte b : digest) value.append(String.format(Locale.US, "%02x", b & 255));
             return value.toString();
@@ -1441,7 +1546,7 @@ public final class GroupSummarySheet {
         int upper = summaryRange.mode == RangeMode.REPLAY ? summaryRange.upper : summaryHistory.upperInclusiveId;
         RangeRequest next = new RangeRequest(summaryRange.mode, summaryRange.count,
                 summaryState == null ? summaryRange.expectedCursor : summaryState.cursor,
-                summaryHistory.coveredThroughId, upper, false, null, null);
+                summaryHistory.coveredThroughId, upper, false, null, null, summaryRange.filters);
         startSummary(next);
     }
 
@@ -1453,7 +1558,9 @@ public final class GroupSummarySheet {
         final RangeRequest originalRange = summaryRange;
         final RangeRequest failedRange = originalRange != null && summaryHistory != null && sourceMessages != null
                 ? new RangeRequest(originalRange.mode, originalRange.count, originalRange.expectedCursor,
-                    originalRange.lower, originalRange.upper, originalRange.initialize, summaryHistory, sourceMessages)
+                    originalRange.lower, originalRange.upper, originalRange.initialize, summaryHistory,
+                    originalRange.replayMessages == null ? summaryHistory.messages : originalRange.replayMessages,
+                    originalRange.filters)
                 : originalRange;
         cancelWork();
         clearContent();
@@ -1495,6 +1602,10 @@ public final class GroupSummarySheet {
                 addText("生成时补充要求：" + summaryPrompt.customInstructions, false);
             }
         }
+        if (summaryRange != null && summaryRange.filters != null) {
+            addText("生成时消息选择：" + filterLabel(summaryRange.filters), false);
+        }
+        if (summaryFiltered) addText("本次使用了实际消息筛选，通用增量进度未推进。", true);
         if (viewingCachedResult && summaryConfig != null) {
             addText("生成时请求模型：" + (summaryConfig.model.isEmpty() ? "服务当前模型（未指定名称）" : summaryConfig.model)
                     + "；上下文预算 " + summaryConfig.inputCharacterBudget + " 字符；输出上限 "
@@ -1508,6 +1619,7 @@ public final class GroupSummarySheet {
         result.setMovementMethod(LinkMovementMethod.getInstance());
         result.setLinksClickable(true);
         if (!viewingCachedResult && summaryHistory != null && summaryHistory.complete && summaryHistory.hasMore
+                && !(summaryRange.mode == RangeMode.SINCE && summaryFiltered)
                 && (summaryRange.mode == RangeMode.SINCE || summaryRange.mode == RangeMode.UNREAD
                     ? resultCommitted : summaryRange.mode == RangeMode.REPLAY
                         && summaryRange.upper > summaryHistory.coveredThroughId)) {
@@ -1516,9 +1628,9 @@ public final class GroupSummarySheet {
         if (viewingCachedResult && summaryHistory != null && sourceMessages != null) {
             final RangeRequest regenerate = new RangeRequest(RangeMode.REPLAY, recentCount,
                     summaryRange.expectedCursor, summaryHistory.lowerExclusiveId, summaryHistory.coveredThroughId,
-                    false, summaryHistory, sourceMessages);
+                    false, summaryHistory, summaryHistory.messages);
             addAction("按当前设置和方向重新生成", () -> startSummary(regenerate));
-            addText("重新调用模型，使用这份结果生成时的原文快照；若需最新消息，请重新选择范围。", false);
+            addText("重新调用模型，使用生成时范围的原始文字快照，并应用当前筛选；若需最新消息，请重新选择范围。", false);
         }
         addAction("重新选择范围", this::showSelection);
     }

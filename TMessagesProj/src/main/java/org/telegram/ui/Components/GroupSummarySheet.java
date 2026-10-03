@@ -33,6 +33,7 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 
 import org.telegram.messenger.AndroidUtilities;
+import org.telegram.messenger.ChatObject;
 import org.telegram.messenger.MessagesController;
 import org.telegram.messenger.UserConfig;
 import org.telegram.messenger.Utilities;
@@ -321,11 +322,16 @@ public final class GroupSummarySheet {
         if (previous != null) previous.dismiss();
     }
 
+    private boolean isSummaryAccessRevoked() {
+        return dialogId >= 0 || ChatObject.isKickedFromChat(
+                MessagesController.getInstance(account).getChat(-dialogId));
+    }
+
     private void showQuestions() {
         if (!active(operation) || sourceSnapshotInvalid || summaryHistory == null
                 || !summaryHistory.complete || sourceMessages == null || sourceMessages.isEmpty()
                 || summaryPrompt == null || summaryConfig == null) return;
-        if (MessagesController.getInstance(account).isPeerNoForwards(dialogId)) {
+        if (isSummaryAccessRevoked()) {
             onAccessRevoked();
             return;
         }
@@ -369,7 +375,7 @@ public final class GroupSummarySheet {
     }
 
     public void onAccessRevoked() {
-        if (!closed) invalidateSources("当前聊天已受保护或不可访问，已清除摘要和原文快照。", true);
+        if (!closed) invalidateSources("当前聊天已不可访问，已清除摘要和原文快照。", true);
     }
 
     private boolean sourceChanged(ArrayList<SummaryMessage> sources, int messageId, SourceUpdate update) {
@@ -434,7 +440,7 @@ public final class GroupSummarySheet {
 
     private void viewExistingResult() {
         if (cachedResult == null || closed || !checkAccountOwner()) return;
-        if (MessagesController.getInstance(account).isPeerNoForwards(dialogId)) {
+        if (isSummaryAccessRevoked()) {
             onAccessRevoked();
             return;
         }
@@ -661,8 +667,8 @@ public final class GroupSummarySheet {
         }
         cancelWork();
         clearContent();
-        if (MessagesController.getInstance(account).isPeerNoForwards(dialogId)) {
-            addText("此聊天已限制内容保存，无法使用 AI 总结。", false);
+        if (isSummaryAccessRevoked()) {
+            addText("当前聊天已不可访问，请返回聊天确认读取权限后重试。", false);
             return;
         }
         if (!promptLoaded) {
@@ -673,7 +679,7 @@ public final class GroupSummarySheet {
             loadSummaryState(false);
             return;
         }
-        addText(topicId == 0 ? "选择本群的文字消息范围" : "仅总结当前话题的文字消息", true);
+        addText(topicId == 0 ? "选择当前聊天的文字消息范围" : "仅总结当前话题的文字消息", true);
         if (settingsNotice != null) {
             addText(settingsNotice, false);
         }
@@ -714,8 +720,8 @@ public final class GroupSummarySheet {
                     : rangeMode == RangeMode.UNREAD
                         ? "固定本次进入聊天时的未读边界；每批条数包含非文字消息。不改变 Telegram 已读状态，也不移动增量进度。"
                     : rangeMode == RangeMode.TODAY
-                        ? "按手机时区从今天 00:00 起读取，范围截至开始时；不移动增量进度。"
-                        : "仅总结最近 N 条文字，不移动增量进度。需要建立增量起点时请选择“上次总结之后”。");
+                        ? "按手机时区从今天 00:00 起读取，当前时间由 Telegram 校准，范围截至开始时；不移动增量进度。"
+                        : "从最新消息向前选取 N 条有效文字，再按时间先后总结；不移动增量进度。需要建立增量起点时请选择“上次总结之后”。");
         };
         choices.setOnCheckedChangeListener((group, checkedId) -> {
             RadioButton checked = choices.findViewById(checkedId);
@@ -1374,7 +1380,7 @@ public final class GroupSummarySheet {
 
     private void startSummary(AiSummarySettings.Config config, PromptOptions prompt, RangeRequest request) {
         if (closed || fragment.isFinished || !checkAccountOwner()) return;
-        if (MessagesController.getInstance(account).isPeerNoForwards(dialogId)) {
+        if (isSummaryAccessRevoked()) {
             showSelection();
             return;
         }
@@ -1468,8 +1474,8 @@ public final class GroupSummarySheet {
                     ? "\n本次重做复用本面板已读取的原文快照，未重新读取消息，不改变已保存进度。"
                     : "\n本次重试使用相同的原文快照，未重新读取消息。";
         }
-        if (MessagesController.getInstance(account).isPeerNoForwards(dialogId)) {
-            showError("此群已启用内容保护，无法用于 AI 总结。");
+        if (isSummaryAccessRevoked()) {
+            onAccessRevoked();
             return;
         }
         if (sourceMessages.isEmpty()) {

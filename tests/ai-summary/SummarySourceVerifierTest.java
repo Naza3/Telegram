@@ -34,13 +34,16 @@ public final class SummarySourceVerifierTest {
     public static void main(String[] args) {
         test("ordinary group uses getMessages and fresh sender metadata", SummarySourceVerifierTest::ordinary);
         test("channel uses account-specific input channel", SummarySourceVerifierTest::channel);
+        test("read-only broadcast sources use channels.getMessages", SummarySourceVerifierTest::broadcast);
         test("from-message channel preserves the configured account's peer", SummarySourceVerifierTest::fromMessage);
         test("topic and General match the current message", SummarySourceVerifierTest::topics);
         test("original text and edit date must both match", SummarySourceVerifierTest::changed);
         test("same message ID in another peer cannot be substituted", SummarySourceVerifierTest::wrongPeer);
         test("deleted, empty and duplicate results fail closed", SummarySourceVerifierTest::missing);
         test("fresh chat permission metadata is required", SummarySourceVerifierTest::permissionMetadata);
-        test("message protection, TTL and media filtering is shared", SummarySourceVerifierTest::messageEligibility);
+        test("TTL and media filtering is shared", SummarySourceVerifierTest::messageEligibility);
+        test("readable no-forwards source metadata does not revoke access", SummarySourceVerifierTest::noForwards);
+        test("ordinary auto-delete text is verified until its server-time deadline", SummarySourceVerifierTest::autoDeleteDeadline);
         test("RPC errors and malformed replies never show cached text", SummarySourceVerifierTest::rpcFailure);
         test("invalid references do not call Telegram", SummarySourceVerifierTest::invalidScope);
         test("timeout releases requests and suppresses a late reply", SummarySourceVerifierTest::timeout);
@@ -82,6 +85,25 @@ public final class SummarySourceVerifierTest {
                 "channel ID/access hash");
         check(request.id.size() == 1 && request.id.get(0) == MESSAGE, "channel message ID");
         deliver(page(message())); success(result);
+    }
+
+    private static void broadcast() {
+        reset(true);
+        TLRPC.Chat cached = controller.getChat(-DIALOG);
+        cached.megagroup = false; cached.forum = false; cached.left = true; cached.access_hash = 76543;
+        cached.banned_rights = new TLRPC.TL_chatBannedRights(); cached.banned_rights.send_messages = true;
+        Result result = start(0);
+        check(network.next().request instanceof TLRPC.TL_channels_getMessages, "broadcast verification RPC");
+        TLRPC.TL_channels_getMessages request = (TLRPC.TL_channels_getMessages) network.next().request;
+        check(request.channel.channel_id == -DIALOG && request.channel.access_hash == 76543,
+                "broadcast verification lost channel access information");
+        TLRPC.TL_messages_messages response = page(message());
+        TLRPC.Chat fresh = response.chats.get(0);
+        fresh.megagroup = false; fresh.forum = false; fresh.left = true;
+        fresh.banned_rights = new TLRPC.TL_chatBannedRights(); fresh.banned_rights.send_messages = true;
+        deliver(response); success(result);
+        check(result.source.dialogId == DIALOG && result.source.id == MESSAGE,
+                "broadcast source identity was changed");
     }
 
     private static void fromMessage() {
@@ -166,25 +188,26 @@ public final class SummarySourceVerifierTest {
         rejectChat(c -> c.min = true);
         rejectChat(c -> c.kicked = true);
         rejectChat(c -> c.deactivated = true);
-        rejectChat(c -> c.noforwards = true);
         rejectChat(c -> c.monoforum = true);
         rejectChat(c -> c.migrated_to = new TLRPC.TL_inputChannel());
+        rejectChat(c -> { c.banned_rights = new TLRPC.TL_chatBannedRights(); c.banned_rights.view_messages = true; });
         reset(false); Result forbidden = start(0);
         page = page(message()); page.chats.clear();
         TLRPC.Chat denied = new TLRPC.TL_chatForbidden(); denied.id = -DIALOG; page.chats.add(denied);
         deliver(page); error(forbidden, "群权限");
         invalidated(forbidden);
-        reset(true); Result broadcast = start(0);
-        page = page(message()); page.chats.get(0).megagroup = false;
-        deliver(page); error(broadcast, "群权限");
-        invalidated(broadcast);
+        reset(true); Result forbiddenChannel = start(0);
+        page = page(message()); page.chats.clear();
+        TLRPC.Chat deniedChannel = new TLRPC.TL_channelForbidden(); deniedChannel.id = -DIALOG;
+        page.chats.add(deniedChannel);
+        deliver(page); error(forbiddenChannel, "群权限");
+        invalidated(forbiddenChannel);
         // Cached protected flags cannot override a fresh, readable server response either.
         reset(false); controller.getChat(-DIALOG).noforwards = true;
         Result fresh = start(0); deliver(page(message())); success(fresh);
     }
 
     private static void messageEligibility() {
-        rejectMessage(m -> m.noforwards = true, "受保护");
         rejectMessage(m -> m.ttl_period = 1, "限时");
         rejectMessage(m -> m.ttl = 1, "限时");
         rejectMessage(m -> m.destroyTimeMillis = 1, "限时");
@@ -196,6 +219,30 @@ public final class SummarySourceVerifierTest {
         reset(false); Result web = start(0);
         TLRPC.Message link = message(); link.media = new TLRPC.TL_messageMediaWebPage();
         deliver(page(link)); success(web);
+    }
+
+    private static void autoDeleteDeadline() {
+        reset(false);
+        network.currentTimeOverride = 10030;
+        ConnectionsManager.getInstance(1).currentTimeOverride = 999999;
+        Result live = start(0);
+        TLRPC.Message current = message(); current.ttl_period = 60;
+        deliver(page(current)); success(live);
+        check(live.source.text.equals(expected().text), "live auto-delete text was replaced");
+
+        reset(false); network.currentTimeOverride = 10060;
+        Result expired = start(0);
+        current = message(); current.ttl_period = 60;
+        deliver(page(current)); error(expired, "过期"); invalidated(expired);
+    }
+
+    private static void noForwards() {
+        reset(false); controller.getChat(-DIALOG).noforwards = true;
+        Result readable = start(0);
+        TLRPC.Message current = message(); current.noforwards = true;
+        TLRPC.TL_messages_messages response = page(current); response.chats.get(0).noforwards = true;
+        deliver(response); success(readable);
+        check(readable.source.text.equals(expected().text), "readable no-forwards text was lost");
     }
 
     private static void rpcFailure() {
@@ -220,6 +267,12 @@ public final class SummarySourceVerifierTest {
         check(network.sent.isEmpty(), "invalid dialog made a network request");
         Result negativeTopic = start(-1); error(negativeTopic, "群聊范围");
         check(network.sent.isEmpty(), "invalid topic made a network request");
+        Result secret = new Result();
+        long secretDialog = 0x400000000000002aL;
+        new SummarySourceVerifier(0, OWNER, secretDialog, 0).verify(
+                new SummaryMessage(secretDialog, MESSAGE, 10000, "", "original"), secret);
+        AndroidUtilities.drain(); error(secret, "群聊范围");
+        check(network.sent.isEmpty(), "secret chat made a source-verification request");
         controller.chats.clear(); Result noChat = start(0); error(noChat, "群信息尚未加载");
         check(network.sent.isEmpty(), "unknown chat made a network request");
     }

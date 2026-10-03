@@ -2873,7 +2873,7 @@ public class StoryViewer implements NotificationCenter.NotificationCenterDelegat
         if (BuildVars.DEBUG_PRIVATE_VERSION) {
             return;
         }
-        allowScreenshots = !isShowing || allowScreenshots;
+        allowScreenshots = AndroidUtilities.allowScreenCapture() || !isShowing || allowScreenshots;
         if (this.allowScreenshots != allowScreenshots) {
             this.allowScreenshots = allowScreenshots;
 
@@ -2885,22 +2885,10 @@ public class StoryViewer implements NotificationCenter.NotificationCenterDelegat
             }
             if (ATTACH_TO_FRAGMENT) {
                 if (fragment.getParentActivity() != null) {
-                    if (allowScreenshots) {
-                        fragment.getParentActivity().getWindow().clearFlags(WindowManager.LayoutParams.FLAG_SECURE);
-                        AndroidUtilities.logFlagSecure();
-                    } else {
-                        fragment.getParentActivity().getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
-                        AndroidUtilities.logFlagSecure();
-                    }
+                    AndroidUtilities.setWindowSecure(fragment.getParentActivity().getWindow(), !allowScreenshots);
                 }
             } else {
-                if (allowScreenshots) {
-                    windowLayoutParams.flags &= ~WindowManager.LayoutParams.FLAG_SECURE;
-                    AndroidUtilities.logFlagSecure();
-                } else {
-                    windowLayoutParams.flags |= WindowManager.LayoutParams.FLAG_SECURE;
-                    AndroidUtilities.logFlagSecure();
-                }
+                AndroidUtilities.setWindowSecure(windowLayoutParams, !allowScreenshots);
                 try {
                     windowManager.updateViewLayout(windowView, windowLayoutParams);
                 } catch (Exception e) {

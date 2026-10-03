@@ -14,7 +14,6 @@ import android.os.SystemClock;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
-import android.view.WindowManager;
 import android.widget.RelativeLayout;
 
 import androidx.annotation.NonNull;
@@ -67,13 +66,11 @@ public class BubbleActivity extends BasePermissionsActivity implements INavigati
         requestWindowFeature(Window.FEATURE_NO_TITLE);
         setTheme(R.style.Theme_TMessages);
         getWindow().setBackgroundDrawable(new ActivityWindowEmptyBackgroundDrawable());
-        if (!SharedConfig.passcodeHash.isEmpty() && !SharedConfig.allowScreenCapture) {
-            try {
-                getWindow().setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE);
-                AndroidUtilities.logFlagSecure();
-            } catch (Exception e) {
-                FileLog.e(e);
-            }
+        try {
+            AndroidUtilities.setWindowSecure(getWindow(),
+                    !SharedConfig.passcodeHash.isEmpty() && !SharedConfig.allowScreenCapture);
+        } catch (Exception e) {
+            FileLog.e(e);
         }
 
         super.onCreate(savedInstanceState);

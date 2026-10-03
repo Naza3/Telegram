@@ -63,7 +63,6 @@ import org.telegram.ui.ActionBar.AlertDialog;
 import org.telegram.ui.ActionBar.BaseFragment;
 import org.telegram.ui.ActionBar.Theme;
 import org.telegram.ui.ActionBar.ThemeDescription;
-import org.telegram.ui.Cells.HeaderCell;
 import org.telegram.ui.Cells.TextCheckCell;
 import org.telegram.ui.Cells.TextInfoPrivacyCell;
 import org.telegram.ui.Cells.TextSettingsCell;
@@ -138,10 +137,6 @@ public class PasscodeActivity extends BaseFragment implements NotificationCenter
     @Keep
     private int autoLockRow;
     private int autoLockDetailRow;
-
-    private int captureHeaderRow;
-    private int captureRow;
-    private int captureDetailRow;
 
     @Keep
     private int disablePasscodeRow;
@@ -356,14 +351,6 @@ public class PasscodeActivity extends BaseFragment implements NotificationCenter
                         SharedConfig.useFingerprintLock = !SharedConfig.useFingerprintLock;
                         UserConfig.getInstance(currentAccount).saveConfig(false);
                         ((TextCheckCell) view).setChecked(SharedConfig.useFingerprintLock);
-                    } else if (position == captureRow) {
-                        SharedConfig.allowScreenCapture = !SharedConfig.allowScreenCapture;
-                        UserConfig.getInstance(currentAccount).saveConfig(false);
-                        ((TextCheckCell) view).setChecked(SharedConfig.allowScreenCapture);
-                        NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.didSetPasscode, false);
-                        if (!SharedConfig.allowScreenCapture) {
-                            AlertsCreator.showSimpleAlert(PasscodeActivity.this, LocaleController.getString(R.string.ScreenCaptureAlert));
-                        }
                     }
                 });
                 break;
@@ -820,9 +807,6 @@ public class PasscodeActivity extends BaseFragment implements NotificationCenter
         }
         autoLockRow = rowCount++;
         autoLockDetailRow = rowCount++;
-        captureHeaderRow = rowCount++;
-        captureRow = rowCount++;
-        captureDetailRow = rowCount++;
         disablePasscodeRow = rowCount++;
     }
 
@@ -1062,7 +1046,6 @@ public class PasscodeActivity extends BaseFragment implements NotificationCenter
         private final static int VIEW_TYPE_CHECK = 0,
                 VIEW_TYPE_SETTING = 1,
                 VIEW_TYPE_INFO = 2,
-                VIEW_TYPE_HEADER = 3,
                 VIEW_TYPE_UTYAN = 4;
 
         private final Context mContext;
@@ -1074,7 +1057,7 @@ public class PasscodeActivity extends BaseFragment implements NotificationCenter
         @Override
         public boolean isEnabled(RecyclerView.ViewHolder holder) {
             int position = holder.getAdapterPosition();
-            return position == fingerprintRow || position == autoLockRow || position == captureRow ||
+            return position == fingerprintRow || position == autoLockRow ||
                     position == changePasscodeRow || position == disablePasscodeRow;
         }
 
@@ -1093,9 +1076,6 @@ public class PasscodeActivity extends BaseFragment implements NotificationCenter
                     break;
                 case VIEW_TYPE_SETTING:
                     view = new TextSettingsCell(mContext);
-                    break;
-                case VIEW_TYPE_HEADER:
-                    view = new HeaderCell(mContext);
                     break;
                 case VIEW_TYPE_UTYAN:
                     view = new RLottieImageHolderView(mContext);
@@ -1116,8 +1096,6 @@ public class PasscodeActivity extends BaseFragment implements NotificationCenter
                     TextCheckCell textCell = (TextCheckCell) holder.itemView;
                     if (position == fingerprintRow) {
                         textCell.setTextAndCheck(LocaleController.getString(R.string.UnlockFingerprint), SharedConfig.useFingerprintLock, false);
-                    } else if (position == captureRow) {
-                        textCell.setTextAndCheck(LocaleController.getString(R.string.ScreenCaptureShowContent), SharedConfig.allowScreenCapture, false);
                     }
                     break;
                 }
@@ -1153,14 +1131,6 @@ public class PasscodeActivity extends BaseFragment implements NotificationCenter
                     }
                     break;
                 }
-                case VIEW_TYPE_HEADER: {
-                    HeaderCell cell = (HeaderCell) holder.itemView;
-                    cell.setHeight(46);
-                    if (position == captureHeaderRow) {
-                        cell.setText(LocaleController.getString(R.string.ScreenCaptureHeader));
-                    }
-                    break;
-                }
                 case VIEW_TYPE_UTYAN: {
                     RLottieImageHolderView holderView = (RLottieImageHolderView) holder.itemView;
                     holderView.imageView.setAnimation(R.raw.utyan_passcode, 100, 100);
@@ -1176,9 +1146,6 @@ public class PasscodeActivity extends BaseFragment implements NotificationCenter
                     } else if (position == autoLockDetailRow) {
                         cell.setText(LocaleController.getString(R.string.AutoLockInfo));
                         cell.getTextView().setGravity(LocaleController.isRTL ? Gravity.RIGHT : Gravity.LEFT);
-                    } else if (position == captureDetailRow) {
-                        cell.setText(LocaleController.getString(R.string.ScreenCaptureInfo));
-                        cell.getTextView().setGravity(LocaleController.isRTL ? Gravity.RIGHT : Gravity.LEFT);
                     }
                     break;
                 }
@@ -1187,14 +1154,12 @@ public class PasscodeActivity extends BaseFragment implements NotificationCenter
 
         @Override
         public int getItemViewType(int position) {
-            if (position == fingerprintRow || position == captureRow) {
+            if (position == fingerprintRow) {
                 return VIEW_TYPE_CHECK;
             } else if (position == changePasscodeRow || position == autoLockRow || position == disablePasscodeRow) {
                 return VIEW_TYPE_SETTING;
-            } else if (position == autoLockDetailRow || position == captureDetailRow || position == hintRow) {
+            } else if (position == autoLockDetailRow || position == hintRow) {
                 return VIEW_TYPE_INFO;
-            } else if (position == captureHeaderRow) {
-                return VIEW_TYPE_HEADER;
             } else if (position == utyanRow) {
                 return VIEW_TYPE_UTYAN;
             }

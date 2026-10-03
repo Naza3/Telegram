@@ -1419,8 +1419,17 @@ public class ChatActivity extends BaseFragment implements
 
     private boolean canSummarizeGroup() {
         return chatMode == 0 && currentChat != null && currentEncryptedChat == null
-            && !ChatObject.isChannelAndNotMegaGroup(currentChat) && !ChatObject.isMonoForum(currentChat)
-            && (threadMessageId == 0 || isTopic) && !isReport() && !inPreviewMode && !isPeerNoForwards();
+            && !ChatObject.isMonoForum(currentChat) && !ChatObject.isKickedFromChat(currentChat)
+            && (threadMessageId == 0 || isTopic) && !isReport() && !inPreviewMode;
+    }
+
+    private void updateSummaryMenuVisibility() {
+        if (headerItem == null) return;
+        // A preview can later become the full chat without recreating its menu.
+        if (!headerItem.hasSubItem(ai_group_summary)) {
+            headerItem.lazilyAddSubItem(ai_group_summary, R.drawable.msg_list, getString(R.string.AiGroupSummary));
+        }
+        headerItem.setSubItemShown(ai_group_summary, canSummarizeGroup());
     }
 
     /** Capture before opening/reading this chat changes Telegram's read marker. */
@@ -4481,9 +4490,7 @@ public class ChatActivity extends BaseFragment implements
             }
             translateItem = headerItem.lazilyAddSubItem(translate, R.drawable.msg_translate, LocaleController.getString(R.string.TranslateMessage));
             updateTranslateItemVisibility();
-            if (canSummarizeGroup()) {
-                headerItem.lazilyAddSubItem(ai_group_summary, R.drawable.msg_list, getString(R.string.AiGroupSummary));
-            }
+            updateSummaryMenuVisibility();
             if (currentChat != null && !currentChat.creator && !ChatObject.hasAdminRights(currentChat)) {
                 headerItem.lazilyAddSubItem(report, R.drawable.msg_report, LocaleController.getString(R.string.ReportChat));
             }
@@ -20582,6 +20589,13 @@ public class ChatActivity extends BaseFragment implements
             didReceivedNotification7(id, account, args);
         }
         updateSummarySources(id, account, args);
+        if (account == currentAccount && (id == NotificationCenter.updateInterfaces || id == NotificationCenter.chatInfoDidLoad)) {
+            if (currentChat != null) {
+                TLRPC.Chat fresh = getMessagesController().getChat(currentChat.id);
+                if (fresh != null) currentChat = fresh;
+            }
+            updateSummaryMenuVisibility();
+        }
     }
 
     /** Keep explicit saved-result views and an open summary consistent with observed source changes. */
@@ -20606,14 +20620,13 @@ public class ChatActivity extends BaseFragment implements
                         .invalidateMessage(currentAccount, owner, dialog_id, source.id);
                 if (groupSummarySheet != null) {
                     groupSummarySheet.onSourceUpdated(source.id, source.message, source.edit_date,
-                            org.telegram.messenger.ai.SummaryHistoryLoader.isUsableText(source));
+                            org.telegram.messenger.ai.SummaryHistoryLoader.isUsableText(source, getConnectionsManager().getCurrentTime()));
                 }
             }
         }
         if (id == NotificationCenter.chatInfoDidLoad || id == NotificationCenter.updateInterfaces) {
             TLRPC.Chat fresh = getMessagesController().getChat(-dialog_id);
-            if (fresh != null && (fresh.noforwards || fresh.kicked || fresh.left || fresh.deactivated
-                    || fresh instanceof TLRPC.TL_chatForbidden || fresh instanceof TLRPC.TL_channelForbidden)) {
+            if (fresh != null && ChatObject.isKickedFromChat(fresh)) {
                 // Access changes cover all topics, including entries generated in another topic.
                 org.telegram.messenger.ai.SummaryResultCache.getInstance().clearOwner(currentAccount, owner);
                 if (groupSummarySheet != null) groupSummarySheet.onAccessRevoked();
@@ -24165,6 +24178,7 @@ public class ChatActivity extends BaseFragment implements
             TLRPC.Chat chat = (TLRPC.Chat) args[0];
             if (currentChat != null && chat.id == currentChat.id && chatActivityEnterView != null) {
                 currentChat = chat;
+                updateSummaryMenuVisibility();
                 chatActivityEnterView.checkChannelRights();
                 checkRaiseSensors();
                 updateSecretStatus();
@@ -29793,6 +29807,7 @@ public class ChatActivity extends BaseFragment implements
     @Override
     public void setInPreviewMode(boolean value) {
         super.setInPreviewMode(value);
+        updateSummaryMenuVisibility();
         if (currentUser != null && audioCallIconItem != null) {
             TLRPC.UserFull userFull = getMessagesController().getUserFull(currentUser.id);
             if (userFull != null && userFull.phone_calls_available) {

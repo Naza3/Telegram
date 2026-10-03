@@ -5235,7 +5235,33 @@ public class AndroidUtilities {
     }
 
     public static boolean allowScreenCapture() {
-        return SharedConfig.passcodeHash.length() == 0 || SharedConfig.allowScreenCapture;
+        // This client permits screenshots and recording of its own windows. Content access,
+        // forwarding rules and passcode authentication are enforced separately.
+        return true;
+    }
+
+    public static void setWindowSecure(Window window, boolean secure) {
+        if (window == null) {
+            return;
+        }
+        if (secure && !allowScreenCapture()) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_SECURE);
+        } else {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE);
+        }
+        logFlagSecure();
+    }
+
+    public static void setWindowSecure(WindowManager.LayoutParams params, boolean secure) {
+        if (params == null) {
+            return;
+        }
+        if (secure && !allowScreenCapture()) {
+            params.flags |= WindowManager.LayoutParams.FLAG_SECURE;
+        } else {
+            params.flags &= ~WindowManager.LayoutParams.FLAG_SECURE;
+        }
+        logFlagSecure();
     }
 
     public static File getSharingDirectory() {

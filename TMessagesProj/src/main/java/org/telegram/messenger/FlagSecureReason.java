@@ -1,7 +1,6 @@
 package org.telegram.messenger;
 
 import android.view.Window;
-import android.view.WindowManager;
 
 import java.util.HashMap;
 
@@ -60,21 +59,12 @@ public class FlagSecureReason {
     }
 
     private static void updateWindowSecure(Window window) {
-        if (window == null) {
-            return;
-        }
-
-        if (isSecuredNow(window)) {
-            window.addFlags(WindowManager.LayoutParams.FLAG_SECURE);
-            AndroidUtilities.logFlagSecure();
-        } else {
-            window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE);
-            AndroidUtilities.logFlagSecure();
-        }
+        AndroidUtilities.setWindowSecure(window, isSecuredNow(window));
     }
 
     public static boolean isSecuredNow(Window window) {
-        return currentSecureReasons != null && currentSecureReasons.get(window) != null;
+        return !AndroidUtilities.allowScreenCapture()
+                && currentSecureReasons != null && currentSecureReasons.get(window) != null;
     }
 
     public interface FlagSecureCondition {

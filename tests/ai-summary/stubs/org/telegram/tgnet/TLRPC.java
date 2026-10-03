@@ -31,7 +31,9 @@ public final class TLRPC {
         public String title, username;
         public boolean megagroup, forum, noforwards, monoforum, min, kicked, deactivated, left;
         public InputChannel migrated_to;
+        public TL_chatBannedRights banned_rights;
     }
+    public static class TL_chatBannedRights extends TLObject { public boolean view_messages, send_messages; }
     public static class InputChannel extends TLObject {
         public long channel_id, access_hash;
     }
@@ -42,6 +44,7 @@ public final class TLRPC {
     }
     public static class ChatFull extends TLObject { public long migrated_from_chat_id; }
     public static class TL_chat extends Chat {}
+    public static class TL_chatEmpty extends Chat {}
     public static class TL_channel extends Chat {}
     public static class TL_chatForbidden extends Chat {}
     public static class TL_channelForbidden extends Chat {}

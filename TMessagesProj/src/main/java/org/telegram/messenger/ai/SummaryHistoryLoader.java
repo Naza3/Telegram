@@ -141,9 +141,11 @@ public final class SummaryHistoryLoader {
             throw new IllegalArgumentException("callback is required");
         }
         final int runGeneration = generation.incrementAndGet();
-        // Capture time at the user's action, before queueing any UI or network work. Calendar.add
-        // rather than 24 hours also covers 23/25-hour local days at daylight-saving transitions.
-        final long startedAt = System.currentTimeMillis();
+        // Telegram's adjusted clock defines the current instant; the phone still supplies the
+        // civil timezone. A manually changed phone clock must not anchor history to old messages.
+        final int serverNow = account >= 0 && account < UserConfig.MAX_ACCOUNT_COUNT
+                ? ConnectionsManager.getInstance(account).getCurrentTime() : 0;
+        final long startedAt = serverNow > 0 ? serverNow * 1000L : System.currentTimeMillis();
         final TimeZone timeZone = TimeZone.getDefault();
         AndroidUtilities.runOnUIThread(() -> {
             if (generation.get() != runGeneration) {
@@ -164,7 +166,7 @@ public final class SummaryHistoryLoader {
                 return;
             }
             if (!DialogObject.isChatDialog(dialogId)) {
-                callback.onError("目前仅支持普通群和超级群的文字消息总结。");
+                callback.onError("目前仅支持群聊和可阅读频道的文字消息总结。");
                 return;
             }
             if (!today && (count < 1 || count > MAX_RECENT_COUNT)) {
@@ -182,12 +184,12 @@ public final class SummaryHistoryLoader {
                 callback.onError("群信息尚未加载，请稍后重试。");
                 return;
             }
-            if (chat.noforwards) {
-                callback.onError("此群启用了内容保护，无法用于 AI 总结。");
+            if (ChatObject.isKickedFromChat(chat)) {
+                callback.onError("当前群聊或频道已不可访问，请返回聊天确认权限后重试。");
                 return;
             }
-            if (chat.monoforum || (ChatObject.isChannel(chat) && !chat.megagroup)) {
-                callback.onError("目前仅支持普通群和超级群，暂不支持频道或频道私信。");
+            if (chat.monoforum) {
+                callback.onError("暂不支持频道私信，请在群聊或频道中发起总结。");
                 return;
             }
             if (chat.migrated_to != null) {
@@ -235,8 +237,9 @@ public final class SummaryHistoryLoader {
         final int limit = run.snapshotPending ? 1
                 : forwardPage ? Math.min(PAGE_SIZE, run.target - run.scanned) : PAGE_SIZE;
         final int offsetId = forwardPage ? run.forwardCursor + 1 : run.offsetId;
-        final int offsetDate = forwardPage ? 0
-                : run.offsetId == 0 ? run.upperDateExclusive : 0;
+        // Recent/since snapshots start at the actual newest server message. Only today's range
+        // needs a date cutoff; subsequent pages use the fixed ID cursor instead of wall time.
+        final int offsetDate = run.today && run.offsetId == 0 ? run.upperDateExclusive : 0;
         // Telegram's negative add_offset window starts immediately AFTER offset_id - 1.
         // min_id/max_id intentionally stay zero for forward windows: bounds are checked locally,
         // so server-side filtering cannot change which contiguous page follows the old cursor.
@@ -351,7 +354,7 @@ public final class SummaryHistoryLoader {
                 continue;
             }
             run.scanned++;
-            if (message.date >= run.upperDateExclusive) {
+            if (run.today && message.date >= run.upperDateExclusive) {
                 continue;
             }
             if (run.maxIdExclusive == 0 && message.date > 0) {
@@ -369,7 +372,7 @@ public final class SummaryHistoryLoader {
                 continue;
             }
             rememberPosition(run, message);
-            if (!isUsableText(message)) {
+            if (!isUsableText(message, run.connections.getCurrentTime())) {
                 run.skipped++;
                 continue;
             }
@@ -405,13 +408,14 @@ public final class SummaryHistoryLoader {
         }
     }
 
+    /** Structural eligibility; use the timed overload when accepting newly read or verified text. */
     public static boolean isUsableText(TLRPC.Message message) {
         return message != null && !(message instanceof TLRPC.TL_messageService)
                 && !(message instanceof TLRPC.TL_messageEmpty)
                 && message.action == null
                 && message.id > 0 && message.date > 0 && message.send_state == 0
                 && message.peer_id != null
-                && !message.noforwards && message.ttl_period == 0 && message.ttl == 0
+                && message.ttl_period >= 0 && message.ttl == 0
                 && message.destroyTime == 0 && message.destroyTimeMillis == 0
                 && message.expire_date == 0
                 && message.ephemeralAnchorMsgId == 0 && message.ephemeralReceiverBotId == 0
@@ -424,13 +428,19 @@ public final class SummaryHistoryLoader {
                 && message.message != null && !message.message.trim().isEmpty();
     }
 
+    /** Normal chat auto-delete is a future deadline, unlike secret/self-destructing media. */
+    public static boolean isUsableText(TLRPC.Message message, int currentServerTime) {
+        return isUsableText(message) && (message.ttl_period == 0
+                || currentServerTime > 0 && (long) message.date + message.ttl_period > currentServerTime);
+    }
+
     private void consumeSnapshot(Run run, TLRPC.messages_Messages response) {
         int newest = run.lowerExclusiveId;
         for (TLRPC.Message message : response.messages) {
             if (!checkPageScope(run, message)) {
                 return;
             }
-            if (message.id <= 0 || message.date >= run.upperDateExclusive) {
+            if (message.id <= 0) {
                 fail(run, "无法确认消息快照的上界，未读取增量范围，请重试。");
                 return;
             }
@@ -471,7 +481,7 @@ public final class SummaryHistoryLoader {
             run.forwardCursor = message.id;
             run.scanned++;
             rememberPosition(run, message);
-            if (isUsableText(message)) {
+            if (isUsableText(message, run.connections.getCurrentTime())) {
                 run.messages.add(toSummaryMessage(run, message));
             } else {
                 run.skipped++;
@@ -619,7 +629,7 @@ public final class SummaryHistoryLoader {
         TLRPC.ChatFull full = run.controller.getChatFull(-dialogId);
         if (topicId == 0 && full != null && full.migrated_from_chat_id != 0) {
             finish(run, true, "已读至当前群可见历史起点；此群有迁移前历史，本版未合并旧群消息。");
-        } else if (topicId == 0 && run.channel && full == null) {
+        } else if (topicId == 0 && run.megagroup && full == null) {
             finish(run, true, "已读至当前群可见历史起点；尚无完整群信息，无法确认是否存在迁移前历史。");
         } else {
             finish(run, false, "已读至当前群/话题在本账号下的可见历史起点。");
@@ -641,9 +651,9 @@ public final class SummaryHistoryLoader {
         SimpleDateFormat format = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US);
         format.setTimeZone(run.timeZone);
         String scope = topicId != 0 ? "当前 Topic #" + topicId
-                : run.forum ? "当前群的全部 Topic" : "当前群";
+                : run.forum ? "当前群的全部 Topic" : run.broadcast ? "当前频道" : "当前群";
         StringBuilder note = new StringBuilder(scope).append("；手机时区 ")
-                .append(run.timeZone.getID()).append(run.forward ? "，读取发起于 " : "，固定截止 ")
+                .append(run.timeZone.getID()).append(run.today ? "，Telegram 校准时间固定截止 " : "，Telegram 校准时间发起于 ")
                 .append(format.format(new Date(run.startedAt))).append("。\n");
         if (run.forward) {
             note.append("固定消息范围：#").append(run.lowerExclusiveId).append(" 之后至 #")
@@ -654,22 +664,23 @@ public final class SummaryHistoryLoader {
                     .append(format.format(new Date(run.lowerDateInclusive * 1000L)))
                     .append(" 至上述截止时刻。 ");
         } else {
-            note.append("目标：最近 ").append(run.target).append(" 条可用纯文字。 ");
+            note.append("目标：最近 ").append(run.target)
+                    .append(" 条可用文字；从新到旧选取后，按时间从早到晚交给模型。 ");
         }
         note.append("实际纳入 ").append(run.messages.size()).append(" 条");
         if (!run.messages.isEmpty()) {
-            note.append("（")
+            note.append("（最早 #").append(run.messages.get(0).id).append(" · ")
                     .append(format.format(new Date(run.messages.get(0).date * 1000L)))
-                    .append(" — ")
+                    .append(" — 最新 #").append(run.messages.get(run.messages.size() - 1).id).append(" · ")
                     .append(format.format(new Date(run.messages.get(run.messages.size() - 1).date * 1000L)))
                     .append("）");
         }
         note.append("，扫描 ").append(run.scanned).append(" 条，跳过 ")
                 .append(run.skipped).append(" 条不适用消息。\n")
                 .append(truncated ? "部分结果：" : "").append(reason)
-                .append(" 仅含当前账号可见的当前群历史；带链接预览的消息只读取原始文字，")
-                .append("不读取网页正文；不含媒体及其说明、服务消息、受保护或限时内容、")
-                .append("广告、未发送消息和迁移前旧群消息。");
+                .append(" 仅含当前账号可见的当前聊天或频道历史；带链接预览的消息只读取原始文字，")
+                .append("不读取网页正文；不含媒体及其说明、服务消息、已过期或阅后即焚内容、")
+                .append("广告、未发送消息和迁移前旧群消息。未到期的普通自动删除文字可纳入总结。");
         int lowerId = run.forward ? run.lowerExclusiveId
                 : run.lowestCoveredId == Integer.MAX_VALUE ? 0 : Math.max(0, run.lowestCoveredId - 1);
         int upperId = run.forward ? run.upperInclusiveId : run.highestCoveredId;
@@ -707,8 +718,9 @@ public final class SummaryHistoryLoader {
 
     private boolean checkCurrentChat(Run run) {
         TLRPC.Chat currentChat = run.controller.getChat(-dialogId);
-        if (currentChat == null || currentChat.noforwards || currentChat.migrated_to != null) {
-            fail(run, "群信息已变化或启用了内容保护，已停止读取消息。");
+        if (ChatObject.isKickedFromChat(currentChat)
+                || currentChat.monoforum || currentChat.migrated_to != null) {
+            fail(run, "群信息已变化或不可访问，已停止读取消息。");
             return false;
         }
         return true;
@@ -728,7 +740,8 @@ public final class SummaryHistoryLoader {
         final MessagesController controller;
         final ConnectionsManager connections;
         final boolean forum;
-        final boolean channel;
+        final boolean megagroup;
+        final boolean broadcast;
         final boolean forward;
         final int lowerExclusiveId;
         final ArrayList<SummaryMessage> messages = new ArrayList<>();
@@ -762,7 +775,8 @@ public final class SummaryHistoryLoader {
             this.controller = controller;
             this.connections = ConnectionsManager.getInstance(account);
             this.forum = chat.forum;
-            this.channel = ChatObject.isChannel(chat);
+            this.megagroup = ChatObject.isChannel(chat) && chat.megagroup;
+            this.broadcast = ChatObject.isChannel(chat) && !chat.megagroup;
             this.forward = forward;
             this.lowerExclusiveId = lowerExclusiveId;
             this.upperInclusiveId = upperInclusiveId;

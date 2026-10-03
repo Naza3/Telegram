@@ -71,6 +71,8 @@ import org.telegram.messenger.SharedConfig;
 import org.telegram.messenger.TopicsController;
 import org.telegram.messenger.UserObject;
 import org.telegram.messenger.Utilities;
+import org.telegram.messenger.ai.SummaryHistoryLoader;
+import org.telegram.messenger.ai.SummaryResultCache;
 import org.telegram.tgnet.ConnectionsManager;
 import org.telegram.tgnet.TLObject;
 import org.telegram.tgnet.TLRPC;
@@ -111,6 +113,7 @@ import org.telegram.ui.Components.Forum.ForumBubbleDrawable;
 import org.telegram.ui.Components.Forum.ForumUtilities;
 import org.telegram.ui.Components.FragmentContextView;
 import org.telegram.ui.Components.FragmentFloatingButton;
+import org.telegram.ui.Components.GroupSummarySheet;
 import org.telegram.ui.Components.InviteMembersBottomSheet;
 import org.telegram.ui.Components.JoinGroupAlert;
 import org.telegram.ui.Components.LayoutHelper;
@@ -202,6 +205,7 @@ public class TopicsFragment extends BaseFragment implements NotificationCenter.N
     private static final int show_id = 13;
     private static final int boost_group_id = 14;
     private static final int report = 15;
+    private static final int ai_group_summary = 16;
 
     private boolean removeFragmentOnTransitionEnd;
     private boolean finishDialogRightSlidingPreviewOnTransitionEnd;
@@ -218,6 +222,8 @@ public class TopicsFragment extends BaseFragment implements NotificationCenter.N
     private ActionBarMenuSubItem deleteChatSubmenu;
     private ActionBarMenuSubItem boostGroupSubmenu;
     private ActionBarMenuSubItem reportSubmenu;
+    private ActionBarMenuSubItem groupSummarySubmenu;
+    private GroupSummarySheet groupSummarySheet;
     private boolean bottomPannelVisible = true;
     private float searchAnimationProgress = 0f;
     private TL_stories.TL_premium_boostsStatus boostsStatus;
@@ -648,6 +654,9 @@ public class TopicsFragment extends BaseFragment implements NotificationCenter.N
                 }
                 TLRPC.TL_forumTopic topic;
                 switch (id) {
+                    case ai_group_summary:
+                        showGroupSummary();
+                        break;
                     case toggle_id:
                         getMessagesController().getTopicsController().toggleViewForumAsMessages(chatId, true);
                         finishDialogRightSlidingPreviewOnTransitionEnd = true;
@@ -868,6 +877,7 @@ public class TopicsFragment extends BaseFragment implements NotificationCenter.N
         other = menu.addItem(0, R.drawable.ic_ab_other, themeDelegate);
         other.setContentDescription(getString(R.string.AccDescrMoreOptions));
         other.addSubItem(toggle_id, R.drawable.msg_discussion, getString(R.string.TopicViewAsMessages));
+        groupSummarySubmenu = other.addSubItem(ai_group_summary, R.drawable.msg_list, getString(R.string.AiGroupSummary));
         addMemberSubMenu = other.addSubItem(add_member_id, R.drawable.msg_addcontact, getString(R.string.AddMember));
         boostGroupSubmenu = other.addSubItem(boost_group_id, 0, new RLottieDrawable(R.raw.boosts, AndroidUtilities.dp(24), AndroidUtilities.dp(24)), getString(R.string.BoostingBoostGroupMenu), true, false);
         createTopicSubmenu = other.addSubItem(create_topic_id, R.drawable.msg_topic_create, getString(R.string.CreateTopic));
@@ -2516,6 +2526,51 @@ public class TopicsFragment extends BaseFragment implements NotificationCenter.N
         }
     }
 
+    private boolean canSummarizeGroup() {
+        TLRPC.Chat chat = getMessagesController().getChat(chatId);
+        return chatId > 0 && !openedForSelect && !openedForForward && !openedForQuote
+                && !openedForReply && !openedForBotShare && !inPreviewMode
+                && getUserConfig().getClientUserId() != 0 && ChatObject.isForum(chat)
+                && !ChatObject.isChannelAndNotMegaGroup(chat) && !ChatObject.isMonoForum(chat)
+                && !isSummaryAccessRevoked(chat);
+    }
+
+    private boolean isSummaryAccessRevoked(TLRPC.Chat chat) {
+        return chat == null || ChatObject.isKickedFromChat(chat);
+    }
+
+    private void updateSummaryMenuVisibility() {
+        if (groupSummarySubmenu != null) {
+            groupSummarySubmenu.setVisibility(canSummarizeGroup() ? View.VISIBLE : View.GONE);
+        }
+    }
+
+    @Override
+    public void setInPreviewMode(boolean value) {
+        super.setInPreviewMode(value);
+        updateSummaryMenuVisibility();
+    }
+
+    private void showGroupSummary() {
+        if (isFinished || getParentActivity() == null || !canSummarizeGroup()) return;
+        if (groupSummarySheet != null) groupSummarySheet.dismiss();
+        final int summaryAccount = currentAccount;
+        final long summaryOwner = getUserConfig().getClientUserId();
+        // This screen has no snapshot of the whole forum's pre-entry unread boundary.
+        groupSummarySheet = GroupSummarySheet.show(this, summaryAccount, -chatId, 0, -1, -1,
+                (sourceDialogId, messageId) -> {
+                    if (isFinished || getParentActivity() == null || getParentActivity().isFinishing()
+                            || currentAccount != summaryAccount || sourceDialogId != -chatId || messageId <= 0
+                            || getUserConfig().getClientUserId() != summaryOwner || !canSummarizeGroup()) return;
+                    Bundle args = new Bundle();
+                    args.putLong("chat_id", chatId);
+                    args.putInt("message_id", messageId);
+                    ChatActivity chatActivity = new ChatActivity(args);
+                    chatActivity.setCurrentAccount(summaryAccount);
+                    presentFragment(chatActivity);
+                });
+    }
+
     private void updateChatInfo() {
         updateChatInfo(false);
     }
@@ -2637,6 +2692,7 @@ public class TopicsFragment extends BaseFragment implements NotificationCenter.N
         checkUi_listViewPadding();
 
         other.setVisibility(openedForSelect ? View.GONE : View.VISIBLE);
+        updateSummaryMenuVisibility();
         addMemberSubMenu.setVisibility(ChatObject.canAddUsers(chatLocal) ? View.VISIBLE : View.GONE);
         boostGroupSubmenu.setVisibility(ChatObject.isBoostSupported(chatLocal) && (getUserConfig().isPremium() || ChatObject.isBoosted(chatFull) || ChatObject.hasAdminRights(chatLocal)) ? View.VISIBLE : View.GONE);
         deleteChatSubmenu.setVisibility(chatLocal != null && !chatLocal.creator && !ChatObject.isNotInChat(chatLocal) ? View.VISIBLE : View.GONE);
@@ -2693,6 +2749,8 @@ public class TopicsFragment extends BaseFragment implements NotificationCenter.N
         NotificationCenter.getInstance(currentAccount).addObserver(this, NotificationCenter.chatInfoDidLoad);
         NotificationCenter.getInstance(currentAccount).addObserver(this, NotificationCenter.topicsDidLoaded);
         NotificationCenter.getInstance(currentAccount).addObserver(this, NotificationCenter.updateInterfaces);
+        NotificationCenter.getInstance(currentAccount).addObserver(this, NotificationCenter.messagesDeleted);
+        NotificationCenter.getInstance(currentAccount).addObserver(this, NotificationCenter.replaceMessagesObjects);
         NotificationCenter.getInstance(currentAccount).addObserver(this, NotificationCenter.dialogsNeedReload);
         NotificationCenter.getInstance(currentAccount).addObserver(this, NotificationCenter.groupCallUpdated);
         NotificationCenter.getInstance(currentAccount).addObserver(this, NotificationCenter.notificationsSettingsUpdated);
@@ -2721,12 +2779,18 @@ public class TopicsFragment extends BaseFragment implements NotificationCenter.N
 
     @Override
     public void onFragmentDestroy() {
+        if (groupSummarySheet != null) {
+            groupSummarySheet.dismiss();
+            groupSummarySheet = null;
+        }
         notificationsLocker.unlock();
         NotificationCenter.getInstance(currentAccount).removeObserver(this, NotificationCenter.storiesUpdated);
         NotificationCenter.getInstance(currentAccount).removeObserver(this, NotificationCenter.chatWasBoostedByUser);
         NotificationCenter.getInstance(currentAccount).removeObserver(this, NotificationCenter.chatInfoDidLoad);
         NotificationCenter.getInstance(currentAccount).removeObserver(this, NotificationCenter.topicsDidLoaded);
         NotificationCenter.getInstance(currentAccount).removeObserver(this, NotificationCenter.updateInterfaces);
+        NotificationCenter.getInstance(currentAccount).removeObserver(this, NotificationCenter.messagesDeleted);
+        NotificationCenter.getInstance(currentAccount).removeObserver(this, NotificationCenter.replaceMessagesObjects);
         NotificationCenter.getInstance(currentAccount).removeObserver(this, NotificationCenter.dialogsNeedReload);
         NotificationCenter.getInstance(currentAccount).removeObserver(this, NotificationCenter.groupCallUpdated);
         NotificationCenter.getInstance(currentAccount).removeObserver(this, NotificationCenter.notificationsSettingsUpdated);
@@ -2833,7 +2897,7 @@ public class TopicsFragment extends BaseFragment implements NotificationCenter.N
             }
         } else if (id == NotificationCenter.updateInterfaces) {
             int mask = (Integer) args[0];
-            if (mask == MessagesController.UPDATE_MASK_CHAT) {
+            if ((mask & MessagesController.UPDATE_MASK_CHAT) != 0) {
                 updateChatInfo();
             }
             if ((mask & MessagesController.UPDATE_MASK_SELECT_DIALOG) > 0) {
@@ -2880,6 +2944,44 @@ public class TopicsFragment extends BaseFragment implements NotificationCenter.N
                     selectedTopicForTablet = 0;
                     updateTopicsList(false, false);
                 }
+            }
+        }
+        updateSummarySources(id, account, args);
+    }
+
+    /** Invalidate all-forum summaries when an observed original or access policy changes. */
+    private void updateSummarySources(int id, int account, Object[] args) {
+        if (account != currentAccount || chatId <= 0 || isFinished) return;
+        TLRPC.Chat chat = getMessagesController().getChat(chatId);
+        if (chat == null) return;
+        long owner = getUserConfig().getClientUserId();
+        if (id == NotificationCenter.messagesDeleted && args.length >= 3 && !((Boolean) args[2])) {
+            long channel = (Long) args[1];
+            if (channel != (ChatObject.isChannel(chat) ? chatId : 0)) return;
+            ArrayList<Integer> deleted = (ArrayList<Integer>) args[0];
+            for (int messageId : deleted) {
+                SummaryResultCache.getInstance().invalidateMessage(currentAccount, owner, -chatId, messageId);
+                if (groupSummarySheet != null) groupSummarySheet.onSourceDeleted(messageId);
+            }
+        } else if (id == NotificationCenter.replaceMessagesObjects && args.length >= 2
+                && (Long) args[0] == -chatId) {
+            ArrayList<MessageObject> replaced = (ArrayList<MessageObject>) args[1];
+            for (MessageObject message : replaced) {
+                if (message == null || message.messageOwner == null || message.getDialogId() != -chatId) continue;
+                TLRPC.Message source = message.messageOwner;
+                SummaryResultCache.getInstance().invalidateMessage(currentAccount, owner, -chatId, source.id);
+                if (groupSummarySheet != null) {
+                    groupSummarySheet.onSourceUpdated(source.id, source.message, source.edit_date,
+                            SummaryHistoryLoader.isUsableText(source, getConnectionsManager().getCurrentTime()));
+                }
+            }
+        }
+        if (id == NotificationCenter.updateInterfaces
+                || id == NotificationCenter.chatInfoDidLoad && ((TLRPC.ChatFull) args[0]).id == chatId) {
+            if (isSummaryAccessRevoked(chat)) {
+                // Access changes also invalidate results previously generated in individual topics.
+                SummaryResultCache.getInstance().clearOwner(currentAccount, owner);
+                if (groupSummarySheet != null) groupSummarySheet.onAccessRevoked();
             }
         }
     }

@@ -43,6 +43,7 @@ public final class SummaryHistoryRangeTest {
         test("progress cancellation suppresses completion and further pages", SummaryHistoryRangeTest::progressCancel);
         test("metadata resolves IDs, explicit mentions and only known reply senders", SummaryHistoryRangeTest::metadata);
         test("account identity is checked across the snapshot and forward requests", SummaryHistoryRangeTest::accountChange);
+        test("server-time auto-delete messages survive since, unread and fixed-range batches", SummaryHistoryRangeTest::autoDeleteWindows);
         System.out.println("SummaryHistoryRangeTest: " + passed + " passed, " + assertions + " assertions");
     }
 
@@ -54,7 +55,7 @@ public final class SummaryHistoryRangeTest {
         new SummaryHistoryLoader(0, DIALOG, 0).loadSince(10, 3, first);
         AndroidUtilities.drain();
         TLRPC.TL_messages_getHistory probe = history();
-        check(probe.limit == 1 && probe.offset_id == 0 && probe.offset_date > 0, "missing fixed-upper probe");
+        check(probe.limit == 1 && probe.offset_id == 0 && probe.offset_date == 0, "missing latest-server fixed-upper probe");
         serve(corpus);
         TLRPC.TL_messages_getHistory next = history();
         check(next.offset_id == 11 && next.add_offset == -3 && next.limit == 3, "wrong oldest-first window");
@@ -296,6 +297,44 @@ public final class SummaryHistoryRangeTest {
         UserConfig.getInstance(0).setClientUserId(2000);
         reply(message(11, "old account data"));
         check(result.error != null && result.loaded == null, "snapshot and page mixed account owners");
+    }
+
+    private static void autoDeleteWindows() {
+        reset(false);
+        final int serverNow = 1_800_000_000;
+        network.currentTimeOverride = serverNow;
+        ArrayList<TLRPC.Message> corpus = new ArrayList<>();
+        TLRPC.Message old = message(9, "旧文字"); old.date = serverNow - 86400;
+        TLRPC.Message first = message(11, "尚未到期的新文字1");
+        first.date = serverNow - 120; first.ttl_period = 604800;
+        TLRPC.Message second = message(12, "尚未到期的新文字2");
+        second.date = serverNow - 60; second.ttl_period = 604800;
+        TLRPC.Message later = message(13, "固定未读上界之后的文字"); later.date = serverNow - 20;
+        TLRPC.Message expired = message(14, "刚到自动删除期限的文字");
+        expired.date = serverNow - 10; expired.ttl_period = 10;
+        java.util.Collections.addAll(corpus, old, first, second, later, expired);
+
+        Result since = new Result();
+        new SummaryHistoryLoader(0, DIALOG, 0).loadSince(10, 2, since); AndroidUtilities.drain();
+        check(history().offset_id == 0 && history().offset_date == 0 && history().limit == 1,
+                "since snapshot must start at the actual newest server ID");
+        serve(corpus); serve(corpus);
+        checkComplete(since, 12, true);
+        check(since.loaded.upperInclusiveId == 14 && ids(since.loaded).equals("11,12"),
+                "since skipped live auto-delete text or changed the server snapshot");
+
+        Result unread = new Result();
+        new SummaryHistoryLoader(0, DIALOG, 0).loadUnread(10, 12, 5, unread); AndroidUtilities.drain();
+        check(history().offset_id == 11 && history().limit == 5, "unread inserted a latest-ID probe");
+        serve(corpus); checkComplete(unread, 12, false);
+        check(ids(unread.loaded).equals("11,12") && unread.loaded.upperInclusiveId == 12,
+                "unread omitted live TTL text or crossed the captured upper bound");
+
+        Result range = new Result();
+        new SummaryHistoryLoader(0, DIALOG, 0).loadRange(12, 14, 3, range); AndroidUtilities.drain();
+        serve(corpus); checkComplete(range, 14, false);
+        check(ids(range.loaded).equals("13") && range.loaded.scannedMessageCount == 2,
+                "expired text must be excluded while its raw history position remains covered");
     }
 
     private static void reset(boolean forum) {

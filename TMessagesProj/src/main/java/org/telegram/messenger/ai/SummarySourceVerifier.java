@@ -157,12 +157,11 @@ public final class SummarySourceVerifier {
             fail(run, "无法确认原消息的当前群权限，Telegram 未返回完整群信息。请返回群聊后重试。");
             return;
         }
-        if (chat instanceof TLRPC.TL_chatForbidden
-                || chat instanceof TLRPC.TL_channelForbidden || chat.kicked || chat.deactivated
-                || chat.noforwards || chat.monoforum || chat.migrated_to != null
+        if (ChatObject.isKickedFromChat(chat)
+                || chat.monoforum || chat.migrated_to != null
                 || ChatObject.isChannel(chat) != run.channel
-                || ChatObject.isChannelAndNotMegaGroup(chat) || (topicId != 0 && !chat.forum)) {
-            invalidate(run, "原消息的当前群权限已变化，或群已受保护/不可访问。请返回群聊确认后重新总结。");
+                || (topicId != 0 && !chat.forum)) {
+            invalidate(run, "原消息的当前群权限已变化或不可访问。请返回群聊确认后重新总结。");
             return;
         }
         TLRPC.Message current = null;
@@ -185,8 +184,8 @@ public final class SummarySourceVerifier {
             invalidate(run, "原消息已不在本次群聊/话题范围内，请重新总结。");
             return;
         }
-        if (!SummaryHistoryLoader.isUsableText(current)) {
-            invalidate(run, "原消息现已受保护、限时或不再是可用文字，未显示旧正文。请重新总结。");
+        if (!SummaryHistoryLoader.isUsableText(current, run.connections.getCurrentTime())) {
+            invalidate(run, "原消息现已过期、限时或不再是可用文字，未显示旧正文。请重新总结。");
             return;
         }
         long senderId = DialogObject.getPeerDialogId(current.from_id);

@@ -27,7 +27,6 @@ import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
-import android.view.WindowManager;
 import android.view.animation.LinearInterpolator;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
@@ -1034,13 +1033,7 @@ public class TranslateAlert2 extends BottomSheet implements NotificationCenter.N
         if (textView != null) {
             textView.setTextIsSelectable(!noforwards);
         }
-        if (noforwards) {
-            getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
-            AndroidUtilities.logFlagSecure();
-        } else {
-            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_SECURE);
-            AndroidUtilities.logFlagSecure();
-        }
+        AndroidUtilities.setWindowSecure(getWindow(), noforwards);
     }
 
     @Override

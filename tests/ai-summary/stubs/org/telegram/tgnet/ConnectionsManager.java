@@ -15,6 +15,8 @@ public final class ConnectionsManager {
     public final List<TLObject> sent = new ArrayList<>();
     public final List<Integer> cancelledGuids = new ArrayList<>();
     private int nextRequest = 1;
+    /** Independent of the host wall clock, matching Telegram's server-adjusted clock. */
+    public int currentTimeOverride;
     public static class Pending {
         public final TLObject request;
         public final RequestDelegate delegate;
@@ -29,7 +31,9 @@ public final class ConnectionsManager {
         return INSTANCES[account];
     }
     public static int generateClassGuid() { return ++nextGuid; }
-    public int getCurrentTime() { return (int) (System.currentTimeMillis() / 1000L); }
+    public int getCurrentTime() {
+        return currentTimeOverride > 0 ? currentTimeOverride : (int) (System.currentTimeMillis() / 1000L);
+    }
     public int sendRequest(TLObject request, RequestDelegate delegate) {
         return sendRequest(request, delegate, 0);
     }
@@ -56,5 +60,6 @@ public final class ConnectionsManager {
     }
     public void reset() {
         pending.clear(); sent.clear(); cancelledGuids.clear();
+        currentTimeOverride = 0;
     }
 }

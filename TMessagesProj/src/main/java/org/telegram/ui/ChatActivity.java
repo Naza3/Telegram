@@ -244,6 +244,7 @@ import org.telegram.ui.Cells.ChatLoadingCell;
 import org.telegram.ui.Cells.ChatMessageCell;
 import org.telegram.ui.Cells.ChatMessageUnsupportedCell;
 import org.telegram.ui.Cells.ChatUnreadCell;
+import org.telegram.ui.Cells.GroupMessageFoldCell;
 import org.telegram.ui.Cells.CheckBoxCell;
 import org.telegram.ui.Cells.ContextLinkCell;
 import org.telegram.ui.Cells.DialogCell;
@@ -1425,6 +1426,172 @@ public class ChatActivity extends BaseFragment implements
             && (threadMessageId == 0 || isTopic) && !isReport() && !inPreviewMode;
     }
 
+    private org.telegram.messenger.groupmessages.GroupMessageSettings.Rule groupMessageRule;
+    private org.telegram.messenger.groupmessages.GroupMessageFilter groupMessageFilter;
+    private long groupMessageRuleOwner;
+    private boolean showFilteredGroupMessages;
+    private boolean allHiddenGroupMessageNoticeShown;
+    private final HashSet<Integer> expandedGroupMessageIds = new HashSet<>();
+    private final HashSet<Long> expandedGroupAlbumIds = new HashSet<>();
+    private final java.util.IdentityHashMap<MessageObject, GroupMessageMatchCache> groupMessageMatchCache = new java.util.IdentityHashMap<>();
+    private ActionBarMenuItem.Item groupMessageTemporaryItem;
+
+    private static final class GroupMessageMatchCache {
+        final String body;
+        final long sender;
+        final boolean outgoing;
+        final int reason;
+        GroupMessageMatchCache(String body, long sender, boolean outgoing, int reason) {
+            this.body = body; this.sender = sender; this.outgoing = outgoing; this.reason = reason;
+        }
+    }
+
+    private boolean canManageGroupMessages() {
+        return canSummarizeGroup() && dialog_id < 0 && !ChatObject.isChannelAndNotMegaGroup(currentChat);
+    }
+
+    private void refreshGroupMessageRules() {
+        if (!canManageGroupMessages()) return;
+        long owner = getUserConfig().getClientUserId();
+        org.telegram.messenger.groupmessages.GroupMessageSettings.Rule next =
+                org.telegram.messenger.groupmessages.GroupMessageSettings.get(currentAccount, dialog_id);
+        boolean changed = groupMessageRule == null || groupMessageRuleOwner != owner
+                || groupMessageRule.filterMode != next.filterMode
+                || !groupMessageRule.uids.equals(next.uids) || !groupMessageRule.keywords.equals(next.keywords);
+        groupMessageRule = next;
+        groupMessageRuleOwner = owner;
+        if (changed) {
+            groupMessageFilter = new org.telegram.messenger.groupmessages.GroupMessageFilter(next.uids, next.keywords);
+            showFilteredGroupMessages = false;
+            allHiddenGroupMessageNoticeShown = false;
+            expandedGroupMessageIds.clear();
+            expandedGroupAlbumIds.clear();
+            if (actionBar != null && actionBar.isActionModeShowed()) clearSelectionMode();
+            refreshGroupMessageRows();
+        }
+        updateGroupMessageMenuVisibility();
+    }
+
+    private boolean hasGroupMessageRules() {
+        return canManageGroupMessages() && groupMessageRule != null && groupMessageRule.filterMode != 0
+                && groupMessageRuleOwner > 0 && groupMessageRuleOwner == getUserConfig().getClientUserId()
+                && groupMessageFilter != null && !groupMessageFilter.isEmpty();
+    }
+
+    private boolean isOrdinaryGroupFilterMessage(MessageObject message) {
+        return message != null && message.messageOwner != null && message.getId() > 0
+                && message.getDialogId() == dialog_id && !message.isDateObject && !message.scheduled
+                && !message.isSponsored() && (message.contentType == 0 || message.contentType == 10)
+                && (message.messageOwner.action == null || message.messageOwner.action instanceof TLRPC.TL_messageActionEmpty);
+    }
+
+    private int matchGroupMessage(MessageObject message) {
+        if (!isOrdinaryGroupFilterMessage(message)) return 0;
+        long uid = message.messageOwner.from_id instanceof TLRPC.TL_peerUser ? message.messageOwner.from_id.user_id : 0;
+        boolean outgoing = message.isOut() || message.isOutOwner() || uid == getUserConfig().getClientUserId();
+        String body = message.messageOwner.message;
+        GroupMessageMatchCache cached = groupMessageMatchCache.get(message);
+        if (cached != null && cached.sender == uid && cached.outgoing == outgoing
+                && java.util.Objects.equals(cached.body, body)) return cached.reason;
+        int reason = groupMessageFilter.match(true, outgoing, uid, body);
+        groupMessageMatchCache.put(message, new GroupMessageMatchCache(body, uid, outgoing, reason));
+        return reason;
+    }
+
+    /** Album members share a decision, including captions carried by a different member. */
+    private int groupMessageFilterReason(MessageObject message) {
+        if (!hasGroupMessageRules() || showFilteredGroupMessages || !isOrdinaryGroupFilterMessage(message)
+                || expandedGroupMessageIds.contains(message.getId())) return 0;
+        long albumId = message.getGroupId();
+        if (albumId != 0 && expandedGroupAlbumIds.contains(albumId)) return 0;
+        int reason = matchGroupMessage(message);
+        MessageObject.GroupedMessages album = albumId == 0 ? null : groupedMessagesMap.get(albumId);
+        if (album != null) {
+            for (MessageObject member : album.messages) reason |= matchGroupMessage(member);
+        }
+        return reason;
+    }
+
+    private boolean isGroupMessageCollapsed(MessageObject message) {
+        return groupMessageFilterReason(message) != 0;
+    }
+
+    private boolean isGroupAlbumPlaceholder(MessageObject message) {
+        MessageObject.GroupedMessages album = groupedMessagesMap.get(message.getGroupId());
+        if (album == null || album.messages.size() <= 1 || chatAdapter == null) return true;
+        // Search/frozen arrays can contain only part of an album. Always retain one visible placeholder.
+        ArrayList<MessageObject> displayed = chatAdapter.getMessages();
+        for (MessageObject candidate : album.messages) {
+            if (displayed.contains(candidate)) return candidate == message;
+        }
+        return true;
+    }
+
+    private void expandGroupMessage(MessageObject message) {
+        if (!isGroupMessageCollapsed(message)) return;
+        if (message.getGroupId() != 0) expandedGroupAlbumIds.add(message.getGroupId());
+        else expandedGroupMessageIds.add(message.getId());
+        refreshGroupMessageRows();
+    }
+
+    private void refreshGroupMessageRows() {
+        groupMessageMatchCache.clear();
+        if (chatAdapter == null || chatListView == null || chatLayoutManager == null) return;
+        int position = chatLayoutManager.findFirstVisibleItemPosition();
+        View anchor = position == RecyclerView.NO_POSITION ? null : chatLayoutManager.findViewByPosition(position);
+        int offset = anchor == null ? 0 : getScrollingOffsetForView(anchor);
+        long anchorId = anchor == null ? 0 : chatAdapter.getItemId(position);
+        chatAdapter.notifyDataSetChanged(false);
+        if (anchor != null) {
+            for (int i = 0; i < chatAdapter.getItemCount(); i++) {
+                if (chatAdapter.getItemId(i) == anchorId) {
+                    chatLayoutManager.scrollToPositionWithOffset(i, offset);
+                    break;
+                }
+            }
+        }
+        chatListView.invalidate();
+    }
+
+    private boolean areAllLoadedGroupMessagesHidden() {
+        if (!hasGroupMessageRules() || showFilteredGroupMessages || groupMessageRule.filterMode != 2
+                || chatAdapter == null || chatAdapter.isFiltered) return false;
+        boolean hasMessage = false;
+        for (MessageObject message : chatAdapter.getMessages()) {
+            if (message == null || message.messageOwner == null || message.isDateObject
+                    || message.getId() <= 0 || message.contentType != 0 && message.contentType != 10) continue;
+            hasMessage = true;
+            if (!isGroupMessageCollapsed(message)) return false;
+        }
+        return hasMessage;
+    }
+
+    private boolean pausePagingForHiddenGroupMessages() {
+        if (!areAllLoadedGroupMessagesHidden()) return false;
+        if (!allHiddenGroupMessageNoticeShown && getParentActivity() != null && !paused) {
+            allHiddenGroupMessageNoticeShown = true;
+            android.widget.Toast.makeText(getParentActivity(),
+                    "当前已加载的消息均被屏蔽，已暂停自动加载。可在群菜单选择“临时显示全部消息”，或进入“消息管理”调整规则。",
+                    android.widget.Toast.LENGTH_LONG).show();
+        }
+        return true;
+    }
+
+    private void updateGroupMessageMenuVisibility() {
+        if (headerItem == null) return;
+        if (!headerItem.hasSubItem(group_message_settings)) {
+            headerItem.lazilyAddSubItem(group_message_settings, R.drawable.msg_settings_old, "消息管理");
+        }
+        if (!headerItem.hasSubItem(group_message_show_all)) {
+            groupMessageTemporaryItem = headerItem.lazilyAddSubItem(group_message_show_all, R.drawable.msg_list, "临时显示全部消息");
+        }
+        if (groupMessageTemporaryItem != null) {
+            groupMessageTemporaryItem.setText(showFilteredGroupMessages ? "恢复消息屏蔽" : "临时显示全部消息");
+        }
+        headerItem.setSubItemShown(group_message_settings, canManageGroupMessages());
+        headerItem.setSubItemShown(group_message_show_all, hasGroupMessageRules());
+    }
+
     private boolean canSummarizeSelection() {
         if (!canSummarizeGroup() || UserConfig.selectedAccount != currentAccount
                 || summarySelectionOwnerId <= 0 || getUserConfig().getClientUserId() != summarySelectionOwnerId
@@ -1474,6 +1641,7 @@ public class ChatActivity extends BaseFragment implements
             headerItem.lazilyAddSubItem(ai_group_summary, R.drawable.msg_list, getString(R.string.AiGroupSummary));
         }
         headerItem.setSubItemShown(ai_group_summary, canSummarizeGroup());
+        updateGroupMessageMenuVisibility();
     }
 
     /** Capture before opening/reading this chat changes Telegram's read marker. */
@@ -1785,12 +1953,16 @@ public class ChatActivity extends BaseFragment implements
     private final static int chat_menu_topic_create = 73;
     private final static int ai_group_summary = 75;
     private final static int ai_summary_selected = 76;
+    private final static int group_message_settings = 77;
+    private final static int group_message_show_all = 78;
+    private final static int GROUP_MESSAGE_FOLD_VIEW_TYPE = 11;
 
     private final static int id_chat_compose_panel = 1000;
 
     RecyclerListView.OnItemLongClickListenerExtended onItemLongClickListener = new RecyclerListView.OnItemLongClickListenerExtended() {
         @Override
         public boolean onItemClick(View view, int position, float x, float y) {
+            if (view instanceof GroupMessageFoldCell) return false;
             if (isTryingTextSelection() || hasTextSelection() || inPreviewMode || isInsideContainer) {
                 return false;
             }
@@ -1851,6 +2023,7 @@ public class ChatActivity extends BaseFragment implements
                 }
                 if (i >= 0 && i < messages.size()) {
                     MessageObject messageObject = messages.get(i);
+                    if (isGroupMessageCollapsed(messageObject)) return;
                     if (selected && (selectedMessagesIds[0].indexOfKey(messageObject.getId()) >= 0 || selectedMessagesIds[1].indexOfKey(messageObject.getId()) >= 0)) {
                         return;
                     }
@@ -1880,6 +2053,7 @@ public class ChatActivity extends BaseFragment implements
                 int i = position - chatAdapter.messagesStartRow;
                 if (i >= 0 && i < messages.size()) {
                     MessageObject messageObject = messages.get(i);
+                    if (isGroupMessageCollapsed(messageObject)) return false;
                     if (messageObject.contentType == 0) {
                         if (!unselect && alreadySelectedMessagesIds.get(messageObject.getId(), null) == null) {
                             return true;
@@ -1929,6 +2103,7 @@ public class ChatActivity extends BaseFragment implements
     RecyclerListView.OnItemClickListenerExtended onItemClickListener = new RecyclerListView.OnItemClickListenerExtended() {
         @Override
         public void onItemClick(View view, int position, float x, float y) {
+            if (view instanceof GroupMessageFoldCell) return;
             if (inPreviewMode) {
                 return;
             }
@@ -3453,6 +3628,11 @@ public class ChatActivity extends BaseFragment implements
 
     @Override
     public void onFragmentDestroy() {
+        expandedGroupMessageIds.clear();
+        expandedGroupAlbumIds.clear();
+        groupMessageMatchCache.clear();
+        groupMessageRule = null;
+        groupMessageFilter = null;
         pendingSummaryPublishDraft = null;
         if (groupSummarySheet != null) {
             groupSummarySheet.dismiss();
@@ -3671,6 +3851,7 @@ public class ChatActivity extends BaseFragment implements
 
     @Override
     public View createView(Context context) {
+        refreshGroupMessageRules();
         Timer t = Timer.create("ChatActivity.createView");
 
         blurredBackgroundColorProvider = new BlurredBackgroundColorProviderThemed(themeDelegate, Theme.key_chat_messagePanelBackground) {
@@ -3816,6 +3997,21 @@ public class ChatActivity extends BaseFragment implements
                     }
                 } else if (id == ai_summary_selected) {
                     openSelectedSummary();
+                } else if (id == group_message_settings) {
+                    if (canManageGroupMessages()) {
+                        presentFragment(new GroupMessageSettingsActivity(currentAccount, dialog_id));
+                    }
+                } else if (id == group_message_show_all) {
+                    if (hasGroupMessageRules()) {
+                        showFilteredGroupMessages = !showFilteredGroupMessages;
+                        allHiddenGroupMessageNoticeShown = false;
+                        expandedGroupMessageIds.clear();
+                        expandedGroupAlbumIds.clear();
+                        clearSelectionMode();
+                        refreshGroupMessageRows();
+                        updateGroupMessageMenuVisibility();
+                        checkScrollForLoad(false);
+                    }
                 } else if (id == ai_group_summary) {
                     if (canSummarizeGroup()) {
                         if (groupSummarySheet != null) {
@@ -12553,6 +12749,8 @@ public class ChatActivity extends BaseFragment implements
     }
 
     public MessageObject.GroupedMessages getValidGroupedMessage(MessageObject message) {
+        // A folded album occupies plain full-width rows, never media-grid spans or sibling offsets.
+        if (isGroupMessageCollapsed(message)) return null;
         MessageObject.GroupedMessages groupedMessages = null;
         if (message.getGroupId() != 0) {
             groupedMessages = groupedMessagesMap.get(message.getGroupId());
@@ -13966,6 +14164,8 @@ public class ChatActivity extends BaseFragment implements
         if (chatLayoutManager == null || paused || chatAdapter.isFrozen || waitingForGetDifference) {
             return;
         }
+        // Zero-height hidden rows must not trigger an unbounded historical scan to fill the viewport.
+        if (pausePagingForHiddenGroupMessages()) return;
         int firstVisibleItem = RecyclerListView.NO_POSITION;
         int lastVisibleItem = RecyclerListView.NO_POSITION;
         int visibleItemCount = 0;
@@ -14010,6 +14210,7 @@ public class ChatActivity extends BaseFragment implements
         }
 
         AndroidUtilities.runOnUIThread(() -> {
+            if (pausePagingForHiddenGroupMessages()) return;
             if (totalItemCount - firstVisibleItemFinal - visibleItemCountFinal <= checkLoadCount && !loading) {
                 if (!endReached[0]) {
                     loading = true;
@@ -16300,6 +16501,18 @@ public class ChatActivity extends BaseFragment implements
                     emojiAnimationsOverlay.onTapItem(messageCell, ChatActivity.this, false);
                 } else if (messageObject.isAnimatedAnimatedEmoji()) {
                     emojiAnimationsOverlay.preloadAnimation(messageCell);
+                }
+            } else if (view instanceof GroupMessageFoldCell) {
+                // Keep native read/scroll bookkeeping tied to the original adapter slot.
+                // The original body is never passed to the placeholder view.
+                int index = adapterPosition - chatAdapter.messagesStartRow;
+                ArrayList<MessageObject> displayed = chatAdapter.getMessages();
+                if (index >= 0 && index < displayed.size()) {
+                    messageObject = displayed.get(index);
+                    if (messageObject.getDialogId() == dialog_id && messageObject.getId() > maxVisibleId) {
+                        maxVisibleId = messageObject.getId();
+                        maxVisibleMessageObject = messageObject;
+                    }
                 }
             } else if (view instanceof ChatActionCell) {
                 ChatActionCell cell = (ChatActionCell) view;
@@ -20709,6 +20922,15 @@ public class ChatActivity extends BaseFragment implements
             didReceivedNotification7(id, account, args);
         }
         updateSummarySources(id, account, args);
+        if (account == currentAccount && hasGroupMessageRules() && !showFilteredGroupMessages
+                && (id == NotificationCenter.messagesDidLoad && args.length > 10 && (Integer) args[10] == classGuid
+                || (id == NotificationCenter.didReceiveNewMessages || id == NotificationCenter.replaceMessagesObjects)
+                && args.length > 0 && (Long) args[0] == dialog_id
+                || id == NotificationCenter.messagesDeleted && args.length > 1
+                && (Long) args[1] == (ChatObject.isChannel(currentChat) ? -dialog_id : 0))) {
+            // An edited/new caption can change every member's view type in its album.
+            refreshGroupMessageRows();
+        }
         if (account == currentAccount && (id == NotificationCenter.updateInterfaces || id == NotificationCenter.chatInfoDidLoad)) {
             if (currentChat != null) {
                 TLRPC.Chat fresh = getMessagesController().getChat(currentChat.id);
@@ -30015,6 +30237,7 @@ public class ChatActivity extends BaseFragment implements
     @Override
     public void onResume() {
         super.onResume();
+        refreshGroupMessageRules();
         checkShowBlur(false);
         activityResumeTime = System.currentTimeMillis();
         if (openImport && getSendMessagesHelper().getImportingHistory(dialog_id) != null) {
@@ -37274,7 +37497,9 @@ public class ChatActivity extends BaseFragment implements
         @Override
         public RecyclerView.ViewHolder onCreateViewHolder(ViewGroup parent, int viewType) {
             View view = null;
-            if (viewType == 0) {
+            if (viewType == GROUP_MESSAGE_FOLD_VIEW_TYPE) {
+                view = new GroupMessageFoldCell(mContext, themeDelegate);
+            } else if (viewType == 0) {
                 view = new ChatMessageCell(mContext, currentAccount, true, sharedResources, themeDelegate);
                 ChatMessageCell chatMessageCell = (ChatMessageCell) view;
                 chatMessageCell.setResourcesProvider(themeDelegate);
@@ -37695,7 +37920,7 @@ public class ChatActivity extends BaseFragment implements
                 infoView.set(dialogId, getMessagesController().getPeerSettings(dialogId));
             } else if (position == loadingDownRow || position == loadingUpRow) {
                 ChatLoadingCell loadingCell = (ChatLoadingCell) holder.itemView;
-                loadingCell.setProgressVisible(loadsCount > 1);
+                loadingCell.setProgressVisible(loadsCount > 1 && !areAllLoadedGroupMessagesHidden());
             } else if (position == userNameTimeRow) {
                 final TLRPC.PeerSettings settings = getMessagesController().getPeerSettings(getDialogId());
                 if (settings == null) return;
@@ -37739,7 +37964,14 @@ public class ChatActivity extends BaseFragment implements
                 MessageObject message = messages.get(position - messagesStartRow);
                 View view = holder.itemView;
 
-                if (view instanceof ChatMessageCell) {
+                if (view instanceof GroupMessageFoldCell) {
+                    int reason = groupMessageFilterReason(message);
+                    boolean hidden = groupMessageRule != null && groupMessageRule.filterMode == 2
+                            || !isGroupAlbumPlaceholder(message);
+                    ((GroupMessageFoldCell) view).bind(hidden, message.getGroupId() != 0,
+                            (reason & org.telegram.messenger.groupmessages.GroupMessageFilter.UID) != 0,
+                            () -> expandGroupMessage(message));
+                } else if (view instanceof ChatMessageCell) {
                     final ChatMessageCell messageCell = (ChatMessageCell) view;
                     MessageObject.GroupedMessages groupedMessages = getValidGroupedMessage(message);
                     messageCell.isChat = currentChat != null || UserObject.isUserSelf(currentUser) || UserObject.isReplyUser(currentUser) || (chatMode == MODE_SEARCH);
@@ -38291,7 +38523,8 @@ public class ChatActivity extends BaseFragment implements
                 } else {
                     messages = ChatActivity.this.messages;
                 }
-                return messages.get(position - messagesStartRow).contentType;
+                MessageObject message = messages.get(position - messagesStartRow);
+                return isGroupMessageCollapsed(message) ? GROUP_MESSAGE_FOLD_VIEW_TYPE : message.contentType;
             } else if (position == botInfoRow) {
                 return 3;
             } else if (position == userInfoRow) {
@@ -38306,6 +38539,7 @@ public class ChatActivity extends BaseFragment implements
 
         @Override
         public void onViewAttachedToWindow(RecyclerView.ViewHolder holder) {
+            if (holder.itemView instanceof GroupMessageFoldCell) return;
             if (holder.itemView instanceof ChatMessageCell || holder.itemView instanceof ChatActionCell) {
                 invalidateMessagesVisiblePart();
             }
@@ -38486,7 +38720,8 @@ public class ChatActivity extends BaseFragment implements
         }
 
         public View updateRowWithMessageObject(MessageObject messageObject, boolean allowInPlace, boolean replace) {
-            if (allowInPlace) {
+            // Editing a body/caption may replace a visible cell with a fold cell (or the reverse).
+            if (allowInPlace && !hasGroupMessageRules()) {
                 int count = chatListView.getChildCount();
                 for (int a = 0; a < count; a++) {
                     View child = chatListView.getChildAt(a);

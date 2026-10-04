@@ -477,6 +477,14 @@ public class UserConfig extends BaseController {
         });
         Utilities.globalQueue.postRunnable(() -> {
             try {
+                if (!org.telegram.messenger.groupmessages.GroupMessageSettings.clearOwner(currentAccount, summaryOwnerId)) {
+                    FileLog.e("Unable to clear group message settings for the logged-out owner");
+                }
+            } catch (RuntimeException error) {
+                FileLog.e("Unable to clear group message settings for the logged-out owner");
+            }
+            org.telegram.messenger.groupmessages.DeletedGroupMessages.logout(currentAccount, summaryOwnerId);
+            try {
                 org.telegram.messenger.ai.ApiProfilesStore.clearOwner(currentAccount, summaryOwnerId);
             } catch (RuntimeException error) {
                 FileLog.e("Unable to clear AI API profiles for the logged-out owner");

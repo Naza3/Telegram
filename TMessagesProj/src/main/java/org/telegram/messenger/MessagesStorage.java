@@ -36,6 +36,9 @@ import org.telegram.SQLite.SQLiteException;
 import org.telegram.SQLite.SQLitePreparedStatement;
 import org.telegram.messenger.support.LongSparseIntArray;
 import org.telegram.messenger.utils.EphemeralMessagesHelper;
+import org.telegram.messenger.groupmessages.DeletedGroupMessages;
+import org.telegram.messenger.groupmessages.DeletedMessageEligibility;
+import org.telegram.messenger.groupmessages.DeletedMessageRecord;
 import org.telegram.tgnet.NativeByteBuffer;
 import org.telegram.tgnet.RequestDelegate;
 import org.telegram.tgnet.TLObject;
@@ -4272,7 +4275,9 @@ public class MessagesStorage extends BaseController {
     }
 
     public void deleteUserChatHistory(long dialogId, long fromId) {
+        final long retainedOwner = getUserConfig().getClientUserId();
         storageQueue.postRunnable(() -> {
+            DeletedGroupMessages.removeSender(currentAccount, retainedOwner, dialogId, fromId);
             SQLiteCursor cursor = null;
             try {
                 ArrayList<Integer> mids = new ArrayList<>();
@@ -4401,6 +4406,7 @@ public class MessagesStorage extends BaseController {
     }
 
     public void deleteDialog(long did, int messagesOnly) {
+        final long retainedOwner = getUserConfig().getClientUserId();
         storageQueue.postRunnable(() -> {
             SQLiteCursor cursor = null;
             SQLiteCursor cursor2 = null;
@@ -4418,6 +4424,10 @@ public class MessagesStorage extends BaseController {
                     if (lastMid != 0) {
                         return;
                     }
+                }
+                // Mode 3 is automatic empty-dialog maintenance, not a user clearing history.
+                if (retainedOwner > 0 && DeletedMessageEligibility.clearsLocalRecords(did, messagesOnly)) {
+                    DeletedGroupMessages.clear(currentAccount, retainedOwner, did, null);
                 }
                 if (DialogObject.isEncryptedDialog(did) || messagesOnly == 2) {
                     cursor = database.queryFinalized("SELECT data FROM messages_v2 WHERE uid = " + did);
@@ -14512,6 +14522,79 @@ public class MessagesStorage extends BaseController {
 
     private void broadcastQuickRepliesMessagesChange(Long type, long topic_id) {
         AndroidUtilities.runOnUIThread(() -> getNotificationCenter().postNotificationName(NotificationCenter.quickRepliesUpdated));
+    }
+
+    /** Called on storageQueue only for remote deletion updates, before native rows are removed. */
+    public void archiveRemoteDeletedGroupMessages(long owner, long dialogId, ArrayList<Integer> messages) {
+        if (owner <= 0 || owner != getUserConfig().getClientUserId() || dialogId > 0
+                || messages == null || messages.isEmpty()) return;
+        if (dialogId != 0 && !DeletedGroupMessages.isEnabled(currentAccount, owner, dialogId)) return;
+        ArrayList<DeletedMessageRecord> retained = new ArrayList<>();
+        HashSet<String> seen = new HashSet<>();
+        HashMap<Long, TLRPC.Chat> groupChats = new HashMap<>();
+        int retainedCharacters = 0;
+        final long deletedAt = getConnectionsManager().getCurrentTime();
+        try {
+            // Topic rows carry the precise topic id even if the corresponding main row was evicted.
+            for (int table = 0; table < 2 && retained.size() < 2000 && retainedCharacters < 2 * 1024 * 1024; table++) {
+                final boolean topicTable = table == 0;
+                for (int start = 0; start < messages.size() && retained.size() < 2000 && retainedCharacters < 2 * 1024 * 1024; start += 256) {
+                    String ids = TextUtils.join(",", messages.subList(start, Math.min(start + 256, messages.size())));
+                    String scope = dialogId == 0 ? "uid < 0 AND is_channel = 0" : "uid = " + dialogId;
+                    SQLiteCursor cursor = null;
+                    try {
+                        cursor = database.queryFinalized("SELECT uid, data, mid, date, send_state, ttl, "
+                                + (topicTable ? "topic_id" : "0") + " FROM "
+                                + (topicTable ? "messages_topics" : "messages_v2")
+                                + " WHERE mid IN(" + ids + ") AND " + scope);
+                        while (cursor.next() && retained.size() < 2000 && retainedCharacters < 2 * 1024 * 1024) {
+                            long did = cursor.longValue(0);
+                            int mid = cursor.intValue(2);
+                            String key = did + ":" + mid;
+                            if (seen.contains(key) || cursor.intValue(4) != 0 || cursor.intValue(5) != 0
+                                    || !DeletedGroupMessages.isEnabled(currentAccount, owner, did)) continue;
+                            TLRPC.Chat chat = groupChats.get(did);
+                            if (!groupChats.containsKey(did)) {
+                                chat = getChat(-did);
+                                groupChats.put(did, chat);
+                            }
+                            if (chat == null) continue;
+                            NativeByteBuffer data = cursor.byteBufferValue(1);
+                            if (data == null) continue;
+                            TLRPC.Message message;
+                            try {
+                                message = TLRPC.Message.TLdeserialize(data, data.readInt32(false), false);
+                                if (message != null) message.readAttachPath(data, owner);
+                            } finally { data.reuse(); }
+                            if (message == null) continue;
+                            message.id = mid;
+                            message.date = cursor.intValue(3);
+                            message.dialog_id = did;
+                            if (!DeletedMessageEligibility.accepts(did, chat, message)) continue;
+                            long topic = topicTable ? cursor.longValue(6) : DeletedMessageEligibility.topicId(chat, message);
+                            long sender = message.from_id == null ? 0 : message.from_id.user_id;
+                            long senderPeer = message.from_id == null ? 0 : MessageObject.getPeerId(message.from_id);
+                            retained.add(new DeletedMessageRecord(owner, did, topic, mid, message.date,
+                                    sender, "", message.message, deletedAt, senderPeer));
+                            seen.add(key);
+                            retainedCharacters += message.message.length();
+                        }
+                    } finally { if (cursor != null) cursor.dispose(); }
+                }
+            }
+            if (owner == getUserConfig().getClientUserId()) DeletedGroupMessages.retain(currentAccount, owner, retained);
+        } catch (Exception ignored) {
+            // The server deletion and its unread/topic bookkeeping must still run on every failure.
+            FileLog.e("Could not capture cached deleted group text");
+        }
+    }
+
+    /** Keep this queue ordering: a prior remote capture must be purged by a later local delete. */
+    public void removeRetainedGroupMessages(long dialogId, ArrayList<Integer> messages) {
+        if (dialogId >= 0 || messages == null || messages.isEmpty()) return;
+        final long owner = getUserConfig().getClientUserId();
+        final ArrayList<Integer> ids = new ArrayList<>(messages);
+        storageQueue.postRunnable(() -> DeletedGroupMessages.removeIds(currentAccount, owner, dialogId, ids));
     }
 
     private ArrayList<Long> markMessagesAsDeletedInternal(long dialogId, ArrayList<Integer> messages, boolean deleteFiles, int mode, int threadMessageId) {

@@ -9351,6 +9351,7 @@ public class MessagesController extends BaseController implements NotificationCe
             } else if (welcomeMessages) {
                 getMessagesStorage().markMessagesAsDeleted(dialogId, messages, true, false, ChatActivity.MODE_WELCOME_MESSAGES, topicId);
             } else {
+                getMessagesStorage().removeRetainedGroupMessages(dialogId, messages);
                 if (channelId == 0) {
                     for (int a = 0; a < messages.size(); a++) {
                         Integer id = messages.get(a);
@@ -17596,7 +17597,9 @@ public class MessagesController extends BaseController implements NotificationCe
     }
 
     protected void deleteMessagesByPush(long dialogId, ArrayList<Integer> ids, long channelId) {
+        final long retainedOwner = getUserConfig().getClientUserId();
         getMessagesStorage().getStorageQueue().postRunnable(() -> {
+            getMessagesStorage().archiveRemoteDeletedGroupMessages(retainedOwner, dialogId, ids);
             AndroidUtilities.runOnUIThread(() -> {
                 getNotificationCenter().postNotificationName(NotificationCenter.messagesDeleted, ids, channelId, false);
                 if (channelId == 0) {
@@ -21208,10 +21211,12 @@ public class MessagesController extends BaseController implements NotificationCe
             }
         }
         if (deletedMessages != null) {
+            final long retainedOwner = getUserConfig().getClientUserId();
             for (int a = 0, size = deletedMessages.size(); a < size; a++) {
                 long key = deletedMessages.keyAt(a);
                 ArrayList<Integer> arrayList = deletedMessages.valueAt(a);
                 getMessagesStorage().getStorageQueue().postRunnable(() -> {
+                    getMessagesStorage().archiveRemoteDeletedGroupMessages(retainedOwner, key, arrayList);
                     ArrayList<Long> dialogIds = getMessagesStorage().markMessagesAsDeleted(key, arrayList, false, true, 0, 0);
                     getMessagesStorage().updateDialogsWithDeletedMessages(key, -key, arrayList, dialogIds);
                 });
@@ -23089,6 +23094,7 @@ public class MessagesController extends BaseController implements NotificationCe
     }
 
     public void deleteMessagesRange(long dialogId, long channelId, int minDate, int maxDate, boolean forAll, Runnable callback) {
+        final long retainedOwner = getUserConfig().getClientUserId();
         TLRPC.TL_messages_deleteHistory req = new TLRPC.TL_messages_deleteHistory();
         req.peer = getInputPeer(dialogId);
         req.flags = (1 << 2) | (1 << 3);
@@ -23101,6 +23107,8 @@ public class MessagesController extends BaseController implements NotificationCe
                 TLRPC.TL_messages_affectedHistory res = (TLRPC.TL_messages_affectedHistory) response;
                 processNewDifferenceParams(-1, res.pts, -1, res.pts_count);
                 getMessagesStorage().getStorageQueue().postRunnable(() -> {
+                    org.telegram.messenger.groupmessages.DeletedGroupMessages.removeDateRange(
+                            currentAccount, retainedOwner, dialogId, minDate, maxDate);
                     ArrayList<Integer> dbMessages = getMessagesStorage().getCachedMessagesInRange(dialogId, minDate, maxDate);
                     getMessagesStorage().markMessagesAsDeleted(dialogId, dbMessages, false, true, 0, 0);
                     getMessagesStorage().updateDialogsWithDeletedMessages(dialogId, 0, dbMessages, null);

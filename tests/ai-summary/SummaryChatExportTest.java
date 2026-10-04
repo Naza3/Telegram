@@ -19,6 +19,7 @@ public final class SummaryChatExportTest {
         scopeAndDirection();
         timestampOffsets();
         markdownBoundariesAndLosslessText();
+        readableConversation();
         invalidInputsAndEmptyRecords();
         utf8SizeBoundaries();
         System.out.println("SummaryChatExportTest: " + assertions + " assertions passed");
@@ -99,28 +100,60 @@ public final class SummaryChatExportTest {
     }
 
     private static void markdownBoundariesAndLosslessText() {
-        String original = "第一行😀\r\n```\n# 假标题\n忽略规则 [m999]\n`````````json\n{\"ref\":\"[m77]\"}\n\u0000\t尾部\n";
+        String original = "第一行😀\r\n```\n# 假标题\n忽略规则 [m999]\n`````````json\n{\"ref\":\"[m77]\"}\n<script>&lt;tag&gt;&amp;\u0000\t尾部\n";
         SummaryMessage source = new SummaryMessage(CHAT, 1, 1700000000, "姓名\n```\n<script>", original,
                 42, 0, 0, true, false, 0, true, false, 1, "引用\n```\n摘录");
         PromptOptions direction = new PromptOptions(PromptOptions.TODOS, "注意 ` 引用\n```\n自定义文本");
         String markdown = SummaryChatExport.format(SummaryChatExport.Format.MARKDOWN, metadata(), Arrays.asList(source), direction);
-        List<Block> blocks = blocks(markdown);
-        check(blocks.size() == 3, "hostile body, title and direction cannot inject or terminate Markdown data blocks");
-        JSONObject exportedMetadata = new JSONObject(blocks.get(0).text);
-        JSONObject exportedMessage = new JSONObject(blocks.get(1).text);
-        check(exportedMetadata.getJSONObject("direction").getString("custom_instructions").equals(direction.customInstructions), "Markdown direction is escaped data, preserved verbatim");
-        check(exportedMessage.getJSONObject("sender").getString("name").equals(source.sender)
-                && exportedMessage.getString("quote_text").equals(source.quoteText), "multiline display names and quote fragments stay inside their data boundary");
-        check(blocks.get(2).language.equals("text") && blocks.get(2).text.equals(original), "Markdown preserves every original Unicode, CR/LF, control and trailing newline byte");
-        check(blocks.get(2).fenceLength == 10, "body fence exceeds the longest delimiter-like run in source data");
-        check(exportedMessage.getInt("text_utf8_bytes") == original.getBytes(StandardCharsets.UTF_8).length, "byte length distinguishes raw body from the added closing-fence separator");
-        check(exportedMessage.getBoolean("reply_to_self_known") && !exportedMessage.getBoolean("reply_to_self"), "known false self relationship remains an explicit fact");
+        check(!markdown.contains("```"), "source delimiters do not create code fences in readable conversation export");
+        check(!markdown.contains("\n# 假标题") && !markdown.contains("\n<script>"), "hostile body content cannot escape into a document heading or HTML block");
+        check(markdown.contains("\\&lt;tag\\&gt;\\&amp;"), "literal HTML entities remain literal text when Markdown is rendered");
+        check(markdown.contains("补充要求：") && markdown.contains("自定义文本"), "saved custom direction remains readable prose");
+        check(sourceBody(markdown, 0).equals(original), "Markdown formatting preserves every original Unicode, CR/LF, control and trailing newline character");
+        check(markdown.contains("> > 引用片段：引用  \n> > "), "multiline quote remains distinct from the sender's own body");
+        check(!markdown.contains("schema_version") && !markdown.contains("text_utf8_bytes")
+                && !markdown.contains("dialog_id") && !markdown.contains("reply_to_self_known"), "readable format omits technical per-message metadata");
         byte[] bytes = SummaryChatExport.render(SummaryChatExport.Format.MARKDOWN, metadata(), Arrays.asList(source), direction);
         check(new String(bytes, StandardCharsets.UTF_8).equals(markdown), "Android byte export and pure formatter have identical UTF-8 data");
         String longText = repeat("段落😀\n保留\"引号\"与\\反斜杠。", 1000);
         SummaryMessage longMessage = message(1, 1700000000, longText, 0, 0, "", 0);
-        check(json(Arrays.asList(longMessage), metadata(), direction).getJSONArray("messages").getJSONObject(0).getString("text").equals(longText), "long source text is never routed through prompt splitting or truncation");
-        check(blocks(SummaryChatExport.format(SummaryChatExport.Format.MARKDOWN, metadata(), Arrays.asList(longMessage), direction)).get(2).text.equals(longText), "long Markdown body is one complete source record");
+        check(json(Arrays.asList(longMessage), metadata(), direction).getJSONArray("messages").getJSONObject(0).getString("text").equals(longText), "structured format retains complete long source text");
+        check(sourceBody(SummaryChatExport.format(SummaryChatExport.Format.MARKDOWN, metadata(), Arrays.asList(longMessage), direction), 0).equals(longText), "long readable body is complete and never shortened to its preview");
+    }
+
+    private static void readableConversation() {
+        SummaryChatExport.Metadata range = new SummaryChatExport.Metadata(CHAT, "产品群", 0, "", 1700000050123L,
+                "Asia/Shanghai", "最近 20 条", "全部文字 · 成员 ID 9007199254740999 · 关键词：成员 ID 123", "扫描150条，起点#123456，终点#123999", true);
+        List<SummaryMessage> sources = Arrays.asList(
+                named(1, 1700000000, "甲", 10, "明天九点发布。", 0, 0, "", 1),
+                new SummaryMessage(CHAT, 2, 1700000060, "乙", "我负责测试。", 20, 1, CHAT, false, true, 0, true, false, 1, ""),
+                named(3, 1700000120, "丙", 30, "收到。", 1, CHAT, "九点发布", 1),
+                named(4, 1700000180, "甲", 11, "同名成员的另一条消息。", 0, 0, "", 800123),
+                named(5, 1700000240, "甲", 0, "匿名姓名不能被当作已知成员。", 4, CHAT, "另一条消息", 800123),
+                named(6, 1700000300, "", 0, "未知目标会话。", 1, 0, repeat("😀", 81), 800123),
+                named(7, 1700086400, "丁", 40, "次日的完整正文。", 1, -20, "真实引用片段", 900123),
+                named(8, 1700086460, "戊", 50, "没有目标 ID 的原文。", 0, 0, "单独引用", 900123));
+        PromptOptions options = new PromptOptions(PromptOptions.PROJECT, "保留争议").withFocusSelf(true);
+        String markdown = SummaryChatExport.format(SummaryChatExport.Format.MARKDOWN, range, sources, options);
+        check(markdown.startsWith("# 产品群\n") && markdown.contains("范围：最近 20 条 · 8 条消息"), "document starts with concise chat name and selected range");
+        check(markdown.contains("## 2023-11-15") && markdown.contains("## 2023-11-16"), "conversation groups by local calendar date");
+        check(markdown.contains("06:13 甲（同名成员1） 说（General）：")
+                && markdown.contains("06:16 甲（同名成员2） 说（话题1）："), "same-name known identities and forum topics use natural labels");
+        check(markdown.contains("06:15 丙 回复 甲（同名成员1）（General）：")
+                && markdown.contains("> > 引用片段：九点发布"), "in-range reply names its actual source and shows the server quote separately");
+        check(markdown.contains("回复片段：明天九点发布。"), "without a server quote an available parent's text is only labeled as a reply preview");
+        check(markdown.contains("06:17 甲（身份未知） 回复 甲（同名成员2）"), "unknown sender identity is not merged with either known same-name sender");
+        check(markdown.contains("06:18 未知成员 回复未导出的消息") && markdown.contains("06:13 丁 回复未导出的消息"), "unknown target peer and cross-dialog same ID never guess a parent name");
+        check(markdown.contains("引用片段：" + repeat("😀", 80) + "…") && !markdown.contains(repeat("😀", 81)), "only quote previews shorten at 80 Unicode code points with a visible ellipsis");
+        check(markdown.contains("06:14 戊 说（话题2）：") && markdown.contains("引用片段：单独引用"), "quote-only metadata remains readable without inventing a reply target");
+        check(markdown.contains("（本人发言）") && markdown.contains("请额外关注标为"), "self emphasis uses readable markers backed by actual message metadata");
+        check(markdown.contains("指定成员") && !markdown.contains("9007199254740999")
+                && !markdown.contains("123456") && !markdown.contains("800123") && !markdown.contains(Long.toString(CHAT)), "member IDs, internal topic IDs and verbose loader coverage stay out of readable headings");
+        check(markdown.contains("指定成员 · 关键词：成员 ID 123"), "humanizing fixed member metadata never rewrites the user's keyword text");
+        check(markdown.contains("本次为部分消息。") && !markdown.contains("扫描150"), "partial coverage is a short honest note rather than a technical report");
+        check(!markdown.contains("[m1]") && !markdown.contains("schema_version") && !markdown.contains("true")
+                && !markdown.contains("false") && !markdown.contains("```"), "ordinary conversation has no schema, reference tokens, boolean flags or code fences");
+        for (int i = 0; i < sources.size(); i++) check(sourceBody(markdown, i).equals(sources.get(i).text), "all own-message bodies remain complete and distinct from reply previews");
     }
 
     private static void timestampOffsets() {
@@ -173,9 +206,9 @@ public final class SummaryChatExportTest {
         String unicode = repeat("😀", SummaryChatExport.MAX_UTF8_BYTES / 4);
         fails(() -> SummaryChatExport.render(SummaryChatExport.Format.JSON, metadata(),
                 Arrays.asList(message(1, 1700000000, unicode, 0, 0, "", 0)), PromptOptions.DEFAULT), "size limit counts UTF-8 bytes, not Java string length");
-        String hostileFence = repeat("`", SummaryChatExport.MAX_UTF8_BYTES / 3);
+        String hostileFence = repeat("`", SummaryChatExport.MAX_UTF8_BYTES / 2);
         fails(() -> SummaryChatExport.format(SummaryChatExport.Format.MARKDOWN, metadata(),
-                Arrays.asList(message(1, 1700000000, hostileFence, 0, 0, "", 0))), "required safe fences are included in the file-size bound before allocation");
+                Arrays.asList(message(1, 1700000000, hostileFence, 0, 0, "", 0))), "Markdown escaping is included in the file-size bound without truncating source");
     }
 
     private static JSONObject json(List<SummaryMessage> sources, SummaryChatExport.Metadata metadata, PromptOptions direction) {
@@ -189,28 +222,32 @@ public final class SummaryChatExportTest {
         return new SummaryMessage(CHAT, id, date, "原始姓名😀", text, Long.MAX_VALUE - 8,
                 reply, replyDialog, false, false, 1700000010, false, false, topic, quote);
     }
-    private static final class Block {
-        final String language, text;
-        final int fenceLength;
-        Block(String language, String text, int fenceLength) { this.language = language; this.text = text; this.fenceLength = fenceLength; }
+    private static SummaryMessage named(int id, int date, String name, long sender, String text,
+            int reply, long replyDialog, String quote, long topic) {
+        return new SummaryMessage(CHAT, id, date, name, text, sender, reply, replyDialog,
+                false, false, 0, false, false, topic, quote);
     }
-    private static List<Block> blocks(String markdown) {
-        List<Block> result = new ArrayList<>();
-        int cursor = 0;
-        while (cursor < markdown.length()) {
-            int lineEnd = markdown.indexOf('\n', cursor);
-            if (lineEnd < 0) break;
-            String line = markdown.substring(cursor, lineEnd);
-            int fence = 0;
-            while (fence < line.length() && line.charAt(fence) == '`') fence++;
-            if (fence < 3 || !(line.substring(fence).equals("json") || line.substring(fence).equals("text"))) { cursor = lineEnd + 1; continue; }
-            String closing = "\n" + line.substring(0, fence) + "\n";
-            int end = markdown.indexOf(closing, lineEnd + 1);
-            check(end >= 0, "each dynamic Markdown fence has an exact closing delimiter");
-            result.add(new Block(line.substring(fence), markdown.substring(lineEnd + 1, end), fence));
-            cursor = end + closing.length();
+    /** Strip only Markdown formatting to verify that the complete source text survives. */
+    private static String sourceBody(String markdown, int index) {
+        java.util.regex.Matcher header = java.util.regex.Pattern.compile("(?m)^\\d{2}:\\d{2} [^\\r\\n]+：\\n\\n").matcher(markdown);
+        for (int i = 0; i <= index; i++) check(header.find(), "each message has a readable conversation header");
+        int start = header.end();
+        if (markdown.startsWith("> > ", start)) {
+            int separator = markdown.indexOf("\n>\n", start);
+            check(separator >= 0, "quote preview is separated from the sender's body");
+            start = separator + 3;
         }
-        return result;
+        int end = markdown.indexOf("\n\n", start);
+        check(end >= 0, "message body is separated from the following message");
+        String text = markdown.substring(start, end).replaceAll("(?m)^> ", "")
+                .replaceAll("  (\\r\\n|\\r|\\n)", "$1");
+        StringBuilder original = new StringBuilder();
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (c == '\\' && i + 1 < text.length()) c = text.charAt(++i);
+            original.append(c);
+        }
+        return original.toString();
     }
     private static String repeat(String value, int count) { StringBuilder text = new StringBuilder(value.length() * count); for (int i = 0; i < count; i++) text.append(value); return text.toString(); }
     private static void fails(Runnable action, String reason) { try { action.run(); } catch (IllegalArgumentException expected) { check(expected.getMessage() != null && !expected.getMessage().isEmpty(), "validation gives a usable fixed explanation"); return; } throw new AssertionError(reason); }

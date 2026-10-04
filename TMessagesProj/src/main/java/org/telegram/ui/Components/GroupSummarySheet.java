@@ -924,10 +924,10 @@ public final class GroupSummarySheet {
         addText("导出待总结消息", true);
         addText(exportRangeLabel(request), false);
         addText("消息选择：" + filterLabel(request.filters), false);
-        addText("文件包含消息原文、发言者、时间、回复关系及当前总结方向。导出不会调用模型，也不会保存摘要历史或更新总结进度。", false);
+        addText("推荐群聊对话格式：按时间显示谁说了什么、谁回复了谁，可直接阅读或交给 AI。文件会附带当前总结方向。", false);
         addText("先读取并核对范围，再由你选择保存位置或分享应用；不会自动上传。", false);
-        addAction("Markdown（便于阅读和交给模型）", () -> startExport(request, SummaryChatExport.Format.MARKDOWN, prompt));
-        addAction("JSON（保留结构化字段）", () -> startExport(request, SummaryChatExport.Format.JSON, prompt));
+        addAction("群聊对话（Markdown，推荐）", () -> startExport(request, SummaryChatExport.Format.MARKDOWN, prompt));
+        addAction("JSON（完整数据）", () -> startExport(request, SummaryChatExport.Format.JSON, prompt));
         addAction("返回范围选择", this::showSelection);
     }
 
@@ -990,7 +990,7 @@ public final class GroupSummarySheet {
             return;
         }
         org.telegram.tgnet.TLRPC.Chat chat = MessagesController.getInstance(account).getChat(-dialogId);
-        String title = chat == null || chat.title == null ? "聊天 " + (-dialogId) : chat.title;
+        String title = chat == null || chat.title == null ? "群聊" : chat.title;
         org.telegram.tgnet.TLRPC.TL_forumTopic topic = topicId == 0 ? null
                 : MessagesController.getInstance(account).getTopicsController().findTopic(-dialogId, topicId);
         SummaryChatExport.Metadata metadata = new SummaryChatExport.Metadata(dialogId, title, topicId,
@@ -1046,7 +1046,7 @@ public final class GroupSummarySheet {
         }
         if (task.history.hasMore) addText("固定范围还有后续消息，本文件只包含本批，不能视为全部范围。", true);
         if (task.file != null) {
-            addText("缺失回复目标：" + task.missingReplies + " 条回复的目标不在导出文件中；不会补取范围外的原文，也不会猜测删除、筛除等原因。", false);
+            if (task.missingReplies > 0) addText("有 " + task.missingReplies + " 条回复的原消息未包含在本次导出中。", false);
             addText(task.file.file.getName() + " · " + String.format(Locale.US, "%.1f KiB", task.file.bytes / 1024.0), false);
             addText("文件包含可识别发言者的原文。保存或分享由你选择；交给系统分享后临时文件保留约 24 小时，应用运行时清理，进程退出后会在后续导出时清理过期文件。", false);
         }

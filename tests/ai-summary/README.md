@@ -113,15 +113,50 @@ creating an unrun manual evaluation record, and
 [device validation](../../docs/mnn-device-validation.zh-CN.md) for the remaining
 phone/MNN checks.
 
-## Export revision: regression and APK build passed
+## Chat-style Markdown revision (APK build passed)
 
-The new chat-text export is implemented; its local regression and final
-frozen-source Android compilation passed. The full APK/CI also passed;
-real-device testing has not run. Its scope is the existing RECENT/TODAY/SINCE/UNREAD loading
-and filtering flow, with no model calls, read-marker updates, summary archive
-writes, or summary cursor commits. Markdown is the first format offered; users
-explicitly choose it or the full structured JSON format. Both include the current
-prompt direction separately from original messages.
+The recommended format is now a readable chat transcript:
+`群聊对话（Markdown，推荐）`, alongside `JSON（完整数据）`. Implementation and
+168 export assertions passed; Android Java compilation passed in 1 minute 3 seconds,
+with all 2,834 tracked Java/XML files unchanged during compilation. Source
+[cc7f912](https://github.com/Naza3/Telegram/commit/cc7f912afec92f453754fe7cd9ec710dac3a3df0)
+has been pushed; [APK CI 37167137561](https://github.com/Naza3/Telegram/actions/runs/37167137561) passed in 18 minutes 21 seconds.
+The full CI run passed 15 JVM classes: 59 HTTP cases and 1,308 other core assertions
+(including the 168 export assertions), plus 24 fixture checks and 7 build-configuration tests.
+APK signature, 16 KB alignment and ARM64 checks passed; its public signing certificate
+matches the previous Telegram CI build. [Download APK and checksum](https://github.com/Naza3/Telegram/actions/runs/37167137561/artifacts/11290681738);
+the artifact expires at 2026-10-18 01:27:17 UTC.
+The previous APK below does not include the new layout. Real-device testing has not run.
+
+Markdown has a short Chinese header for the chat, range, count, necessary
+coverage limits and current prompt, followed by local-date groups and
+`HH:mm 姓名 说` / `HH:mm 姓名 回复 姓名`. Message bodies remain complete in
+blockquotes. Nested reply previews are limited to 80 Unicode code points plus
+an ellipsis: `引用片段` comes from Telegram quote metadata, while `回复片段`
+comes from the parent body already present in this export. Unknown or absent
+targets say `回复 未导出的消息` without guessing a sender. Distinct known sender
+IDs sharing a display name get natural ordinals; all-topic transcripts use General
+and natural topic ordinals within the file. See the short
+[conversation example](../../docs/mnn-group-summary.zh-CN.md).
+
+JSON schema version 1 and its complete fields remain unchanged. Choose JSON for
+full quote metadata and machine processing; the readable Markdown format does
+not promise lossless reconstruction of individual metadata fields. The 168 export assertions
+cover the transcript layout, Unicode preview boundaries, JSON fields, full message
+bodies and the existing size limit. The same three-message synthetic example
+produced byte-for-byte identical JSON before and after the change. Its readable
+Markdown decreased from 4,103 to 582 UTF-8 bytes without dropping message bodies;
+this example is not a general size guarantee.
+
+## Validated original export baseline
+
+The original export revision passed local regression, frozen-source Android
+compilation and full APK/CI. Its scope is the existing
+RECENT/TODAY/SINCE/UNREAD loading and filtering flow, with no model calls,
+read-marker updates, summary archive writes, or summary cursor commits.
+Users explicitly choose a format; both include the current prompt direction
+separately from original messages. These scope and delivery rules remain in the
+chat-style revision.
 
 The export checks cover compound dialog/message identities, reply targets
 inside versus outside the final filtered set, per-message topic identity,
@@ -131,14 +166,14 @@ trigger extra history requests or invented explanations. The existing 45-second
 history page timeout remains; no new file-write timeout is promised.
 
 `SummaryChatExport` is a pure formatter with no network or Android dependencies;
-`SummaryChatExportTest` passed 97 assertions in this revision. JSON schema version 1
+`SummaryChatExportTest` passed 97 assertions in the original export revision. JSON schema version 1
 uses string IDs, `dialog_id:message_id` compound keys, `reply_to.in_export`, and
 per-message `topic_id`/`quote_text`. Unknown reply-dialog IDs must not resolve to
 same-numbered messages in the current chat; quote excerpts are not recovered
 parent-message bodies. The formatter also rejects more than 10,000 messages;
 this bound does not expand the history loader's existing per-range limits.
 
-The integrated local run on 2026-10-04 passed 15 JVM classes: 59 HTTP cases and
+The original export's integrated local run on 2026-10-04 passed 15 JVM classes: 59 HTTP cases and
 1,237 other core assertions, including the 97 export assertions,
 `SummaryHistoryRangeTest` with 17 groups/125 assertions, and
 `SummaryHistoryLoaderTest` with 14 groups/92 assertions. All 24 synthetic fixtures
@@ -147,13 +182,15 @@ in 1 minute, with all 2,747 Java/XML files unchanged before and after compilatio
 Source [c78b111242985bddf2551e2f1fd9ec42588837e0](https://github.com/Naza3/Telegram/commit/c78b111242985bddf2551e2f1fd9ec42588837e0)
 has been pushed; [APK CI 37163785988](https://github.com/Naza3/Telegram/actions/runs/37163785988)
 passed in 13 minutes 44 seconds, including signature, 16 KB alignment, ARM64 ABI
-and artifact upload checks. [Download APK and checksum](https://github.com/Naza3/Telegram/actions/runs/37163785988/artifacts/11288507718).
-The artifact expires at 2026-10-18 00:17:57 UTC. No device-test success is claimed.
+and artifact upload checks. [Download the previous APK and checksum](https://github.com/Naza3/Telegram/actions/runs/37163785988/artifacts/11288507718).
+The artifact expires at 2026-10-18 00:17:57 UTC. It does not contain the chat-style
+Markdown revision. No device-test success is claimed.
 
 Android SAF save results, FileProvider grants and cache cleanup, external file
 providers, share-sheet return paths, account changes and dismissed windows need
-the new X01–X14 cases in the [device checklist](../../docs/mnn-device-validation.zh-CN.md).
-The JVM harness does not establish those Android behaviors. Export does not
+X01–X14 in the [device checklist](../../docs/mnn-device-validation.zh-CN.md).
+X15–X16 add phone readability, reply-preview and unchanged-JSON checks for the
+new layout. All remain unrun. The JVM harness does not establish those Android behaviors. Export does not
 require MNN to run, but still reads the authorized range through Telegram.
 
 ## Validated persistent-history baseline and limits

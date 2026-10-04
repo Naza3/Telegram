@@ -143,6 +143,16 @@ jobs:
       - name: Verify native Telegram publish entities
         run: bash tests/ai-summary/run-publish-entities.sh
 
+      - name: Verify group filtering and local deleted-message records
+        env:
+          AI_SUMMARY_TOOLS_DIR: ${{ env.MNN_BUILD_DIR }}/ai-summary-tools
+        run: |
+          bash tests/group-messages/run-filter.sh
+          bash tests/group-messages/run-settings.sh
+          bash tests/group-messages-store/run.sh
+          bash tests/group-messages/run-revoked.sh
+          bash tests/group-messages/run-revoked-boundary.sh
+
       - name: Verify and prepare the APK
         shell: bash
         run: |

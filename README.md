@@ -3,6 +3,9 @@
 [Telegram](https://telegram.org) is a messaging app with a focus on speed and security. It’s superfast, simple and free.
 This repo contains the official source code for [Telegram App for Android](https://play.google.com/store/apps/details?id=org.telegram.messenger).
 
+This fork adds local/OpenAI-compatible [AI group summaries](docs/mnn-group-summary.zh-CN.md)
+and optional [group message folding, hiding and local deleted-text records](docs/group-message-management.zh-CN.md).
+
 ## Creating your Telegram Application
 
 We welcome all developers to use our API and source code to create applications on our platform.

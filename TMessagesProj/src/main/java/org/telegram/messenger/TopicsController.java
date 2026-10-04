@@ -726,6 +726,10 @@ public class TopicsController extends BaseController {
         deleteTopicHistory.peer = getMessagesController().getInputPeer(-chatId);
         deleteTopicHistory.top_msg_id = topicId;
         if (offset == 0) {
+            final long retainedOwner = getUserConfig().getClientUserId();
+            getMessagesStorage().getStorageQueue().postRunnable(() ->
+                    org.telegram.messenger.groupmessages.DeletedGroupMessages.removeTopic(
+                            currentAccount, retainedOwner, -chatId, topicId));
             getMessagesStorage().removeTopic(-chatId, topicId);
         }
         ConnectionsManager.getInstance(currentAccount).sendRequest(deleteTopicHistory, new RequestDelegate() {

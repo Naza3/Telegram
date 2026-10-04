@@ -1721,7 +1721,7 @@ public final class GroupSummarySheet {
         EditTextBoldCursor outputTokens = edit("512", Integer.toString(config.maxOutputTokens),
                 InputType.TYPE_CLASS_NUMBER);
         addText("MNN 本机 API 最高支持 2048，建议先用 512；其他服务按其限制填写。", false);
-        addText("上下文字符预算（2048–32000）", true);
+        addText("上下文字符预算（2048–" + AiSummarySettings.MAX_INPUT_CHARACTER_BUDGET + "）", true);
         EditTextBoldCursor contextBudget = edit("6000", Integer.toString(config.inputCharacterBudget),
                 InputType.TYPE_CLASS_NUMBER);
         addText("这是保守的字符估计，不是模型 token 数。输出按每 token 预留 4 字符，此外还需容纳规则、补充要求和聊天内容。", false);
@@ -1782,8 +1782,8 @@ public final class GroupSummarySheet {
         } catch (NumberFormatException ignored) {
             inputCharacterBudget = 0;
         }
-        if (inputCharacterBudget < 2048 || inputCharacterBudget > 32000) {
-            contextBudget.setError("请输入 2048–32000 之间的值");
+        if (inputCharacterBudget < 2048 || inputCharacterBudget > AiSummarySettings.MAX_INPUT_CHARACTER_BUDGET) {
+            contextBudget.setError("请输入 2048–" + AiSummarySettings.MAX_INPUT_CHARACTER_BUDGET + " 之间的值");
             contextBudget.requestFocus();
             return null;
         }

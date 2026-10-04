@@ -11,7 +11,7 @@ public final class PromptOptions {
     public static final String TODOS = "todos";
     public static final int MAX_CUSTOM_CODE_POINTS = 1000;
     public static final int TEMPLATE_VERSION = 1;
-    public static final int BUILTIN_RULES_VERSION = 2;
+    public static final int BUILTIN_RULES_VERSION = 3;
     public static final PromptOptions DEFAULT = new PromptOptions(GENERAL, "");
 
     public final String templateId;

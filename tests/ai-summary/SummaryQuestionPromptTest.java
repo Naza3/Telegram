@@ -16,6 +16,7 @@ public final class SummaryQuestionPromptTest {
     public static void main(String[] args) {
         roundsAndUnicode();
         fullHistoryBudget();
+        expandedContextBudget();
         stableSourcesAndInjectionBoundaries();
         evidenceValidation();
         multipleEvidenceMerges();
@@ -80,6 +81,23 @@ public final class SummaryQuestionPromptTest {
         }
         check(restored.size() == 2 && restored.get("[m1]").toString().equals(messages.get(0).text)
                 && restored.get("[m2]").toString().equals(messages.get(1).text), "stable original refs preserve all Unicode text without history-driven truncation");
+    }
+
+    private static void expandedContextBudget() {
+        check(SummaryQuestionPrompt.dataBudget(OPTIONS, "哪些事项已确认？", Collections.emptyList(), 64000, 8192) > 20000,
+                "64k context accounts for the unchanged full output reserve");
+        fails(() -> SummaryQuestionPrompt.dataBudget(OPTIONS, "问题", Collections.emptyList(), 64001, 512),
+                "question budget rejects 64001 before producing a request");
+        List<SummaryMessage> sources = Collections.singletonList(new SummaryMessage(-10, 10, 1700000000,
+                "甲", repeat("完整原文。", 7000)));
+        List<String> chunks = SummaryQuestionPrompt.sourceChunks(sources, OPTIONS, "总结依据？", Collections.emptyList(), 64000, 512);
+        check(chunks.size() == 1, "64k question source can exceed the previous 32k bound without splitting");
+        String prompt = SummaryQuestionPrompt.sourcePrompt(chunks.get(0), 1, 1, OPTIONS, "总结依据？", Collections.emptyList(), 64000, 512);
+        check(prompt.length() > 32000 && prompt.length() + SummaryQuestionPrompt.SYSTEM_PROMPT.length()
+                        + AiSummaryPrompt.outputReserveCharacters(512) <= 64000,
+                "large question request fits the expanded total estimate");
+        String restored = new JSONObject(chunks.get(0).trim()).getString("text");
+        check(restored.equals(sources.get(0).text), "expanded question budget preserves full source text");
     }
 
     private static void evidenceValidation() {

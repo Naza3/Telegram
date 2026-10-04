@@ -682,6 +682,9 @@ public final class AiSummaryClient {
         if (status == 401 || status == 403 || (status >= 300 && status < 400)) {
             return httpError(status);
         }
+        if (status == 400 && isMnnOutputLimitError(detail)) {
+            return "模型 API 最大输出仅支持 1–2048 tokens，请将最大输出设为 2048 或更小。";
+        }
         String lower = detail.toLowerCase(Locale.US);
         if (lower.contains("context_length_exceeded") || lower.contains("maximum context length")
                 || lower.contains("context length exceeded") || lower.contains("context window") || lower.contains("prompt too long")
@@ -700,6 +703,15 @@ public final class AiSummaryClient {
             return "模型服务已连接，但生成失败（HTTP 200 Error）。请在 MNN Chat 中检查模型和服务状态后重试。";
         }
         return httpError(status);
+    }
+
+    private static boolean isMnnOutputLimitError(String detail) {
+        try {
+            JSONObject error = new JSONObject(detail).optJSONObject("error");
+            return error != null && "Invalid request: max_tokens must be 1..2048".equals(error.opt("message"));
+        } catch (JSONException ignored) {
+            return false;
+        }
     }
 
     private static final class Completion {

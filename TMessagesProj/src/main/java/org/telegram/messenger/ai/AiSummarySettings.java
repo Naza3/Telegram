@@ -16,6 +16,7 @@ public final class AiSummarySettings {
     public static final int DEFAULT_MAX_OUTPUT_TOKENS = 512;
     /** Conservative character estimate, not the model tokenizer's context limit. */
     public static final int DEFAULT_INPUT_CHARACTER_BUDGET = 6000;
+    public static final int MAX_INPUT_CHARACTER_BUDGET = 64000;
     private static final String PREFIX = "local_ai_summary_";
 
     private AiSummarySettings() {
@@ -126,8 +127,8 @@ public final class AiSummarySettings {
         if (config.maxOutputTokens < 64 || config.maxOutputTokens > 8192) {
             return "最大输出 tokens 必须在 64 到 8192 之间。";
         }
-        if (config.inputCharacterBudget < 2048 || config.inputCharacterBudget > 32000) {
-            return "上下文字符预算须在 2048–32000 之间。这是保守估算，不是精确 token 数。";
+        if (config.inputCharacterBudget < 2048 || config.inputCharacterBudget > MAX_INPUT_CHARACTER_BUDGET) {
+            return "上下文字符预算须在 2048–" + MAX_INPUT_CHARACTER_BUDGET + " 之间。这是保守估算，不是精确 token 数。";
         }
         if (containsControl(config.apiKey)) {
             return "API Key 不能包含换行或控制字符。";

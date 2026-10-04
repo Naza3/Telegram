@@ -169,7 +169,10 @@ public final class SummaryQuestionPrompt {
 
     public static int dataBudget(PromptOptions options, String question, List<Turn> history,
             int contextChars, int outputTokens) {
-        if (contextChars < 2048 || contextChars > 32000) throw new IllegalArgumentException("上下文字符预算必须在2048到32000之间。");
+        if (contextChars < 2048 || contextChars > AiSummarySettings.MAX_INPUT_CHARACTER_BUDGET) {
+            throw new IllegalArgumentException("上下文字符预算必须在2048到"
+                    + AiSummarySettings.MAX_INPUT_CHARACTER_BUDGET + "之间。");
+        }
         int remaining = contextChars - SYSTEM_PROMPT.length() - task(options, question, history).length()
                 - STAGE_RESERVE_CHARACTERS - AiSummaryPrompt.outputReserveCharacters(outputTokens);
         if (remaining < MIN_DATA_CHARACTERS) {

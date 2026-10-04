@@ -21,11 +21,20 @@ public final class AiSummarySettingsOptionsTest {
         check(!loaded.stream && loaded.inputCharacterBudget == 6000, "account slot cannot inherit previous runtime settings");
         check(AiSummarySettings.validate(new AiSummarySettings.Config(old.baseUrl, old.model, "", 512, true, 2047)) != null,
                 "too-small budget rejected before sending");
-        check(AiSummarySettings.validate(new AiSummarySettings.Config(old.baseUrl, old.model, "", 512, true, 32001)) != null,
+        check(AiSummarySettings.validate(new AiSummarySettings.Config(old.baseUrl, old.model, "", 512, true, 64001)) != null,
                 "unbounded budget rejected");
         check(AiSummarySettings.validate(new AiSummarySettings.Config(old.baseUrl, old.model, "", 512, true, 32000)) == null,
                 "supported profile accepted");
-        System.out.println("AiSummarySettingsOptionsTest: 6 assertions passed");
+        AiSummarySettings.Config maximum = new AiSummarySettings.Config(old.baseUrl, old.model, "", 8192, true, 64000);
+        check(AiSummarySettings.validate(maximum) == null && AiSummarySettings.MAX_INPUT_CHARACTER_BUDGET == 64000,
+                "64k context accepted without reducing the existing 8192 output limit");
+        AiSummarySettings.save(account, 2000, maximum);
+        loaded = AiSummarySettings.load(account, 2000);
+        check(loaded.inputCharacterBudget == 64000 && loaded.maxOutputTokens == 8192,
+                "64k profile survives save and reload without normalization to the old bound");
+        check(AiSummarySettings.validate(new AiSummarySettings.Config(old.baseUrl, old.model, "", 8193, true, 64000)) != null,
+                "output upper bound remains unchanged");
+        System.out.println("AiSummarySettingsOptionsTest: 9 assertions passed");
     }
 
     private static void check(boolean condition, String message) {

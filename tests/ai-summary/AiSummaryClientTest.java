@@ -200,6 +200,7 @@ public final class AiSummaryClientTest {
             test("detailed HTTP failures remain private to the fixed-text diagnostic", AiSummaryClientTest::diagnosticHttpIsolation);
             test("cancellation suppresses queued detailed diagnostic errors", AiSummaryClientTest::cancelDetailedDiagnostic);
             test("actual MNN local API contract accepts every request path without unsupported sampling options", AiSummaryClientTest::mnnLocalApiContract);
+            test("MNN output boundary is explained without classifying every HTTP 400 as an output error", AiSummaryClientTest::mnnOutputLimitContract);
             test("custom direction reaches every source and at least two merge rounds", AiSummaryClientTest::directionAcrossMergeRounds);
             test("source citations cannot escape their chunk via forged text", AiSummaryClientTest::sourceReferenceMembership);
             test("merge citations cannot reintroduce references absent from partials", AiSummaryClientTest::mergeReferenceMembership);
@@ -225,6 +226,7 @@ public final class AiSummaryClientTest {
             test("cancelling a live SSE suppresses later partials and final callback", AiSummaryClientTest::cancelLiveStream);
             test("cancellation suppresses a queued sensitive request input", AiSummaryClientTest::cancelQueuedRequestInput);
             test("configured budget reaches every source and merge request", AiSummaryClientTest::configuredBudget);
+            test("64k budget carries a complete large Chinese request through expanded MNN limits", AiSummaryClientTest::expandedMnnBudget);
             test("impossible input/output budget fails before sending messages", () -> {
                 requestHistory.clear();
                 AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
@@ -429,7 +431,8 @@ public final class AiSummaryClientTest {
 
     private static void mnnLocalApiContract() throws Exception {
         // Mirrors Naza3/MNN feature/mnn-chat-local-api LocalApiRoutes.parseLocalPrompt
-        // at 097ebe: this is a protocol fixture, not a claim of a real phone/model run.
+        // with expanded 256 KiB / 65536-character limits; this is a protocol fixture,
+        // not a claim of a real phone/model run.
         requestHistory.clear();
         AtomicInteger accepted = new AtomicInteger();
         replyGenerator.set(body -> {
@@ -474,7 +477,7 @@ public final class AiSummaryClientTest {
     }
 
     private static String mnnLocalRequestFailure(JSONObject body) {
-        if (body.toString().getBytes(StandardCharsets.UTF_8).length > 64 * 1024) return "Request body exceeds 64 KiB";
+        if (body.toString().getBytes(StandardCharsets.UTF_8).length > 256 * 1024) return "Request body exceeds 256 KiB";
         Object model = body.opt("model");
         if (model != null && model != JSONObject.NULL && !"mnn-local".equals(model) && !"loaded-fixture-model".equals(model)) return "Requested model is not loaded";
         for (String unsupported : List.of("tools", "tool_choice", "functions", "function_call", "response_format", "temperature", "top_p", "stop", "logprobs", "frequency_penalty", "presence_penalty", "n")) {
@@ -498,9 +501,85 @@ public final class AiSummaryClientTest {
         }
         if (!hasUser) return "A user message is required";
         if (java.util.regex.Pattern.compile("<\\s*/?\\s*(img|image|audio|video)\\b", java.util.regex.Pattern.CASE_INSENSITIVE).matcher(allText).find()) return "Media markup is not supported";
-        if (characters > 32768) return "Message text exceeds 32768 characters";
+        if (characters > 65536) return "Message text exceeds 65536 characters";
         if (body.has("stream") && !(body.opt("stream") instanceof Boolean)) return "stream must be a boolean";
         return null;
+    }
+
+    private static void mnnOutputLimitContract() throws Exception {
+        replyGenerator.set(body -> {
+            String failure = mnnLocalRequestFailure(body);
+            return failure == null ? new Reply(200, completion("有效摘要 [m1]"))
+                    : new Reply(400, new JSONObject().put("error", new JSONObject()
+                        .put("message", "Invalid request: " + failure).put("type", "local_api_error")).toString());
+        });
+        AiSummaryClient client = new AiSummaryClient();
+        try {
+            for (int limit : List.of(2000, 2001, 2048, 2049)) {
+                requestHistory.clear();
+                Result result = new Result();
+                client.summarize(new AiSummarySettings.Config(base, "mnn-local", "OUTPUT_LIMIT_PRIVATE_KEY", limit, false, 16000), MESSAGES, result);
+                await(result);
+                check(requestHistory.size() == 1 && requestHistory.get(0).getInt("max_tokens") == limit,
+                        "output boundary was silently capped or retried before reaching MNN");
+                if (limit <= 2048) check(result.summary != null, "valid MNN output value was rejected: " + limit);
+                else check(result.error != null && result.error.contains("1–2048") && result.error.contains("2048 或更小")
+                                && !result.error.contains("OUTPUT_LIMIT_PRIVATE_KEY") && !result.error.contains(MESSAGES.get(0).text),
+                        "explicit MNN output limit was generic or leaked input/authentication");
+            }
+        } finally {
+            client.cancel(); replyGenerator.set(null);
+        }
+        for (String unrelated : List.of("PRIVATE max_tokens must be 1..2048",
+                "{\"error\":{\"message\":\"Other request failure max_tokens must be 1..2048 PRIVATE\"}}",
+                "{\"messages\":[{\"content\":\"Invalid request: max_tokens must be 1..2048\"}]}")) {
+            Result result = invoke(400, unrelated, config("local", "PRIVATE"));
+            check(result.error != null && result.error.contains("HTTP 400") && !result.error.contains("1–2048")
+                            && !result.error.contains("PRIVATE"), "unrelated 400 was misclassified or exposed raw details");
+        }
+    }
+
+    private static void expandedMnnBudget() throws Exception {
+        String original = "讨论原文".repeat(10000);
+        List<SummaryMessage> messages = List.of(new SummaryMessage(-100, 1, 1_700_000_000, "甲", original));
+        replyGenerator.set(body -> {
+            String failure = mnnLocalRequestFailure(body);
+            if (failure != null) return new Reply(400, new JSONObject().put("error", failure).toString());
+            String answer = "【结论】完整大范围摘要 [m1]";
+            return body.getBoolean("stream") ? sse(delta(answer) + finish("stop") + "data: [DONE]\n\n")
+                    : new Reply(200, completion(answer));
+        });
+        AiSummaryClient client = new AiSummaryClient();
+        try {
+            for (boolean streaming : List.of(false, true)) {
+                requestHistory.clear();
+                AiSummarySettings.Config config = new AiSummarySettings.Config(base, "mnn-local", "LARGE_INPUT_AUTH", 512, streaming, 64000);
+                Result result = new Result();
+                client.summarize(config, messages, result); await(result);
+                check(result.summary != null && requestHistory.size() == 1, "64k source was rejected or unnecessarily split: " + result.error);
+                JSONObject body = requestHistory.get(0);
+                String system = body.getJSONArray("messages").getJSONObject(0).getString("content");
+                String user = body.getJSONArray("messages").getJSONObject(1).getString("content");
+                int characters = system.length() + user.length();
+                int bytes = body.toString().getBytes(StandardCharsets.UTF_8).length;
+                check(characters > 32768 && characters + AiSummaryPrompt.outputReserveCharacters(512) <= 64000,
+                        "fixture did not exercise the old character limit or exceeded the new client budget");
+                check(bytes > 64 * 1024 && bytes <= 256 * 1024, "large Chinese request did not cross the old wire body limit safely");
+                check(user.contains(AiSummaryPrompt.SOURCE_DATA_MARKER) && user.contains(original), "compact source lost complete text");
+                check("Bearer LARGE_INPUT_AUTH".equals(lastAuthorization.get()) && body.getInt("max_tokens") == 512,
+                        "expanded input budget changed authentication or output limit");
+                assertRequestInputs(result, requestHistory);
+                check(mnnLocalRequestFailure(new JSONObject(body.toString()).put("max_tokens", 2049)) != null,
+                        "MNN output limit unexpectedly increased with the input budget");
+            }
+            requestHistory.clear();
+            Result invalid = new Result();
+            client.summarize(new AiSummarySettings.Config(base, "mnn-local", "", 512, false, 64001), messages, invalid);
+            await(invalid);
+            check(invalid.error != null && requestHistory.isEmpty(), "64001 budget reached HTTP instead of failing validation");
+        } finally {
+            client.cancel(); replyGenerator.set(null);
+        }
     }
 
     private static void diagnosticConfiguredOutputLimit() throws Exception {
@@ -598,7 +677,7 @@ public final class AiSummaryClientTest {
         requestHistory.clear();
         replyGenerator.set(body -> {
             String prompt = body.getJSONArray("messages").getJSONObject(1).getString("content");
-            boolean source = prompt.contains("消息数据（JSONL）：\n");
+            boolean source = prompt.contains(AiSummaryPrompt.SOURCE_DATA_MARKER);
             String data = dataPart(prompt, source);
             int ref;
             String marker;
@@ -644,7 +723,7 @@ public final class AiSummaryClientTest {
                 new SummaryMessage(-100, 2, 1_700_000_001, "乙", "later message"));
         replyGenerator.set(body -> {
             String prompt = body.getJSONArray("messages").getJSONObject(1).getString("content");
-            return new Reply(200, completion(prompt.contains("消息数据（JSONL）：\n") ? "源摘要 [m1]" : "错误合并 [m2]"));
+            return new Reply(200, completion(prompt.contains(AiSummaryPrompt.SOURCE_DATA_MARKER) ? "源摘要 [m1]" : "错误合并 [m2]"));
         });
         AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
         try {
@@ -667,7 +746,8 @@ public final class AiSummaryClientTest {
     }
 
     private static String dataPart(String prompt, boolean source) {
-        String marker = source ? "消息数据（JSONL）：\n" : "摘要数据（JSONL）：\n";
+        String marker = source ? AiSummaryPrompt.SOURCE_DATA_MARKER : "摘要数据（JSONL）：\n";
+        check(prompt.contains(marker), "request data marker missing");
         return prompt.substring(prompt.lastIndexOf(marker) + marker.length());
     }
 
@@ -831,7 +911,7 @@ public final class AiSummaryClientTest {
         requestHistory.clear();
         replyGenerator.set(body -> {
             String prompt = body.getJSONArray("messages").getJSONObject(1).getString("content");
-            boolean source = prompt.contains("消息数据（JSONL）：\n");
+            boolean source = prompt.contains(AiSummaryPrompt.SOURCE_DATA_MARKER);
             String data = dataPart(prompt, source);
             if (source) sources.incrementAndGet();
             else if (data.contains("MERGED_STAGE")) secondMergeRound.incrementAndGet();

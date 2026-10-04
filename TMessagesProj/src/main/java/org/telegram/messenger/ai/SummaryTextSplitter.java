@@ -18,6 +18,11 @@ import java.util.List;
 public final class SummaryTextSplitter {
     private SummaryTextSplitter() { }
 
+    /** Additional restrictions on internal UTF-16 cuts; outer text boundaries are implicit. */
+    public interface BoundaryPolicy {
+        boolean canBreakAt(int offset);
+    }
+
     public static final class Range {
         public final int start;
         public final int end;
@@ -51,8 +56,18 @@ public final class SummaryTextSplitter {
      * anywhere in the input throws instead of returning a partially sendable list.
      */
     public static List<Range> splitRanges(CharSequence text, int maxUtf16Length) {
+        return splitRanges(text, maxUtf16Length, offset -> true);
+    }
+
+    /**
+     * Applies the policy only at existing Unicode-cluster boundaries. Preferred
+     * paragraph/newline/space cuts must also be permitted; a forbidden preferred
+     * cut cannot bypass the policy. No result is returned if any part cannot fit.
+     */
+    public static List<Range> splitRanges(CharSequence text, int maxUtf16Length, BoundaryPolicy policy) {
         if (text == null) throw new IllegalArgumentException("Text must not be null");
         if (maxUtf16Length <= 0) throw new IllegalArgumentException("Length limit must be positive");
+        if (policy == null) throw new IllegalArgumentException("Boundary policy must not be null");
         if (text.length() == 0) return Collections.emptyList();
         ArrayList<Range> ranges = new ArrayList<>();
         final int length = text.length();
@@ -62,6 +77,7 @@ public final class SummaryTextSplitter {
             int paragraph = -1;
             int newline = -1;
             int whitespace = -1;
+            int allowedEnd = -1;
             int lineBreaks = 0;
             while (scan < length) {
                 int end = clusterEnd(text, scan, length);
@@ -70,14 +86,18 @@ public final class SummaryTextSplitter {
                 }
                 if (end - start > maxUtf16Length) break;
                 int first = Character.codePointAt(text, scan);
+                boolean allowed = end == length || policy.canBreakAt(end);
+                if (allowed) allowedEnd = end;
                 if (isLineBreak(first)) {
                     lineBreaks++;
-                    newline = end;
-                    if (lineBreaks >= 2 || first == 0x2029) paragraph = end;
+                    if (allowed) {
+                        newline = end;
+                        if (lineBreaks >= 2 || first == 0x2029) paragraph = end;
+                    }
                 } else if (!Character.isWhitespace(first) && !Character.isSpaceChar(first)) {
                     lineBreaks = 0;
                 }
-                if (Character.isWhitespace(first) || Character.isSpaceChar(first)) whitespace = end;
+                if (allowed && (Character.isWhitespace(first) || Character.isSpaceChar(first))) whitespace = end;
                 scan = end;
             }
             int end;
@@ -90,7 +110,10 @@ public final class SummaryTextSplitter {
             } else if (whitespace > start) {
                 end = whitespace;
             } else {
-                end = scan;
+                end = allowedEnd;
+            }
+            if (end <= start && allowedEnd < 0) {
+                throw new IllegalArgumentException("实体或受保护内容超过单条消息长度上限，无法安全拆分。");
             }
             // clusterEnd always advances; the explicit check prevents regressions
             // in boundary handling from becoming a send loop with empty messages.

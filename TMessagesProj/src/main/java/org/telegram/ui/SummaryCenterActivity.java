@@ -16,6 +16,7 @@ import org.telegram.messenger.AndroidUtilities;
 import org.telegram.messenger.ChatObject;
 import org.telegram.messenger.NotificationCenter;
 import org.telegram.messenger.MessageObject;
+import org.telegram.messenger.DialogObject;
 import org.telegram.messenger.ai.SummaryHistoryLoader;
 import org.telegram.messenger.ai.SummaryResultCache;
 import java.util.ArrayList;
@@ -41,6 +42,8 @@ public final class SummaryCenterActivity extends BaseFragment implements Notific
     private long dialogId, topicId;
     private int unreadLower = -1, unreadUpper = -1;
     private boolean entryUnreadSnapshot;
+    private SummaryHistoryLoader.Result selectedSnapshot;
+    private boolean selectedSnapshotInvalid;
     private boolean resumed, destroyed, invalidated, historyVisible;
     private LinearLayout root, newPage, sourceHeader;
     private FrameLayout pageHost;
@@ -68,6 +71,18 @@ public final class SummaryCenterActivity extends BaseFragment implements Notific
         this.entryUnreadSnapshot = entryUnreadSnapshot;
     }
 
+    public static SummaryCenterActivity forSelected(int account, long ownerId, long dialogId, long topicId,
+            SummaryHistoryLoader.Result snapshot) {
+        if (account < 0 || account >= UserConfig.MAX_ACCOUNT_COUNT || ownerId <= 0
+                || UserConfig.selectedAccount != account || UserConfig.getInstance(account).getClientUserId() != ownerId
+                || snapshot == null || !snapshot.matchesSelectedScope(account, ownerId, dialogId, topicId)) {
+            throw new IllegalArgumentException("所选消息已失效或账号已变化，请重新选择。");
+        }
+        SummaryCenterActivity center = new SummaryCenterActivity(account, dialogId, topicId, -1, -1, false);
+        center.selectedSnapshot = snapshot;
+        return center;
+    }
+
     @Override public boolean onFragmentCreate() {
         if (!super.onFragmentCreate() || !sameOwner()) return false;
         controller = SummaryTaskController.get(account);
@@ -90,7 +105,7 @@ public final class SummaryCenterActivity extends BaseFragment implements Notific
                 else if (id == SETTINGS && sameOwner()) openSettings();
             }
         });
-        actionBar.createMenu().addItem(SETTINGS, R.drawable.msg_settings).setContentDescription("MNN API 设置");
+        actionBar.createMenu().addItem(SETTINGS, R.drawable.msg_settings).setContentDescription("模型 API 配置");
         root = new LinearLayout(context);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(getThemedColor(Theme.key_windowBackgroundWhite));
@@ -144,6 +159,7 @@ public final class SummaryCenterActivity extends BaseFragment implements Notific
 
     @Override public void onFragmentDestroy() {
         destroyed = true;
+        selectedSnapshot = null;
         if (controller != null) controller.removeListener(taskListener);
         if (workbench != null) { workbench.dismiss(); workbench = null; }
         if (historyPanel != null) { historyPanel.destroy(); historyPanel = null; }
@@ -163,6 +179,7 @@ public final class SummaryCenterActivity extends BaseFragment implements Notific
 
     private void invalidateAccount() {
         invalidated = true;
+        selectedSnapshot = null;
         if (workbench != null) { workbench.dismiss(); workbench = null; }
         if (historyPanel != null) historyPanel.onPause();
         if (root != null) {
@@ -207,12 +224,19 @@ public final class SummaryCenterActivity extends BaseFragment implements Notific
             sourceHeader.addView(button(newPage.getContext(), topicId == 0 ? "全部话题 · 选择具体话题"
                     : "话题：" + (topic == null ? topicId : topic.title) + " · 更换", this::chooseTopic), LayoutHelper.createLinear(-1, -2));
         }
+        if (selectedSnapshot != null) sourceHeader.addView(label(newPage.getContext(),
+                "本次仅总结手动选择的文字；更换来源会放弃当前选择。"), LayoutHelper.createLinear(-1, -2));
         workbench = GroupSummarySheet.createEmbedded(this, account, dialogId, topicId, unreadLower, unreadUpper,
                 entryUnreadSnapshot, (sourceDialog, messageId) -> {
                     if (!sameOwner() || sourceDialog != dialogId) return;
                     Bundle args = new Bundle(); args.putLong("chat_id", -sourceDialog); args.putInt("message_id", messageId);
                     ChatActivity chatActivity = new ChatActivity(args); chatActivity.setCurrentAccount(account); presentFragment(chatActivity);
-                }, () -> showTab(true));
+                }, () -> showTab(true), selectedSnapshot);
+        workbench.setSelectedSnapshotCallbacks(() -> {
+            selectedSnapshot = null;
+            selectedSnapshotInvalid = false;
+        }, this::invalidateSelectedSnapshot);
+        if (selectedSnapshotInvalid) workbench.invalidateSelectedSourceSnapshot();
         newPage.addView(workbench.getContentView(), LayoutHelper.createLinear(-1, -2));
         workbench.setAttached(resumed && !historyVisible);
     }
@@ -267,6 +291,8 @@ public final class SummaryCenterActivity extends BaseFragment implements Notific
     }
 
     private void selectScope(long selectedDialog, long selectedTopic, boolean useEntry) {
+        selectedSnapshot = null;
+        selectedSnapshotInvalid = false;
         dialogId = selectedDialog; topicId = selectedTopic;
         entryUnreadSnapshot = useEntry;
         if (!useEntry) captureUnread();
@@ -311,17 +337,10 @@ public final class SummaryCenterActivity extends BaseFragment implements Notific
     }
 
     private void openSettings() {
-        SummaryTaskController.Session task = controller.current();
-        if (task != null && task.running()) {
-            showDialog(new AlertDialog.Builder(getParentActivity()).setTitle("任务正在进行")
-                    .setMessage("可在任务完成或停止后修改 API 设置。当前任务使用开始时的配置。").setPositiveButton("知道了", null).create());
-            return;
-        }
-        showTab(false);
-        if (workbench != null) { workbench.openSettings(); return; }
-        workbench = GroupSummarySheet.createEmbedded(this, account, 0, 0, -1, -1, false,
-                (source, message) -> {}, this::buildWorkbench);
-        newPage.addView(workbench.getContentView(), LayoutHelper.createLinear(-1, -2));
+        if (!sameOwner()) return;
+        presentFragment(new ApiProfilesActivity(account, ownerId, () -> {
+            if (sameOwner() && workbench != null) workbench.refreshApiSelection();
+        }));
     }
 
     private void readCheckpoint() {
@@ -370,6 +389,7 @@ public final class SummaryCenterActivity extends BaseFragment implements Notific
             if (chat == null || (Long) args[1] != (ChatObject.isChannel(chat) ? chat.id : 0)) return;
             for (int messageId : (ArrayList<Integer>) args[0]) {
                 SummaryResultCache.getInstance().invalidateMessage(account, ownerId, dialogId, messageId);
+                if (selectedSourceChanged(messageId, null, 0, false)) invalidateSelectedSnapshot();
                 workbench.onSourceDeleted(messageId);
             }
         } else if (id == NotificationCenter.replaceMessagesObjects && args.length >= 2 && (Long) args[0] == dialogId) {
@@ -377,15 +397,54 @@ public final class SummaryCenterActivity extends BaseFragment implements Notific
                 if (message == null || message.messageOwner == null || message.getDialogId() != dialogId) continue;
                 TLRPC.Message source = message.messageOwner;
                 SummaryResultCache.getInstance().invalidateMessage(account, ownerId, dialogId, source.id);
-                workbench.onSourceUpdated(source.id, source.message, source.edit_date,
-                        SummaryHistoryLoader.isUsableText(source, getConnectionsManager().getCurrentTime()));
+                boolean usable = SummaryHistoryLoader.isUsableText(source, getConnectionsManager().getCurrentTime())
+                        && !selectedMetadataChanged(source, chat);
+                if (selectedSourceChanged(source.id, source.message, source.edit_date, usable)) invalidateSelectedSnapshot();
+                workbench.onSourceUpdated(source.id, source.message, source.edit_date, usable);
             }
         } else if (id == NotificationCenter.chatInfoDidLoad || id == NotificationCenter.updateInterfaces) {
             if (chat == null || ChatObject.isKickedFromChat(chat) || chat.migrated_to != null) {
                 SummaryResultCache.getInstance().clearOwner(account, ownerId);
+                if (selectedSnapshot != null) invalidateSelectedSnapshot();
                 workbench.onAccessRevoked();
             }
         }
+    }
+
+    private boolean selectedSourceChanged(int messageId, String text, int editDate, boolean usable) {
+        if (selectedSnapshot == null) return false;
+        for (org.telegram.messenger.ai.SummaryMessage source : selectedSnapshot.messages) {
+            if (source.id == messageId && (!usable || source.editDate != editDate || !source.text.equals(text))) return true;
+        }
+        return false;
+    }
+
+    private boolean selectedMetadataChanged(TLRPC.Message message, TLRPC.Chat chat) {
+        if (selectedSnapshot == null) return false;
+        for (org.telegram.messenger.ai.SummaryMessage source : selectedSnapshot.messages) {
+            if (source.id != message.id) continue;
+            int replyId = 0;
+            long replyPeer = 0;
+            String quote = "";
+            if (message.reply_to != null && !message.reply_to.reply_to_scheduled && !message.reply_to.reply_to_ephemeral) {
+                if (message.reply_to.reply_to_msg_id > 0) {
+                    replyId = message.reply_to.reply_to_msg_id;
+                    replyPeer = message.reply_to.reply_to_peer_id == null ? dialogId
+                            : DialogObject.getPeerDialogId(message.reply_to.reply_to_peer_id);
+                }
+                if ((message.reply_to.flags & (1 << 6)) != 0 && message.reply_to.quote_text != null) quote = message.reply_to.quote_text;
+            }
+            return source.senderId != DialogObject.getPeerDialogId(message.from_id)
+                    || source.topicId != MessageObject.getTopicId(account, message, chat != null && chat.forum)
+                    || source.replyToId != replyId || source.replyToDialogId != replyPeer || !source.quoteText.equals(quote)
+                    || source.date != message.date || source.outgoing != message.out;
+        }
+        return false;
+    }
+
+    private void invalidateSelectedSnapshot() {
+        selectedSnapshotInvalid = true;
+        selectedSnapshot = null;
     }
 
     private TextView button(Context context, String value, Runnable action) {

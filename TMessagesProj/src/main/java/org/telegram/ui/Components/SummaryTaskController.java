@@ -72,6 +72,8 @@ public final class SummaryTaskController implements NotificationCenter.Notificat
         public AiSummaryClient.Progress progress;
         public AiSummaryClient.RequestStatus requestStatus;
         public final ArrayList<Input> inputs = new ArrayList<>();
+        /** Terminal metrics for actual model requests; usage is reported by the service, never estimated. */
+        public final ArrayList<AiSummaryClient.RequestMetrics> requestMetrics = new ArrayList<>();
         private final HashMap<Integer, SourceChange> pendingChanges = new HashMap<>();
         private final SummaryStateStore.CompletionToken completion = new SummaryStateStore.CompletionToken();
         private int inputCharacters;
@@ -98,11 +100,43 @@ public final class SummaryTaskController implements NotificationCenter.Notificat
 
     private static final class SourceChange {
         final String text; final int editDate; final boolean usable;
+        final SourceMetadata metadata;
         SourceChange(String text, int editDate, boolean usable) {
+            this(text, editDate, usable, null);
+        }
+        SourceChange(String text, int editDate, boolean usable, SourceMetadata metadata) {
             this.text = text; this.editDate = editDate; this.usable = usable;
+            this.metadata = metadata;
         }
         boolean changed(SummaryMessage source) {
-            return !usable || source.editDate != editDate || !source.text.equals(text);
+            return !usable || source.editDate != editDate || !source.text.equals(text)
+                    || metadata != null && metadata.changed(source);
+        }
+    }
+
+    /** Copy metadata immediately: pending notifications must not retain mutable Telegram messages. */
+    private static final class SourceMetadata {
+        final long senderId, topicId, replyDialogId;
+        final int date, replyId;
+        final boolean outgoing;
+        final String quote;
+        SourceMetadata(int account, long dialogId, TLRPC.Message message, boolean forum) {
+            senderId = org.telegram.messenger.DialogObject.getPeerDialogId(message.from_id);
+            topicId = MessageObject.getTopicId(account, message, forum);
+            date = message.date;
+            outgoing = message.out;
+            boolean ordinaryReply = message.reply_to != null && !message.reply_to.reply_to_scheduled
+                    && !message.reply_to.reply_to_ephemeral;
+            replyId = ordinaryReply && message.reply_to.reply_to_msg_id > 0 ? message.reply_to.reply_to_msg_id : 0;
+            replyDialogId = replyId == 0 ? 0 : message.reply_to.reply_to_peer_id == null ? dialogId
+                    : org.telegram.messenger.DialogObject.getPeerDialogId(message.reply_to.reply_to_peer_id);
+            quote = ordinaryReply && (message.reply_to.flags & (1 << 6)) != 0 && message.reply_to.quote_text != null
+                    ? message.reply_to.quote_text : "";
+        }
+        boolean changed(SummaryMessage source) {
+            return source.senderId != senderId || source.topicId != topicId || source.date != date
+                    || source.outgoing != outgoing || source.replyToId != replyId
+                    || source.replyToDialogId != replyDialogId || !source.quoteText.equals(quote);
         }
     }
 
@@ -171,6 +205,11 @@ public final class SummaryTaskController implements NotificationCenter.Notificat
             catch (IllegalArgumentException failure) { error = failure.getMessage(); }
         }
         if (error != null) { fail(task, error); return true; }
+        if (range.mode == GroupSummarySheet.RangeMode.SELECTED && (range.replayHistory == null
+                || !range.replayHistory.matchesSelectedScope(account, owner, dialogId, topicId))) {
+            fail(task, "选中的消息快照已失效，请返回聊天重新选择。");
+            return true;
+        }
         if (!canRead(task)) { invalidate(task, "来源聊天已不可访问，请重新选择。", true); return true; }
         if (!SummaryForegroundService.start(account, owner, task.taskId,
                 () -> { if (current == task) cancel(); }, message -> fail(task, message))) {
@@ -186,7 +225,8 @@ public final class SummaryTaskController implements NotificationCenter.Notificat
         publish();
         if (!active(task)) return true;
         if (range.replayHistory != null) {
-            loaded(task, range.replayHistory, range.replayMessages);
+            loaded(task, range.replayHistory,
+                    range.mode == GroupSummarySheet.RangeMode.SELECTED ? null : range.replayMessages);
             return true;
         }
         loader = new SummaryHistoryLoader(account, dialogId, topicId);
@@ -258,7 +298,9 @@ public final class SummaryTaskController implements NotificationCenter.Notificat
         task.coverage = history.coverageNote + (filtered.coverageNote.isEmpty() ? "" : "\n" + filtered.coverageNote);
         if (!task.range.includePublished) task.coverage += "\n原范围文字 " + history.messages.size()
                 + " 条；排除已确认发布的本人 AI 总结 " + excludedCount + " 条；筛选后实际输入 " + task.sources.size() + " 条。";
-        if (replay) task.coverage += "\n使用上次读取的原文快照；原文仅在本机任务内存中保留。";
+        if (task.range.mode == GroupSummarySheet.RangeMode.SELECTED) {
+            task.coverage += "\n仅总结手动选中的消息，不补抓历史、不改变增量进度；原文仅在本机任务内存中保留。";
+        } else if (replay) task.coverage += "\n使用上次读取的原文快照；原文仅在本机任务内存中保留。";
         if (!canRead(task)) { invalidate(task, "来源聊天已不可访问。", true); return; }
         if (task.sources.isEmpty()) {
             complete(task, task.filtered ? "本次范围没有匹配的文字，未调用模型；通用增量进度保持不变。"
@@ -300,6 +342,16 @@ public final class SummaryTaskController implements NotificationCenter.Notificat
                     task.inputs.add(new Input(task.requestStage, value));
                     task.inputCharacters += value.inputCharacters;
                 }
+                publish();
+            }
+            @Override public void onRequestMetrics(AiSummaryClient.RequestMetrics value) {
+                if (!active(task) || task.state != State.GENERATING || value == null
+                        || value.requestIndex <= 0 || value.requestIndex > 128
+                        || task.requestMetrics.size() >= 128) return;
+                for (AiSummaryClient.RequestMetrics previous : task.requestMetrics) {
+                    if (previous.requestIndex == value.requestIndex) return;
+                }
+                task.requestMetrics.add(value);
                 publish();
             }
             @Override public void onPartial(String value) {
@@ -362,6 +414,7 @@ public final class SummaryTaskController implements NotificationCenter.Notificat
             String completionNotice;
             if (record != null && !saved) completionNotice = "摘要已生成但历史未保存，本批增量进度未推进。重试保存仅补存历史。";
             else if (!history.complete) completionNotice = "仅覆盖部分范围，增量进度未推进。";
+            else if (range.mode == GroupSummarySheet.RangeMode.SELECTED) completionNotice = "选中消息总结完成，增量进度保持不变。";
             else if (range.mode == GroupSummarySheet.RangeMode.REPLAY) completionNotice = "重做完成，增量进度保持不变。";
             else {
                 boolean advance = range.mode == GroupSummarySheet.RangeMode.SINCE && !task.filtered
@@ -438,6 +491,7 @@ public final class SummaryTaskController implements NotificationCenter.Notificat
         if (previous != null) {
             previous.completion.cancel();
             previous.inputs.clear(); previous.pendingChanges.clear();
+            previous.requestMetrics.clear();
             previous.sources = null; previous.history = null; previous.draft = null;
             stripReplay(previous);
             finishCheckpoint(previous);
@@ -530,11 +584,13 @@ public final class SummaryTaskController implements NotificationCenter.Notificat
             if (chat == null || (Long) args[1] != (ChatObject.isChannel(chat) ? chat.id : 0)) return;
             for (int messageId : (ArrayList<Integer>) args[0]) sourceChanged(task, messageId, new SourceChange("", 0, false));
         } else if (id == NotificationCenter.replaceMessagesObjects && args.length >= 2 && (Long) args[0] == task.dialogId) {
+            TLRPC.Chat chat = MessagesController.getInstance(account).getChat(-task.dialogId);
             for (MessageObject message : (ArrayList<MessageObject>) args[1]) {
                 if (message == null || message.messageOwner == null || message.getDialogId() != task.dialogId) continue;
                 TLRPC.Message value = message.messageOwner;
                 sourceChanged(task, value.id, new SourceChange(value.message, value.edit_date,
-                        SummaryHistoryLoader.isUsableText(value, org.telegram.tgnet.ConnectionsManager.getInstance(account).getCurrentTime())));
+                        SummaryHistoryLoader.isUsableText(value, org.telegram.tgnet.ConnectionsManager.getInstance(account).getCurrentTime()),
+                        new SourceMetadata(account, task.dialogId, value, chat != null && chat.forum)));
             }
         }
     }
@@ -564,6 +620,7 @@ public final class SummaryTaskController implements NotificationCenter.Notificat
             case SINCE: return "上次总结之后";
             case UNREAD: return "固定未读范围";
             case REPLAY: return "重做已记录范围";
+            case SELECTED: return "手动选中的文字消息";
             default: return "最近 N 条文字消息";
         }
     }

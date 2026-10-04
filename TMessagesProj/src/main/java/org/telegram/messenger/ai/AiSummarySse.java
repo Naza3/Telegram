@@ -10,13 +10,29 @@ import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.io.InterruptedIOException;
 import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.util.Locale;
 import java.util.regex.Pattern;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /** OpenAI SSE framing and incremental reasoning suppression; no Android or transport state. */
 final class AiSummarySse {
+    // Bounded workers and queue: stalled sockets cannot retain an unbounded number of requests.
+    private static final ThreadPoolExecutor USAGE_TAIL_READERS = new ThreadPoolExecutor(2, 2, 30, TimeUnit.SECONDS,
+            new ArrayBlockingQueue<>(2), action -> {
+                Thread thread = new Thread(action, "ai-summary-usage-tail");
+                thread.setDaemon(true);
+                return thread;
+            });
     private static final Pattern THINK_TAG = Pattern.compile("</?think(?:\\s[^>]*)?>", Pattern.CASE_INSENSITIVE);
     interface Cancellation {
         void check() throws IOException;
@@ -26,6 +42,12 @@ final class AiSummarySse {
         void onText(String accumulatedText);
         /** Counts received content/reasoning characters, never exposes reasoning text. */
         default void onContent(int receivedCharacters, boolean reasoningObserved) { }
+        /** One request's cumulative snapshot; complete becomes true only at a clean stream boundary. */
+        default void onUsage(UsageStats usage, boolean complete) { }
+        /** The answer is already truncated; only a bounded usage tail remains useful. */
+        default void onTailReadAbandoned() { }
+        /** Runs after the abandoned read has actually released its stream lock. */
+        default void onAbandonedReadClosed() { }
     }
 
     static final class Result {
@@ -66,7 +88,7 @@ final class AiSummarySse {
         return text.finish();
     }
 
-    static Result read(InputStream input, int byteLimit, Cancellation cancellation, Listener listener)
+    static Result read(InputStream input, int byteLimit, int usageTailTimeoutMs, Cancellation cancellation, Listener listener)
             throws IOException, JSONException {
         InputStream bounded = new FilterInputStream(input) {
             private int count;
@@ -93,14 +115,15 @@ final class AiSummarySse {
             }
         };
         State state = new State(listener);
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(bounded,
+        TailLines reader = new TailLines(new BufferedReader(new InputStreamReader(bounded,
                 StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
-                        .onUnmappableCharacter(CodingErrorAction.REPORT)))) {
+                        .onUnmappableCharacter(CodingErrorAction.REPORT))), listener, usageTailTimeoutMs);
+        try {
             StringBuilder data = new StringBuilder();
             String event = "";
             String line;
             boolean firstLine = true;
-            while ((line = reader.readLine()) != null) {
+            while ((line = reader.readLine(state.outputLimit)) != null) {
                 cancellation.check();
                 if (firstLine && line.startsWith("\ufeff")) line = line.substring(1);
                 firstLine = false;
@@ -121,9 +144,104 @@ final class AiSummarySse {
             if (!state.done && !state.finished) {
                 throw new Failure("流式连接提前中断，未收到完整结束标记。请重试或关闭流式模式。");
             }
+            listener.onUsage(state.usage, true);
+            if (state.outputLimit) {
+                throw new Failure("模型输出达到长度上限，结果不完整。", null, true, state.reasoningObserved);
+            }
             String text = state.text.finish();
             if (text.isEmpty()) throw new Failure("模型没有返回可用的总结正文。请关闭思考模式后重试。");
             return new Result(text, state.model);
+        } catch (IOException | JSONException error) {
+            if (state.outputLimit) {
+                cancellation.check();
+                // A broken usage tail cannot turn a known truncated answer into a generic failure.
+                throw new Failure("模型输出达到长度上限，结果不完整。", null, true, state.reasoningObserved);
+            }
+            throw error;
+        } finally {
+            reader.close();
+        }
+    }
+
+    /** Reads only the already-truncated response's tail with one absolute, bounded deadline. */
+    private static final class TailLines {
+        final BufferedReader reader;
+        final Listener listener;
+        final int timeoutMs;
+        long deadline;
+        boolean deferredClose;
+
+        TailLines(BufferedReader reader, Listener listener, int timeoutMs) {
+            this.reader = reader;
+            this.listener = listener;
+            this.timeoutMs = timeoutMs;
+        }
+
+        String readLine(boolean outputLimit) throws IOException {
+            if (!outputLimit) return reader.readLine();
+            if (deadline == 0) deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
+            long remaining = deadline - System.nanoTime();
+            if (remaining <= 0) throw new InterruptedIOException("Usage tail deadline");
+            TailRead operation = new TailRead(reader, listener);
+            Future<String> future;
+            try { future = USAGE_TAIL_READERS.submit(operation); }
+            catch (RejectedExecutionException busy) { throw new InterruptedIOException("Usage tail readers busy"); }
+            try {
+                return future.get(remaining, TimeUnit.NANOSECONDS);
+            } catch (TimeoutException | InterruptedException stopped) {
+                // Closing a BufferedReader or HttpURLConnection while read() holds its lock can
+                // block. The same bounded worker closes it once its socket read finally returns.
+                deferredClose = true;
+                listener.onTailReadAbandoned();
+                operation.abandon();
+                future.cancel(true);
+                if (future instanceof Runnable) USAGE_TAIL_READERS.remove((Runnable) future);
+                if (stopped instanceof InterruptedException) Thread.currentThread().interrupt();
+                throw new InterruptedIOException("Usage tail interrupted");
+            } catch (ExecutionException failed) {
+                Throwable cause = failed.getCause();
+                if (cause instanceof IOException) throw (IOException) cause;
+                throw new IOException("Usage tail read failed");
+            }
+        }
+
+        void close() throws IOException {
+            if (!deferredClose) reader.close();
+        }
+    }
+
+    private static final class TailRead implements Callable<String> {
+        final BufferedReader reader;
+        final Listener listener;
+        boolean started, finished, abandoned;
+
+        TailRead(BufferedReader reader, Listener listener) {
+            this.reader = reader;
+            this.listener = listener;
+        }
+
+        @Override public String call() throws IOException {
+            synchronized (this) {
+                started = true;
+                if (abandoned) return null;
+            }
+            try { return reader.readLine(); }
+            finally {
+                boolean close;
+                synchronized (this) { finished = true; close = abandoned; }
+                if (close) cleanup();
+            }
+        }
+
+        void abandon() {
+            boolean close;
+            synchronized (this) { abandoned = true; close = !started || finished; }
+            if (close) cleanup();
+        }
+
+        void cleanup() {
+            try { reader.close(); } catch (IOException ignored) { }
+            finally { listener.onAbandonedReadClosed(); }
         }
     }
 
@@ -132,6 +250,8 @@ final class AiSummarySse {
         final Listener listener;
         boolean done;
         boolean finished;
+        boolean outputLimit;
+        UsageStats usage = UsageStats.UNKNOWN_USAGE;
         String model;
         String lastVisible = "";
         int receivedCharacters;
@@ -156,6 +276,11 @@ final class AiSummarySse {
                 throw new Failure("模型流式服务返回错误。", object.get("error").toString());
             }
             if (object.opt("model") instanceof String) model = object.getString("model");
+            if (object.has("usage") && !object.isNull("usage")) {
+                // OpenAI stream usage is cumulative for this request, not another batch of tokens.
+                usage = UsageStats.fromJson(object.optJSONObject("usage"));
+                listener.onUsage(usage, false);
+            }
             JSONArray choices = object.optJSONArray("choices");
             if (choices == null) throw new Failure("流式响应缺少 choices。请确认服务兼容 SSE，或关闭流式模式。");
             if (choices.length() == 0) return false; // Optional usage-only event.
@@ -196,9 +321,9 @@ final class AiSummarySse {
                 }
             }
             if (outputLimit) {
-                throw new Failure("模型输出达到长度上限，结果不完整。", null, true, reasoningObserved);
+                this.outputLimit = true;
             }
-            if ("stop".equals(finish)) finished = true;
+            if ("stop".equals(finish) || outputLimit) finished = true;
             return false;
         }
 

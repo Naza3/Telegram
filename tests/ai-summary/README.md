@@ -2,8 +2,9 @@
 
 This harness compiles all production Java sources in
 `org.telegram.messenger.ai` except the Android boundaries `AiSummarySecretStore`,
-`SummaryHistoryCipher`, and `SummaryHistoryStorage`, which use test doubles.
-It discovers and runs every top-level `*Test.java` in this directory.
+`SummaryHistoryCipher`, `SummaryHistoryStorage`, and `SummaryPrivateStorage`, which use test doubles.
+The native entity adapter and its test run separately against real compiled Telegram
+wire classes. The main runner discovers the remaining top-level `*Test.java` files.
 The tests do not contact Telegram, a user model, or an external HTTP service.
 
 From the repository root, with Java 17 or later, Bash, `curl`, `sha256sum`, and
@@ -41,6 +42,22 @@ and fixture validation after setting up Java and before installing the Android
 toolchain or compiling the APK. A failed check blocks the APK build.
 
 The tests cover:
+
+- `ApiProfilesStoreTest`: explicit current-profile selection, encrypted-storage
+  boundary, legacy migration, revision checks, separate credentials, deletion
+  without fallback, name validation and owner isolation.
+- `SummaryExcludedSendersStoreTest` and `SummaryFilterTest`: exact positive 64-bit
+  Telegram user IDs, bounded batch editing, per-owner/group persistence, stale
+  revision rejection and hard exclusion before self-related context selection.
+- `SummarySelectedSnapshotTest`: selected-message account/peer/topic identity,
+  immutable text/metadata, non-contiguous selections, skipped unusable messages,
+  no history RPC or timeout scheduling, and no continuous-coverage claim.
+- `UsageStatsTest` and HTTP tests: server-provided exact integer counts,
+  unknown fields and overflow, repeated cumulative SSE snapshots, usage-only
+  tails, source/merge request numbering and timings, and output-limit failures.
+- `SummaryPublishPlanTest`: parsed-text concatenation, Unicode boundaries,
+  clippable formatting, atomic links/mentions, overlapping protected intervals,
+  complete rejection of oversized atoms or more than 64 parts.
 
 - `SummaryHistoryLoaderTest`: bounded recent-message pagination, short and
   overlapping pages, filtering while advancing cursors, fixed upper bounds,
@@ -118,6 +135,19 @@ judges factual quality. See [fixture instructions](fixtures/README.md) for
 creating an unrun manual evaluation record, and
 [device validation](../../docs/mnn-device-validation.zh-CN.md) for the remaining
 phone/MNN checks.
+
+After building the Android library, run the native entity suite separately:
+
+```sh
+bash tests/ai-summary/run-publish-entities.sh
+```
+
+`TLRPC_CLASSES_JAR` can point to the library's compiled classes jar (or class
+directory). This suite executes production `TLRPC` and `SerializedData` binary
+round trips, including mention access hashes, custom emoji, preformatted
+language, blockquote flags and formatted dates. Only logging/UI-post boundaries
+use host shims; the test does not execute Android's text editor/parser or send
+messages to Telegram. CI runs it after the APK build and before artifact upload.
 
 ## Manual core requirements and minimal direct input, rule version 6
 

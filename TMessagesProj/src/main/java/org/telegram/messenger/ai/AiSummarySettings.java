@@ -32,6 +32,10 @@ public final class AiSummarySettings {
         public final int inputCharacterBudget;
         /** Explicit user choice; never inferred from a loopback address or model alias. */
         public final ServiceType serviceType;
+        /** Immutable profile identity captured with these values; legacy constructors remain unbound. */
+        public final String profileId, profileName;
+        public final long profileRevision, profileOwnerId;
+        public final int profileAccount;
 
         public Config(String baseUrl, String model, String apiKey) {
             this(baseUrl, model, apiKey, DEFAULT_MAX_OUTPUT_TOKENS);
@@ -52,6 +56,13 @@ public final class AiSummarySettings {
 
         public Config(String baseUrl, String model, String apiKey, int maxOutputTokens,
                       boolean stream, int inputCharacterBudget, ServiceType serviceType) {
+            this(baseUrl, model, apiKey, maxOutputTokens, stream, inputCharacterBudget, serviceType,
+                    "", "", 0, -1, 0);
+        }
+
+        private Config(String baseUrl, String model, String apiKey, int maxOutputTokens,
+                boolean stream, int inputCharacterBudget, ServiceType serviceType, String profileId,
+                String profileName, long profileRevision, int profileAccount, long profileOwnerId) {
             this.baseUrl = baseUrl == null ? "" : baseUrl.trim();
             this.model = model == null ? "" : model.trim();
             this.apiKey = apiKey == null ? "" : apiKey.trim();
@@ -59,6 +70,20 @@ public final class AiSummarySettings {
             this.stream = stream;
             this.inputCharacterBudget = inputCharacterBudget;
             this.serviceType = serviceType;
+            this.profileId = profileId; this.profileName = profileName; this.profileRevision = profileRevision;
+            this.profileAccount = profileAccount; this.profileOwnerId = profileOwnerId;
+        }
+
+        /** A retry, probe or editor can change values without accidentally changing the target profile. */
+        public Config withValues(String baseUrl, String model, String apiKey, int maxOutputTokens,
+                boolean stream, int inputCharacterBudget, ServiceType serviceType) {
+            return new Config(baseUrl, model, apiKey, maxOutputTokens, stream, inputCharacterBudget, serviceType,
+                    profileId, profileName, profileRevision, profileAccount, profileOwnerId);
+        }
+
+        Config boundTo(String id, String name, long revision, int account, long ownerId) {
+            return new Config(baseUrl, model, apiKey, maxOutputTokens, stream, inputCharacterBudget, serviceType,
+                    id, name, revision, account, ownerId);
         }
     }
 
@@ -66,50 +91,69 @@ public final class AiSummarySettings {
         return load(account, UserConfig.getInstance(account).getClientUserId());
     }
 
+    /** Worker-thread API. No implicit fallback when the selected profile was removed or is unreadable. */
     public static Config load(int account, long ownerId) {
-        requireOwner(account, ownerId);
-        // Also lets the secret store discard stale ciphertext after an account-slot change.
-        String apiKey = AiSummarySecretStore.load(account, ownerId);
-        SharedPreferences preferences = MessagesController.getMainSettings(account);
-        if (!Long.toString(ownerId).equals(preferences.getString(PREFIX + "owner_id", ""))) {
-            return new Config(DEFAULT_BASE_URL, DEFAULT_MODEL, "", DEFAULT_MAX_OUTPUT_TOKENS);
-        }
-        return new Config(preferences.getString(PREFIX + "base_url", DEFAULT_BASE_URL),
-                preferences.getString(PREFIX + "model", DEFAULT_MODEL),
-                apiKey,
-                preferences.getInt(PREFIX + "max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS),
-                preferences.getInt(PREFIX + "stream", 0) == 1,
-                preferences.getInt(PREFIX + "input_character_budget", DEFAULT_INPUT_CHARACTER_BUDGET),
-                preferences.getInt(PREFIX + "service_type", 0) == 1 ? ServiceType.MNN_LOCAL : ServiceType.GENERIC);
+        return ApiProfilesStore.loadSelected(account, ownerId);
     }
 
-    /** Returns whether the API key was persisted securely (false means session-only storage). */
+    /** Returns true only after encrypted profile storage confirms the write. */
     public static boolean save(int account, Config config) {
         return save(account, UserConfig.getInstance(account).getClientUserId(), config);
     }
 
-    /** Binds a pending UI operation to the identity that opened that UI. */
+    /** Updates the editor's captured profile, never whichever service was selected meanwhile. */
     public static boolean save(int account, long ownerId, Config config) {
         requireOwner(account, ownerId);
-        String error = validate(config);
-        if (error != null) {
-            throw new IllegalArgumentException(error);
+        if (config == null) throw new IllegalArgumentException("没有可保存的 API 配置。");
+        if (config.profileId.isEmpty()) ApiProfilesStore.saveInitial(account, ownerId, config);
+        else {
+            if (config.profileAccount != account || config.profileOwnerId != ownerId) {
+                throw new IllegalStateException("API 配置属于其他账号，请重新打开设置。");
+            }
+            ApiProfilesStore.update(account, ownerId, config.profileId, config.profileRevision,
+                    config.profileName, config);
         }
-        MessagesController.getMainSettings(account).edit()
-                .putString(PREFIX + "owner_id", Long.toString(ownerId))
-                .putString(PREFIX + "base_url", config.baseUrl)
-                .putString(PREFIX + "model", config.model)
-                .putInt(PREFIX + "max_output_tokens", config.maxOutputTokens)
-                .putInt(PREFIX + "stream", config.stream ? 1 : 0)
-                .putInt(PREFIX + "input_character_budget", config.inputCharacterBudget)
-                .putInt(PREFIX + "service_type", config.serviceType == ServiceType.MNN_LOCAL ? 1 : 0)
-                .remove(PREFIX + "api_key")
-                .apply();
-        return AiSummarySecretStore.save(account, ownerId, config.apiKey);
+        return true;
+    }
+
+    static boolean hasLegacyConfiguration(int account, long ownerId) {
+        return Long.toString(ownerId).equals(MessagesController.getMainSettings(account)
+                .getString(PREFIX + "owner_id", ""));
+    }
+
+    /** Strict migration: never turn an unreadable old secret into an apparently valid empty key. */
+    static Config loadLegacyForMigration(int account, long ownerId) {
+        requireOwner(account, ownerId);
+        if (!hasLegacyConfiguration(account, ownerId)) {
+            return new Config(DEFAULT_BASE_URL, DEFAULT_MODEL, "", DEFAULT_MAX_OUTPUT_TOKENS);
+        }
+        SharedPreferences preferences = MessagesController.getMainSettings(account);
+        Config config = new Config(preferences.getString(PREFIX + "base_url", DEFAULT_BASE_URL),
+                preferences.getString(PREFIX + "model", DEFAULT_MODEL),
+                AiSummarySecretStore.loadForMigration(account, ownerId),
+                preferences.getInt(PREFIX + "max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS),
+                preferences.getInt(PREFIX + "stream", 0) == 1,
+                preferences.getInt(PREFIX + "input_character_budget", DEFAULT_INPUT_CHARACTER_BUDGET),
+                preferences.getInt(PREFIX + "service_type", 0) == 1 ? ServiceType.MNN_LOCAL : ServiceType.GENERIC);
+        requireOwner(account, ownerId);
+        return config;
+    }
+
+    /** Called only after durable migration (or logout); never removes another owner's legacy state. */
+    static void clearLegacyOwner(int account, long ownerId) {
+        if (!hasLegacyConfiguration(account, ownerId)) return;
+        if (!AiSummarySecretStore.clearOwner(account, ownerId)) return;
+        SharedPreferences preferences = MessagesController.getMainSettings(account);
+        if (!Long.toString(ownerId).equals(preferences.getString(PREFIX + "owner_id", ""))) return;
+        SharedPreferences.Editor editor = preferences.edit();
+        for (String suffix : new String[] {"owner_id", "base_url", "model", "max_output_tokens", "stream",
+                "input_character_budget", "service_type", "api_key"}) editor.remove(PREFIX + suffix);
+        editor.commit();
     }
 
     private static void requireOwner(int account, long ownerId) {
-        if (ownerId <= 0 || UserConfig.getInstance(account).getClientUserId() != ownerId) {
+        if (account < 0 || account >= UserConfig.MAX_ACCOUNT_COUNT || ownerId <= 0
+                || UserConfig.getInstance(account).getClientUserId() != ownerId) {
             throw new IllegalStateException("当前账号已变化，请重新打开 AI 总结后配置模型。");
         }
     }

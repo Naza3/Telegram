@@ -140,6 +140,9 @@ jobs:
             -Dorg.gradle.parallel=false \
             --stacktrace
 
+      - name: Verify native Telegram publish entities
+        run: bash tests/ai-summary/run-publish-entities.sh
+
       - name: Verify and prepare the APK
         shell: bash
         run: |

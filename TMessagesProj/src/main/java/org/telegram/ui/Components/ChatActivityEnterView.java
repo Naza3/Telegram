@@ -153,6 +153,8 @@ import org.telegram.messenger.UserObject;
 import org.telegram.messenger.Utilities;
 import org.telegram.messenger.VideoEditedInfo;
 import org.telegram.messenger.ai.SummaryPublishStore;
+import org.telegram.messenger.ai.SummaryPublishPlan;
+import org.telegram.messenger.ai.SummaryPublishEntities;
 import org.telegram.messenger.ai.SummaryTextSplitter;
 import org.telegram.messenger.browser.Browser;
 import org.telegram.messenger.camera.CameraController;
@@ -448,6 +450,8 @@ public class ChatActivityEnterView extends FrameLayout implements
     private long summaryPublishGeneration;
     private SummaryPublishStore.Attempt preparedSummaryAttempt;
     private List<String> preparedSummaryParts;
+    private FrozenSummarySend summarySendPlan;
+    private AlertDialog summarySendPreview;
     private AccountInstance accountInstance = AccountInstance.getInstance(UserConfig.selectedAccount);
 
     private boolean isInitLineCount;
@@ -3657,6 +3661,7 @@ public class ChatActivityEnterView extends FrameLayout implements
     }
 
     public int getMessagesCount() {
+        if (summaryPublishOrigin != null && summarySendPlan != null) return summarySendPlan.plan.parts.size();
         int count = 0;
         if (parentFragment != null && parentFragment.messagePreviewParams != null) {
             count += parentFragment.messagePreviewParams.getForwardedMessagesCount();
@@ -7297,14 +7302,24 @@ public class ChatActivityEnterView extends FrameLayout implements
         if (summaryPublishOrigin != null) {
             String error = summaryPublishSendError(scheduleDate);
             if (error != null) {
+                cancelSummaryPublishPreparation();
                 SummaryPublishHelper.showError(parentFragment, error);
                 return false;
             }
+            if (summarySendPlan == null) return previewSummarySend(notify, scheduleDate, scheduleRepeatPeriod);
+            if (!summarySendPlan.confirmed) return true;
+            if (!summarySendPlanMatches(summarySendPlan, notify, scheduleDate, scheduleRepeatPeriod)) {
+                invalidateSummarySendPlan("正文、格式或发送设置已变化，尚未发送。请重新预览并确认。");
+                return false;
+            }
         }
+        final FrozenSummarySend confirmedSummary = summaryPublishOrigin == null ? null : summarySendPlan;
+        final long confirmedSummaryGeneration = summaryPublishGeneration;
         final boolean allowConfirmFinal = allowConfirm && !animatorEphemeralMessageVisibility.getValue();
 
         final Runnable send = () -> {
             if (slowModeTimer == Integer.MAX_VALUE && !isInScheduleMode()) {
+                if (confirmedSummary != null) cancelSummaryPublishPreparation();
                 if (delegate != null) {
                     delegate.scrollToSendingMessage();
                 }
@@ -7325,6 +7340,8 @@ public class ChatActivityEnterView extends FrameLayout implements
                 }
             }
             if (allowConfirmFinal && showConfirmAlert(() -> {
+                if (!summarySendContinuationAllowed(confirmedSummary, confirmedSummaryGeneration,
+                        notify, scheduleDate, scheduleRepeatPeriod)) return;
                 sendMessageInternal(notify, scheduleDate, scheduleRepeatPeriod, payStars, false);
             })) {
                 return;
@@ -7408,9 +7425,11 @@ public class ChatActivityEnterView extends FrameLayout implements
                 TLRPC.Chat chat = parentFragment.getCurrentChat();
                 if (chat != null && chat.slowmode_enabled && !ChatObject.hasAdminRights(chat)) {
                     if (message.length() > accountInstance.getMessagesController().getMaxMessageLength()) {
+                        if (confirmedSummary != null) cancelSummaryPublishPreparation();
                         AlertsCreator.showSimpleAlert(parentFragment, getString("Slowmode", R.string.Slowmode), getString("SlowmodeSendErrorTooLong", R.string.SlowmodeSendErrorTooLong), resourcesProvider);
                         return;
                     } else if (forceShowSendButton && message.length() > 0) {
+                        if (confirmedSummary != null) cancelSummaryPublishPreparation();
                         AlertsCreator.showSimpleAlert(parentFragment, getString("Slowmode", R.string.Slowmode), getString("SlowmodeSendError", R.string.SlowmodeSendError), resourcesProvider);
                         return;
                     }
@@ -7449,7 +7468,11 @@ public class ChatActivityEnterView extends FrameLayout implements
             updateSendButtonPaid();
         };
         if (allowConfirmFinal) {
-            boolean alertShown = AlertsCreator.ensurePaidMessageConfirmation(currentAccount, dialog_id, getMessagesCount(), starsPrice -> sendMessageInternal(notify, scheduleDate, scheduleRepeatPeriod, starsPrice, false), payStars);
+            boolean alertShown = AlertsCreator.ensurePaidMessageConfirmation(currentAccount, dialog_id, getMessagesCount(), starsPrice -> {
+                if (!summarySendContinuationAllowed(confirmedSummary, confirmedSummaryGeneration,
+                        notify, scheduleDate, scheduleRepeatPeriod)) return;
+                sendMessageInternal(notify, scheduleDate, scheduleRepeatPeriod, starsPrice, false);
+            }, payStars);
             if (alertShown && sendButtonVisible) {
                 if (isInVideoMode()) {
                     if (delegate.isVideoRecordingPaused())
@@ -7802,8 +7825,18 @@ public class ChatActivityEnterView extends FrameLayout implements
         text = normalizeNativeSendingText(text);
         if (text.length() != 0) {
             final ArrayList<NativeTextPart> parts;
+            final FrozenSummarySend frozen = summaryPublishOrigin == null ? null : summarySendPlan;
             try {
-                parts = prepareNativeTextParts(text);
+                if (summaryPublishOrigin != null) {
+                    if (frozen == null || !frozen.confirmed
+                            || !summarySendPlanMatches(frozen, notify, scheduleDate, scheduleRepeatPeriod)) {
+                        invalidateSummarySendPlan("发送预览已失效，尚未发送。请重新点击发送并确认。");
+                        return false;
+                    }
+                    parts = frozen.parts;
+                } else {
+                    parts = prepareNativeTextParts(text);
+                }
             } catch (IllegalArgumentException e) {
                 SummaryPublishHelper.showError(parentFragment, "单个字符组合或格式片段超过消息长度上限，请调整正文后重试。");
                 return false;
@@ -7811,7 +7844,6 @@ public class ChatActivityEnterView extends FrameLayout implements
             final SummaryPublishStore.Attempt publishAttempt;
             if (summaryPublishOrigin != null) {
                 String error = summaryPublishSendError(scheduleDate);
-                if (error == null && parts.size() != 1) error = summaryPublishLengthError();
                 if (error != null) {
                     SummaryPublishHelper.showError(parentFragment, error);
                     return false;
@@ -7824,7 +7856,7 @@ public class ChatActivityEnterView extends FrameLayout implements
                     return false;
                 }
                 if (preparedSummaryAttempt == null) {
-                    prepareSummaryPublish(actualParts, notify, scheduleDate, scheduleRepeatPeriod, payStars);
+                    prepareSummaryPublish(frozen, actualParts, notify, scheduleDate, scheduleRepeatPeriod, payStars);
                     return false;
                 }
                 publishAttempt = preparedSummaryAttempt;
@@ -7861,31 +7893,36 @@ public class ChatActivityEnterView extends FrameLayout implements
                 boolean updateStickersOrder = false;
                 updateStickersOrder = SendMessagesHelper.checkUpdateStickersOrder(text);
 
-                MessageObject replyToTopMsg = getThreadMessage();
+                MessageObject replyToTopMsg = frozen == null ? getThreadMessage() : frozen.replyTop;
                 if (replyToTopMsg == null && replyingTopMessage != null) {
                     replyToTopMsg = replyingTopMessage;
                 }
-                SendMessagesHelper.SendMessageParams params = SendMessagesHelper.SendMessageParams.of(part.text, dialog_id, replyingMessageObject, replyToTopMsg, messageWebPage, messageWebPageSearch, part.entities, null, null, notify, scheduleDate, scheduleRepeatPeriod, sendAnimationData, updateStickersOrder);
+                TLRPC.WebPage partWebPage = frozen == null ? messageWebPage : partIndex == 0 ? frozen.webPage : null;
+                boolean partWebSearch = frozen == null ? messageWebPageSearch : partIndex == 0 ? frozen.webSearch : true;
+                SendMessagesHelper.SendMessageParams params = SendMessagesHelper.SendMessageParams.of(part.text, dialog_id,
+                        frozen == null ? replyingMessageObject : frozen.reply, replyToTopMsg, partWebPage, partWebSearch,
+                        part.entities, null, null, notify, scheduleDate, scheduleRepeatPeriod, sendAnimationData, updateStickersOrder);
                 if (publishAttempt != null) params.params = SummaryPublishStore.partParams(publishAttempt, partIndex, params.params);
                 params.sendMessageChatArguments = parentFragment != null ? parentFragment.getMessageChatSendParams() : null;
-                params.effect_id = effectId;
+                params.effect_id = frozen == null ? effectId : partIndex == 0 ? frozen.effect : 0;
                 params.payStars = payStars;
                 params.monoForumPeer = getSendMonoForumPeerId();
                 params.suggestionParams = getSendMessageSuggestionParams();
                 sendButton.setEffect(effectId = 0);
                 applyStoryToSendMessageParams(params);
-                params.invert_media = parentFragment != null && parentFragment.messagePreviewParams != null && parentFragment.messagePreviewParams.webpageTop;
+                params.invert_media = frozen == null ? parentFragment != null && parentFragment.messagePreviewParams != null
+                        && parentFragment.messagePreviewParams.webpageTop : frozen.webTop;
                 if (parentFragment != null && parentFragment.getCurrentChat() != null && !ChatObject.canSendEmbed(parentFragment.getCurrentChat())) {
                     params.searchLinks = false;
                     params.mediaWebPage = null;
-                } else if (messageWebPage instanceof TLRPC.TL_webPagePending) {
+                } else if (partWebPage instanceof TLRPC.TL_webPagePending) {
                     params.searchLinks = true;
                     params.mediaWebPage = null;
-                } else if (messageWebPage != null) {
+                } else if (partWebPage != null) {
                     params.mediaWebPage = new TLRPC.TL_messageMediaWebPage();
-                    params.mediaWebPage.webpage = messageWebPage;
-                    params.mediaWebPage.force_large_media = parentFragment != null && parentFragment.messagePreviewParams != null && !parentFragment.messagePreviewParams.webpageSmall;
-                    params.mediaWebPage.force_small_media = parentFragment != null && parentFragment.messagePreviewParams != null && parentFragment.messagePreviewParams.webpageSmall;
+                    params.mediaWebPage.webpage = partWebPage;
+                    params.mediaWebPage.force_large_media = frozen == null ? parentFragment != null && parentFragment.messagePreviewParams != null && !parentFragment.messagePreviewParams.webpageSmall : !frozen.webSmall;
+                    params.mediaWebPage.force_small_media = frozen == null ? parentFragment != null && parentFragment.messagePreviewParams != null && parentFragment.messagePreviewParams.webpageSmall : frozen.webSmall;
                 }
                 if (parentFragment != null) {
                     parentFragment.editingMessageObject = null;
@@ -7915,6 +7952,160 @@ public class ChatActivityEnterView extends FrameLayout implements
             this.text = text;
             this.entities = entities;
         }
+    }
+
+    private static final class ParsedSummaryText {
+        final String editorText, text;
+        final SummaryPublishEntities.Snapshot entities;
+
+        ParsedSummaryText(String editorText, String text, SummaryPublishEntities.Snapshot entities) {
+            this.editorText = editorText;
+            this.text = text;
+            this.entities = entities;
+        }
+    }
+
+    /** Private task snapshot. Neither preview nor sending reads mutable editor entities again. */
+    private final class FrozenSummarySend {
+        final SummaryPublishHelper.Draft origin = summaryPublishOrigin;
+        final ParsedSummaryText parsed;
+        final SummaryPublishPlan plan;
+        final ArrayList<NativeTextPart> parts = new ArrayList<>();
+        final boolean notify;
+        final long unitPrice = getStarsPrice();
+        final long effect = effectId;
+        final long sendAs = summarySendAsPeer();
+        final MessageObject reply = replyingMessageObject;
+        final MessageObject replyTop = getThreadMessage() != null ? getThreadMessage() : replyingTopMessage;
+        final TLRPC.WebPage webPage = messageWebPage;
+        final boolean webSearch = messageWebPageSearch;
+        final boolean webTop = parentFragment != null && parentFragment.messagePreviewParams != null && parentFragment.messagePreviewParams.webpageTop;
+        final boolean webSmall = parentFragment != null && parentFragment.messagePreviewParams != null && parentFragment.messagePreviewParams.webpageSmall;
+        final boolean embedAllowed = parentFragment != null && ChatObject.canSendEmbed(parentFragment.getCurrentChat());
+        final boolean slowModeRestricted = summarySlowModeRestricted();
+        boolean confirmed;
+
+        FrozenSummarySend(ParsedSummaryText parsed, SummaryPublishPlan plan, boolean notify) {
+            this.parsed = parsed;
+            this.plan = plan;
+            this.notify = notify;
+            for (SummaryPublishPlan.Part part : plan.parts) {
+                parts.add(new NativeTextPart(part.text, parsed.entities.materialize(part)));
+            }
+        }
+    }
+
+    private ParsedSummaryText parseSummaryText() {
+        if (messageEditText == null) throw new IllegalArgumentException("Missing editor");
+        CharSequence input = messageEditText.getTextToUse();
+        SpannableStringBuilder copy = new SpannableStringBuilder(input);
+        for (ReplacementSpan span : copy.getSpans(0, copy.length(), ReplacementSpan.class)) {
+            if (!(span instanceof Emoji.EmojiSpan) && !(span instanceof AnimatedEmojiSpan)) {
+                throw new IllegalArgumentException("Unsupported replacement span");
+            }
+        }
+        CharSequence[] parsed = {normalizeNativeSendingText(copy)};
+        ArrayList<TLRPC.MessageEntity> entities = MediaDataController.getInstance(currentAccount)
+                .getEntities(parsed, supportsSendingNewEntities());
+        String value = parsed[0] == null ? "" : parsed[0].toString();
+        return new ParsedSummaryText(input.toString(), value, SummaryPublishEntities.capture(value, entities));
+    }
+
+    private long summarySendAsPeer() {
+        TLRPC.Peer peer = delegate == null ? null : delegate.getDefaultSendAs();
+        if (peer == null) {
+            TLRPC.ChatFull full = accountInstance.getMessagesController().getChatFull(-dialog_id);
+            if (full != null) peer = full.default_send_as;
+        }
+        return peer == null ? 0 : DialogObject.getPeerDialogId(peer);
+    }
+
+    private boolean summarySlowModeRestricted() {
+        TLRPC.Chat chat = parentFragment == null ? null : parentFragment.getCurrentChat();
+        return chat != null && chat.slowmode_enabled && !ChatObject.hasAdminRights(chat);
+    }
+
+    private boolean previewSummarySend(boolean notify, int scheduleDate, int scheduleRepeatPeriod) {
+        if (scheduleDate != 0 || scheduleRepeatPeriod != 0) {
+            SummaryPublishHelper.showError(parentFragment, "总结发回暂不支持定时发送，请保留正文并使用普通发送。");
+            return false;
+        }
+        final FrozenSummarySend frozen;
+        try {
+            ParsedSummaryText parsed = parseSummaryText();
+            ArrayList<SummaryPublishPlan.EntityRange> ranges = new ArrayList<>(parsed.entities.ranges());
+            // The native Markdown parser can turn Spannable into SpannedString before link detection.
+            // Protect plain URLs on the final text without inventing additional Telegram entities.
+            SpannableStringBuilder links = new SpannableStringBuilder(parsed.text);
+            AndroidUtilities.addLinksSafe(links, android.text.util.Linkify.WEB_URLS, false, false);
+            for (URLSpan link : links.getSpans(0, links.length(), URLSpan.class)) {
+                int start = links.getSpanStart(link), end = links.getSpanEnd(link);
+                if (start >= 0 && end > start) ranges.add(new SummaryPublishPlan.EntityRange(-1, start, end, true));
+            }
+            SummaryPublishPlan plan = SummaryPublishPlan.create(parsed.text, ranges,
+                    accountInstance.getMessagesController().getMaxMessageLength(), SummaryPublishStore.MAX_PARTS);
+            if (plan.parts.isEmpty()) return false;
+            TLRPC.Chat chat = parentFragment.getCurrentChat();
+            if (plan.parts.size() > 1 && chat != null && chat.slowmode_enabled && !ChatObject.hasAdminRights(chat)) {
+                SummaryPublishHelper.showError(parentFragment, "来源群启用了慢速模式，当前不能连续发送多条。请缩短正文后重新发送。");
+                return false;
+            }
+            frozen = new FrozenSummarySend(parsed, plan, notify);
+        } catch (RuntimeException e) {
+            SummaryPublishHelper.showError(parentFragment, "无法安全拆分正文或格式。最多可发送 64 条；单个链接、提及或字符组合不能超过单条上限。请调整正文后重试。");
+            return false;
+        }
+        summarySendPlan = frozen;
+        ArrayList<String> bodies = new ArrayList<>();
+        for (NativeTextPart part : frozen.parts) bodies.add(part.text);
+        summarySendPreview = SummaryPublishHelper.showPartsPreview(parentFragment, frozen.origin, bodies, () -> {
+            summarySendPreview = null;
+            if (summarySendPlan != frozen || !summarySendPlanMatches(frozen, notify, 0, 0)) {
+                invalidateSummarySendPlan("正文、格式或发送设置已变化，尚未发送。请重新预览并确认。");
+                return;
+            }
+            frozen.confirmed = true;
+            // The existing paid-message gate remains authoritative and uses this plan's exact count.
+            sendMessageInternal(notify, 0, 0, 0, true);
+        }, () -> { if (summarySendPlan == frozen) cancelSummaryPublishPreparation(); });
+        if (summarySendPreview == null) cancelSummaryPublishPreparation();
+        return summarySendPreview != null;
+    }
+
+    private boolean summarySendPlanMatches(FrozenSummarySend frozen, boolean notify, int scheduleDate, int scheduleRepeatPeriod) {
+        if (frozen == null || summarySendPlan != frozen || summaryPublishOrigin != frozen.origin
+                || frozen.notify != notify || scheduleDate != 0 || scheduleRepeatPeriod != 0
+                || summaryPublishSendError(scheduleDate) != null
+                || frozen.plan.maxLength != accountInstance.getMessagesController().getMaxMessageLength()
+                || frozen.unitPrice != getStarsPrice() || frozen.effect != effectId || frozen.sendAs != summarySendAsPeer()
+                || frozen.reply != replyingMessageObject
+                || frozen.replyTop != (getThreadMessage() != null ? getThreadMessage() : replyingTopMessage)
+                || frozen.webPage != messageWebPage || frozen.webSearch != messageWebPageSearch
+                || frozen.webTop != (parentFragment.messagePreviewParams != null && parentFragment.messagePreviewParams.webpageTop)
+                || frozen.webSmall != (parentFragment.messagePreviewParams != null && parentFragment.messagePreviewParams.webpageSmall)
+                || frozen.slowModeRestricted != summarySlowModeRestricted()
+                || frozen.embedAllowed != ChatObject.canSendEmbed(parentFragment.getCurrentChat())) return false;
+        try {
+            ParsedSummaryText current = parseSummaryText();
+            return frozen.parsed.editorText.equals(current.editorText) && frozen.parsed.text.equals(current.text)
+                    && frozen.parsed.entities.equals(current.entities);
+        } catch (RuntimeException ignored) {
+            return false;
+        }
+    }
+
+    private boolean summarySendContinuationAllowed(FrozenSummarySend frozen, long generation,
+            boolean notify, int scheduleDate, int scheduleRepeatPeriod) {
+        // A delayed paid/balance confirmation must never fall through into ordinary sending
+        // after logout, a changed editor, a new draft, pause, or cancellation cleared its origin.
+        if (frozen == null) return true;
+        return generation == summaryPublishGeneration && !preparingSummaryPublish && !summaryPublishSubmitted
+                && summarySendPlanMatches(frozen, notify, scheduleDate, scheduleRepeatPeriod);
+    }
+
+    private void invalidateSummarySendPlan(String error) {
+        cancelSummaryPublishPreparation();
+        SummaryPublishHelper.showError(parentFragment, error);
     }
 
     private CharSequence normalizeNativeSendingText(CharSequence text) {
@@ -7953,22 +8144,14 @@ public class ChatActivityEnterView extends FrameLayout implements
     private String summaryPublishSendError(int scheduleDate) {
         if (summaryPublishOrigin == null) return null;
         if (scheduleDate != 0) return "总结发回暂不支持定时发送，请保留正文并使用普通发送。";
+        if (UserConfig.selectedAccount != currentAccount) return "当前账号已切换，请重新打开总结记录。";
         if (parentFragment == null || destroyed || isPaused) return "聊天页面已关闭，请重新打开总结记录。";
-        // Multi-part text/entity previews need separate Android validation before enabling publishing.
-        if (messageEditText != null && normalizeNativeSendingText(messageEditText.getTextToUse()).length()
-                > accountInstance.getMessagesController().getMaxMessageLength()) return summaryPublishLengthError();
         return parentFragment.getSummaryPublishSendError(summaryPublishOrigin);
     }
 
-    private String summaryPublishLengthError() {
-        return "总结发回目前支持单条消息（上限 " + accountInstance.getMessagesController().getMaxMessageLength()
-                + " 字符）。请缩短正文后发送；长内容可复制或导出。";
-    }
-
-    private void prepareSummaryPublish(List<String> finalParts, boolean notify, int scheduleDate,
+    private void prepareSummaryPublish(FrozenSummarySend frozen, List<String> finalParts, boolean notify, int scheduleDate,
                                        int scheduleRepeatPeriod, long payStars) {
         if (preparingSummaryPublish || summaryPublishOrigin == null || messageEditText == null) return;
-        cancelSummaryPublishPreparation();
         final SummaryPublishHelper.Draft origin = summaryPublishOrigin;
         final long generation = ++summaryPublishGeneration;
         final String editorText = messageEditText.getTextToUse().toString();
@@ -7989,7 +8172,8 @@ public class ChatActivityEnterView extends FrameLayout implements
             AndroidUtilities.runOnUIThread(() -> {
                 if (generation != summaryPublishGeneration || summaryPublishOrigin != origin
                         || destroyed || isPaused || messageEditText == null
-                        || !TextUtils.equals(editorText, messageEditText.getTextToUse())) {
+                        || !TextUtils.equals(editorText, messageEditText.getTextToUse())
+                        || !summarySendPlanMatches(frozen, notify, scheduleDate, scheduleRepeatPeriod)) {
                     abandonSummaryAttempt(origin.account, attempt);
                     if (generation == summaryPublishGeneration) cancelSummaryPublishPreparation();
                     return;
@@ -7999,6 +8183,7 @@ public class ChatActivityEnterView extends FrameLayout implements
                 String guard = summaryPublishSendError(scheduleDate);
                 if (failure != null || guard != null) {
                     abandonSummaryAttempt(origin.account, attempt);
+                    cancelSummaryPublishPreparation();
                     SummaryPublishHelper.showError(parentFragment, failure != null ? failure : guard);
                     return;
                 }
@@ -10740,6 +10925,10 @@ public class ChatActivityEnterView extends FrameLayout implements
 
     private void cancelSummaryPublishPreparation() {
         summaryPublishGeneration++;
+        summarySendPlan = null;
+        AlertDialog preview = summarySendPreview;
+        summarySendPreview = null;
+        if (preview != null) preview.dismiss();
         if (preparingSummaryPublish && messageEditText != null) messageEditText.setEnabled(true);
         preparingSummaryPublish = false;
         SummaryPublishStore.Attempt abandoned = preparedSummaryAttempt;

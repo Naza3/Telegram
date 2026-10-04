@@ -25,6 +25,9 @@ public final class SummaryFilterTest {
         publishedExclusionIsAnImmutableSnapshot();
         publishedExclusionBeforeSelfContext();
         publishedExclusionRejectsInvalidInputs();
+        excludedUserIdentityAndCounts();
+        excludedUsersNeverReappearAsContext();
+        excludedOptionsAreImmutable();
         System.out.println("SummaryFilterTest: " + assertions + " assertions passed");
     }
 
@@ -292,6 +295,69 @@ public final class SummaryFilterTest {
         nullIdentity.add(null);
         invalid(() -> SummaryFilter.excludePublished(Collections.emptyList(), nullIdentity),
                 "invalid confirmation member silently ignored for an empty candidate range");
+    }
+
+    private static void excludedUserIdentityAndCounts() {
+        long uid = 9007199254740993L;
+        List<SummaryMessage> sources = Arrays.asList(message(1, uid, "blocked"),
+                message(2, uid - 1, "same name, distinct exact UID"), message(3, -uid, "channel identity"),
+                message(4, 0, "unknown sender"), message(5, uid, "blocked again"), message(5, uid, "duplicate"));
+        SummaryFilter.Options options = new SummaryFilter.Options(SummaryFilter.Mode.ALL, 0, "", Collections.singleton(uid));
+        SummaryFilter.Result result = SummaryFilter.apply(sources, OWNER, options);
+        check(ids(result).equals("2,3,4") && result.excludedSenderCount == 2 && result.matchedCount == 3,
+                "UID exclusion must be exact, positive and count unique sources");
+        check(result.filtered && options.hasFilters(), "UID exclusions must block incremental cursor advancement");
+        check(result.coverageNote.contains("原有 5 条唯一文字") && result.coverageNote.contains("排除 2 条")
+                && result.coverageNote.contains("不补抓更早消息"), "coverage note must explain actual reduction of the chosen range");
+        check(sources.size() == 6 && sources.get(0).senderId == uid, "exclusion mutated source snapshot");
+        SummaryFilter.Result none = SummaryFilter.apply(Collections.singletonList(message(1, 77, "ordinary")), OWNER, options);
+        check(none.excludedSenderCount == 0 && none.filtered, "non-matching exclusion list must still leave cursor untouched");
+        SummaryFilter.Result all = SummaryFilter.apply(Collections.singletonList(message(1, uid, "all blocked")), OWNER, options);
+        check(all.messages.isEmpty() && all.filtered && all.excludedSenderCount == 1, "fully excluded input must not fall back to full history");
+        SummaryFilter.Result conflictingDuplicate = SummaryFilter.apply(Arrays.asList(message(1, 77, "older copy"), message(1, uid, "new copy")), OWNER, options);
+        check(conflictingDuplicate.messages.isEmpty() && conflictingDuplicate.excludedSenderCount == 1,
+                "conflicting duplicate sender metadata bypassed exclusion");
+        SummaryFilter.Result requiredAndExcluded = SummaryFilter.apply(sources, OWNER,
+                new SummaryFilter.Options(SummaryFilter.Mode.ALL, uid, "", Collections.singleton(uid)));
+        check(requiredAndExcluded.messages.isEmpty(), "sender include must not override explicit UID exclusion");
+    }
+
+    private static void excludedUsersNeverReappearAsContext() {
+        List<SummaryMessage> sources = Arrays.asList(message(1, 77, "blocked parent"), message(2, 55, "before"),
+                full(3, 77, "blocked mentioning self", true, 0, 0, false, false),
+                full(4, 55, "retained mentioning self", true, 1, DIALOG, true, true),
+                message(5, 77, "blocked neighbor"), message(6, 55, "after"), message(7, 55, "outside"));
+        SummaryFilter.Options options = new SummaryFilter.Options(SummaryFilter.Mode.FILTER_SELF, 0, "", Collections.singleton(77L));
+        SummaryFilter.Result result = SummaryFilter.apply(sources, OWNER, options);
+        check(ids(result).equals("2,4,6") && result.excludedSenderCount == 3 && result.matchedCount == 1 && result.contextCount == 2,
+                "excluded sender restored as self match, neighbor or reply parent");
+        for (SummaryMessage message : result.messages) check(message.senderId != 77, "hard exclusion leaked into final model context");
+        SummaryFilter.Result focus = SummaryFilter.apply(sources, OWNER,
+                new SummaryFilter.Options(SummaryFilter.Mode.FOCUS_SELF, 0, "", Collections.singleton(77L)));
+        check(ids(focus).equals("2,4,6,7") && focus.filtered, "focus mode ignored UID exclusion");
+        SummaryFilter.ExclusionResult published = SummaryFilter.excludePublished(sources,
+                Collections.singleton(new SummaryFilter.PublishedMessageId(DIALOG, 2)));
+        SummaryFilter.Result combined = SummaryFilter.apply(published.messages, OWNER, options);
+        check(ids(combined).equals("4,6") && published.excludedCount == 1 && combined.excludedSenderCount == 3,
+                "published and UID exclusions must combine before self-related context");
+    }
+
+    private static void excludedOptionsAreImmutable() {
+        Set<Long> ids = new HashSet<>(Arrays.asList(12L, 13L));
+        SummaryFilter.Options options = new SummaryFilter.Options(SummaryFilter.Mode.FILTER_SELF, 99, "release", ids);
+        ids.clear();
+        check(options.excludedSenderIds.equals(new HashSet<>(Arrays.asList(12L, 13L))), "caller mutated task UID snapshot");
+        immutable(() -> options.excludedSenderIds.clear(), "options exposed mutable UID collection");
+        SummaryFilter.Options replacement = options.withExcludedSenderIds(Collections.singleton(22L));
+        check(replacement.mode == options.mode && replacement.senderId == options.senderId && replacement.keyword.equals(options.keyword)
+                && replacement.excludedSenderIds.equals(Collections.singleton(22L)) && options.excludedSenderIds.size() == 2,
+                "replacing UID list lost other filters or mutated running task options");
+        for (Long uid : Arrays.asList(0L, -1L, (Long) null)) {
+            invalid(() -> options.withExcludedSenderIds(Collections.singleton(uid)), "non-user UID accepted");
+        }
+        invalid(() -> options.withExcludedSenderIds(null), "null UID list silently disabled exclusion");
+        check(SummaryFilter.Options.DEFAULT.excludedSenderIds.isEmpty() && !SummaryFilter.Options.DEFAULT.hasFilters(),
+                "backward-compatible defaults unexpectedly filter history");
     }
 
     private static SummaryMessage message(int id, long sender, String text) {

@@ -178,6 +178,61 @@ public final class AiSummarySecretStore {
         }
     }
 
+    /** Strict read for one-time profile migration; failure leaves the old ciphertext untouched. */
+    static synchronized String loadForMigration(int account, long owner) {
+        if (owner <= 0 || owner != currentOwner(account)) {
+            throw new IllegalStateException("当前账号已变化，未迁移 API 配置。");
+        }
+        if (Long.valueOf(owner).equals(MEMORY_OWNERS.get(account)) && SESSION_OVERRIDES.contains(account)) {
+            return MEMORY.getOrDefault(account, "");
+        }
+        try {
+            SharedPreferences preferences = preferences();
+            if (preferences == null) throw new IllegalStateException();
+            String encoded = preferences.getString(entry(account), null);
+            if (encoded == null) return "";
+            // A positively identified previous slot owner must not be inherited. Unknown/damaged
+            // formats are different: refuse migration rather than committing an empty replacement.
+            if (!encoded.startsWith("v2:" + owner + ":")) {
+                String[] header = encoded.split(":", 3);
+                if (header.length == 3 && "v2".equals(header[0])) {
+                    long encodedOwner = Long.parseLong(header[1]);
+                    if (encodedOwner > 0 && encodedOwner != owner) return "";
+                }
+                throw new IllegalStateException();
+            }
+            if (Build.VERSION.SDK_INT < 23) throw new IllegalStateException();
+            String result = Api23.decrypt(account, owner, encoded);
+            if (owner != currentOwner(account)) throw new IllegalStateException();
+            return result;
+        } catch (Exception ignored) {
+            throw new IllegalStateException("原 API Key 暂时无法解密，未覆盖旧配置。请恢复设备密钥后重试。");
+        }
+    }
+
+    /** Revokes only this owner; safe when a logout callback arrives after slot reuse. */
+    public static synchronized boolean clearOwner(int account, long owner) {
+        if (account < 0 || account >= UserConfig.MAX_ACCOUNT_COUNT || owner <= 0) return true;
+        if (Long.valueOf(owner).equals(MEMORY_OWNERS.get(account))) {
+            MEMORY.remove(account); MEMORY_OWNERS.remove(account); SESSION_OVERRIDES.remove(account);
+        }
+        try {
+            SharedPreferences preferences = preferences();
+            if (preferences == null) return false;
+            String encoded = preferences.getString(entry(account), null);
+            if (encoded != null && !encoded.startsWith("v2:" + owner + ":")) return true;
+            if (encoded != null) {
+                if (!preferences.edit().remove(entry(account)).commit()) return false;
+                if (Build.VERSION.SDK_INT >= 23) Api23.deleteKey(account);
+            } else if (owner == currentOwner(account) && Build.VERSION.SDK_INT >= 23) {
+                Api23.deleteKey(account);
+            }
+            return true;
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
     /** Capability hint only: use save()'s result to confirm a particular write succeeded. */
     public static synchronized boolean isPersistent() {
         return Build.VERSION.SDK_INT >= 23

@@ -41,6 +41,8 @@ public final class AiSummaryClient {
         default void onRequestStatus(RequestStatus status) { }
         /** Sensitive exact request text for this task's UI only; never log or persist it. */
         default void onRequestInput(RequestInput input) { }
+        /** Terminal per-request metrics; contains no prompt, answer or credentials. */
+        default void onRequestMetrics(RequestMetrics metrics) { }
     }
 
     public enum RequestPhase { SENDING, RESPONSE, CONTENT }
@@ -86,6 +88,47 @@ public final class AiSummaryClient {
 
     public enum Stage {
         SOURCE, MERGE, VALIDATING
+    }
+
+    /** Immutable server usage and client timings for one completed or failed HTTP request. */
+    public static final class RequestMetrics {
+        public final int requestIndex, partIndex, partTotal, mergeRound;
+        public final Stage stage;
+        public final boolean streaming, succeeded, usageFinal;
+        public final long elapsedMs, responseElapsedMs, firstContentElapsedMs, firstVisibleElapsedMs;
+        public final UsageStats usage;
+
+        RequestMetrics(RequestContext context, boolean streaming, boolean succeeded, boolean usageFinal,
+                       long elapsedMs, long responseElapsedMs, long firstContentElapsedMs,
+                       long firstVisibleElapsedMs, UsageStats usage) {
+            this.requestIndex = context.requestIndex;
+            this.stage = context.stage;
+            this.partIndex = context.partIndex;
+            this.partTotal = context.partTotal;
+            this.mergeRound = context.mergeRound;
+            this.streaming = streaming;
+            this.succeeded = succeeded;
+            this.usageFinal = usageFinal;
+            this.elapsedMs = elapsedMs;
+            this.responseElapsedMs = responseElapsedMs;
+            this.firstContentElapsedMs = firstContentElapsedMs;
+            // First filtered text available, not first generated token or guaranteed UI render time.
+            this.firstVisibleElapsedMs = firstVisibleElapsedMs;
+            this.usage = usage;
+        }
+    }
+
+    private static final class RequestContext {
+        final int requestIndex, partIndex, partTotal, mergeRound;
+        final Stage stage;
+
+        RequestContext(int requestIndex, Stage stage, int partIndex, int partTotal, int mergeRound) {
+            this.requestIndex = requestIndex;
+            this.stage = stage;
+            this.partIndex = partIndex;
+            this.partTotal = partTotal;
+            this.mergeRound = mergeRound;
+        }
     }
 
     public static final class Progress {
@@ -152,6 +195,7 @@ public final class AiSummaryClient {
     private static final int MAX_RESPONSE_BYTES = 1_048_576;
     private static final int MAX_ERROR_BYTES = 16_384;
     private static final int MAX_MODEL_REQUESTS = 128;
+    private static final int OUTPUT_LIMIT_USAGE_TIMEOUT_MS = 2_000;
     private final int connectTimeoutMs;
     private final int readTimeoutMs;
     private final int diagnosticTimeoutMs;
@@ -253,6 +297,7 @@ public final class AiSummaryClient {
                         : AiSummaryPrompt.sourceChunks(snapshot, direction, config.inputCharacterBudget, config.maxOutputTokens);
                 endpoint = acquireEndpoint(config, request);
                 int requestCount = chunks.size();
+                int requestIndex = 0;
                 List<String> summaries = new ArrayList<>();
                 progress(request, callback, Stage.SOURCE, 0, chunks.size(), 0, started);
                 for (int i = 0; i < chunks.size(); i++) {
@@ -264,7 +309,8 @@ public final class AiSummaryClient {
                             : AiSummaryPrompt.sourcePrompt(chunk, i + 1, chunks.size(), direction,
                                     config.inputCharacterBudget, config.maxOutputTokens);
                     String summary = complete(config, systemPrompt, prompt, request,
-                            !questionTask || chunks.size() == 1, callback);
+                            !questionTask || chunks.size() == 1, callback,
+                            new RequestContext(++requestIndex, Stage.SOURCE, i + 1, chunks.size(), 0));
                     if (questionTask) SummaryQuestionPrompt.validateAnswer(summary, AiSummaryPrompt.sourceReferences(chunk));
                     summaries.add(summary);
                     progress(request, callback, Stage.SOURCE, i + 1, chunks.size(), 0, started);
@@ -291,7 +337,8 @@ public final class AiSummaryClient {
                                 : AiSummaryPrompt.mergePrompt(chunk, direction,
                                         config.inputCharacterBudget, config.maxOutputTokens);
                         String summary = complete(config, systemPrompt, prompt, request,
-                                !questionTask || mergeChunks.size() == 1, callback);
+                                !questionTask || mergeChunks.size() == 1, callback,
+                                new RequestContext(++requestIndex, Stage.MERGE, merged.size() + 1, mergeChunks.size(), mergeRound));
                         // Questions retain verified citations; direct summaries use a citation-free protocol.
                         if (questionTask) SummaryQuestionPrompt.validateAnswer(summary, SummaryQuestionPrompt.mergeReferences(chunk));
                         merged.add(summary);
@@ -404,25 +451,25 @@ public final class AiSummaryClient {
     }
 
     private String complete(AiSummarySettings.Config config, String systemPrompt, String prompt, int request, boolean showPartial,
-                            Callback callback)
+                            Callback callback, RequestContext context)
             throws IOException, JSONException, SummaryException, CancelledException {
         return complete(config, systemPrompt, prompt, config.maxOutputTokens,
-                readTimeoutMs, request, config.stream, callback, showPartial).text;
+                readTimeoutMs, request, config.stream, callback, showPartial, context).text;
     }
 
     private Completion complete(AiSummarySettings.Config config, String systemPrompt, String prompt,
                                 int maxOutputTokens, int timeoutMs, int request, boolean stream, Callback callback)
             throws IOException, JSONException, SummaryException, CancelledException {
-        return complete(config, systemPrompt, prompt, maxOutputTokens, timeoutMs, request, stream, callback, true);
+        return complete(config, systemPrompt, prompt, maxOutputTokens, timeoutMs, request, stream, callback, true, null);
     }
 
     private Completion complete(AiSummarySettings.Config config, String systemPrompt, String prompt,
                                 int maxOutputTokens, int timeoutMs, int request, boolean stream, Callback callback,
-                                boolean showPartial)
+                                boolean showPartial, RequestContext context)
             throws IOException, JSONException, SummaryException, CancelledException {
         checkActive(request);
         RequestMonitor monitor = new RequestMonitor(request, callback, stream,
-                systemPrompt.length() + prompt.length(), maxOutputTokens);
+                systemPrompt.length() + prompt.length(), maxOutputTokens, context);
         JSONObject body = new JSONObject();
         if (!config.model.isEmpty()) {
             body.put("model", config.model);
@@ -463,6 +510,7 @@ public final class AiSummaryClient {
                 output.write(encoded);
             }
             int status = current.getResponseCode();
+            monitor.responseElapsedMs = Math.max(0, (System.nanoTime() - monitor.started) / 1_000_000L);
             checkActive(request);
             if (status < 200 || status >= 300) {
                 if (status == 401 || status == 403 || (status >= 300 && status < 400)) {
@@ -481,7 +529,8 @@ public final class AiSummaryClient {
                 final long[] lastPartial = {0};
                 final String[] latestPartial = {""}, deliveredPartial = {""};
                 try {
-                    result = AiSummarySse.read(current.getInputStream(), MAX_RESPONSE_BYTES, () -> {
+                    result = AiSummarySse.read(current.getInputStream(), MAX_RESPONSE_BYTES,
+                            Math.min(timeoutMs, OUTPUT_LIMIT_USAGE_TIMEOUT_MS), () -> {
                         try {
                             checkActive(request);
                         } catch (CancelledException cancelled) {
@@ -489,6 +538,7 @@ public final class AiSummaryClient {
                         }
                     }, new AiSummarySse.Listener() {
                         @Override public void onText(String text) {
+                            if (showPartial) monitor.visible();
                             latestPartial[0] = text; // Already filtered by the SSE reader; never use raw content here.
                             long now = System.nanoTime();
                             if (showPartial && callback != null && (lastPartial[0] == 0 || now - lastPartial[0] >= 75_000_000L)) {
@@ -499,6 +549,16 @@ public final class AiSummaryClient {
                         }
                         @Override public void onContent(int characters, boolean reasoningObserved) {
                             monitor.content(characters, reasoningObserved, false);
+                        }
+                        @Override public void onUsage(UsageStats usage, boolean complete) {
+                            monitor.usage = usage;
+                            monitor.usageFinal = complete;
+                        }
+                        @Override public void onTailReadAbandoned() {
+                            monitor.deferredCleanup = true;
+                        }
+                        @Override public void onAbandonedReadClosed() {
+                            current.disconnect();
                         }
                     });
                 } catch (AiSummarySse.Failure failure) {
@@ -519,6 +579,8 @@ public final class AiSummaryClient {
                 if (result.text.regionMatches(true, 0, "Error:", 0, 6)) {
                     throw new SummaryException(serverError(status, result.text));
                 }
+                if (showPartial) monitor.visible();
+                monitor.succeeded = true;
                 return new Completion(result.text, safeReportedModel(result.reportedModel, config.apiKey));
             }
             String response;
@@ -535,6 +597,7 @@ public final class AiSummaryClient {
                 response = new String(buffer.toByteArray(), StandardCharsets.UTF_8);
             }
             JSONObject responseObject = new JSONObject(response);
+            monitor.usage = UsageStats.fromJson(responseObject.optJSONObject("usage"));
             if (responseObject.has("error") && !responseObject.isNull("error")) {
                 throw new SummaryException(serverError(status, responseObject.get("error").toString()));
             }
@@ -543,6 +606,7 @@ public final class AiSummaryClient {
                 throw new SummaryException("模型服务没有返回 choices 结果。请确认接口兼容 /v1/chat/completions。");
             }
             JSONObject choice = choices.getJSONObject(0);
+            monitor.usageFinal = true; // The entire ordinary response has arrived, including length failures.
             String finish = choice.optString("finish_reason");
             JSONObject message = choice.optJSONObject("message");
             String answer = message == null ? "" : AiSummarySse.textContent(message.opt("content"));
@@ -569,15 +633,18 @@ public final class AiSummaryClient {
             if (stream) {
                 throw new SummaryException("模型服务返回了普通 JSON，未提供 SSE 流式响应。请关闭流式模式后重试。");
             }
+            if (showPartial) monitor.visible();
+            monitor.succeeded = true;
             return new Completion(answer, reportedModel(responseObject, config.apiKey));
         } finally {
             monitor.flush();
+            monitor.finish();
             synchronized (this) {
                 if (connection == current) {
                     connection = null;
                 }
             }
-            current.disconnect();
+            if (!monitor.deferredCleanup) current.disconnect();
         }
     }
 
@@ -585,23 +652,29 @@ public final class AiSummaryClient {
     private final class RequestMonitor {
         final int request, inputCharacters, maxOutputTokens;
         final Callback callback;
+        final RequestContext context;
         final long started = System.nanoTime();
         boolean streaming, reasoningObserved, lastReasoning;
+        boolean sending, succeeded, usageFinal, deferredCleanup;
+        UsageStats usage = UsageStats.UNKNOWN_USAGE;
         int receivedCharacters, lastCharacters;
         long lastUpdate;
-        long responseElapsedMs = -1, firstContentElapsedMs = -1;
+        long responseElapsedMs = -1, firstContentElapsedMs = -1, firstVisibleElapsedMs = -1;
 
-        RequestMonitor(int request, Callback callback, boolean streaming, int inputCharacters, int maxOutputTokens) {
+        RequestMonitor(int request, Callback callback, boolean streaming, int inputCharacters, int maxOutputTokens,
+                       RequestContext context) {
             this.request = request;
             this.callback = callback;
             this.streaming = streaming;
             this.inputCharacters = inputCharacters;
             this.maxOutputTokens = maxOutputTokens;
+            this.context = context;
         }
 
         void phase(RequestPhase phase) {
             long elapsed = Math.max(0, (System.nanoTime() - started) / 1_000_000L);
             if (phase == RequestPhase.RESPONSE && responseElapsedMs < 0) responseElapsedMs = elapsed;
+            if (phase == RequestPhase.SENDING) sending = true;
             if (callback == null) return;
             RequestStatus status = new RequestStatus(phase, streaming, inputCharacters, maxOutputTokens,
                     receivedCharacters, reasoningObserved, elapsed, responseElapsedMs, firstContentElapsedMs);
@@ -625,6 +698,18 @@ public final class AiSummaryClient {
         }
 
         void flush() { content(receivedCharacters, reasoningObserved, true); }
+
+        void visible() {
+            if (firstVisibleElapsedMs < 0) firstVisibleElapsedMs = Math.max(0, (System.nanoTime() - started) / 1_000_000L);
+        }
+
+        void finish() {
+            if (callback == null || context == null || !sending) return;
+            RequestMetrics metrics = new RequestMetrics(context, streaming, succeeded, usageFinal,
+                    Math.max(0, (System.nanoTime() - started) / 1_000_000L), responseElapsedMs,
+                    firstContentElapsedMs, firstVisibleElapsedMs, usage);
+            deliver(request, () -> callback.onRequestMetrics(metrics));
+        }
     }
 
     private String readErrorBody(HttpURLConnection current, int request) throws IOException, CancelledException {

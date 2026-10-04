@@ -59,6 +59,7 @@ public final class AiSummaryClientTest {
         final List<String> partials = new CopyOnWriteArrayList<>();
         final List<AiSummaryClient.RequestStatus> statuses = new CopyOnWriteArrayList<>();
         final List<AiSummaryClient.RequestInput> inputs = new CopyOnWriteArrayList<>();
+        final List<AiSummaryClient.RequestMetrics> metrics = new CopyOnWriteArrayList<>();
         final List<String> events = new CopyOnWriteArrayList<>();
         public void onSuccess(String value) { events.add("SUCCESS"); summary = value; calls++; }
         public void onError(String value) { events.add("ERROR"); error = value; calls++; }
@@ -66,6 +67,7 @@ public final class AiSummaryClientTest {
         public void onPartial(String value) { events.add("PARTIAL:" + value); partials.add(value); }
         public void onRequestStatus(AiSummaryClient.RequestStatus value) { events.add(value.phase.name()); statuses.add(value); }
         public void onRequestInput(AiSummaryClient.RequestInput value) { events.add("INPUT"); inputs.add(value); }
+        public void onRequestMetrics(AiSummaryClient.RequestMetrics value) { events.add("METRICS:" + value.requestIndex); metrics.add(value); }
     }
     private static final class Diagnostic implements AiSummaryClient.DiagnosticCallback {
         volatile AiSummaryClient.DiagnosticResult result;
@@ -228,6 +230,11 @@ public final class AiSummaryClientTest {
             test("SSE decodes fragmented UTF-8 and hides split thinking blocks", AiSummaryClientTest::streamThinking);
             test("every source and merge request displays its own safe draft and exact input", AiSummaryClientTest::streamEveryStage);
             test("ordinary request reports sending, response and safe content counters", AiSummaryClientTest::ordinaryRequestStatus);
+            test("ordinary actual usage and unknown fields remain exact on success and length failure", AiSummaryClientTest::ordinaryUsage);
+            test("SSE trailing usage replaces cumulative snapshots including length failures", AiSummaryClientTest::streamUsage);
+            test("SSE disconnect retains provisional usage without claiming final totals", AiSummaryClientTest::interruptedUsage);
+            test("SSE length bounds a stalled usage tail and keeps its explicit failure", AiSummaryClientTest::boundedLengthUsage);
+            test("first visible timing excludes hidden reasoning and unvalidated failure text", AiSummaryClientTest::visibleMetrics);
             test("streaming status distinguishes headers and hidden reasoning from an answer", AiSummaryClientTest::streamRequestStatus);
             test("ordinary and streaming length errors report the actual cap and observed reasoning", AiSummaryClientTest::observedOutputLimits);
             test("stream errors preserve the final safe draft before failing without retry", AiSummaryClientTest::streamFailureTails);
@@ -818,6 +825,175 @@ public final class AiSummaryClientTest {
                 new JSONObject().put("delta", new JSONObject()).put("finish_reason", reason))) + "\n\n";
     }
 
+    private static JSONObject usage(int prompt, int completion, int total, int reasoning) {
+        return new JSONObject().put("prompt_tokens", prompt).put("completion_tokens", completion).put("total_tokens", total)
+                .put("completion_tokens_details", new JSONObject().put("reasoning_tokens", reasoning));
+    }
+
+    private static String usageEvent(JSONObject usage) {
+        return "data: " + new JSONObject().put("choices", new org.json.JSONArray()).put("usage", usage) + "\n\n";
+    }
+
+    private static void ordinaryUsage() throws Exception {
+        for (boolean length : new boolean[]{false, true}) {
+            JSONObject response = new JSONObject(completion("直接正文没有内置标题"));
+            response.put("usage", usage(11, 23, 35, 7));
+            response.getJSONArray("choices").getJSONObject(0).put("finish_reason", length ? "length" : "stop");
+            Result result = invoke(200, response.toString(), config("local", ""));
+            AiSummaryClient.RequestMetrics metric = onlyMetric(result);
+            check(metric.succeeded != length && metric.usageFinal && !metric.streaming, "ordinary terminal classification is wrong");
+            check(metric.usage.promptTokens == 11 && metric.usage.completionTokens == 23
+                    && metric.usage.totalTokens == 35 && metric.usage.reasoningTokens == 7, "reported usage changed or was inferred");
+            check((metric.firstVisibleElapsedMs < 0) == length, "truncated ordinary text became visible");
+            check(!lastBody.get().has("stream_options") && lastBody.get().length() == 4, "metrics added request options");
+        }
+        Result absent = invoke(200, completion("文字多也不是token数量"), config("local", ""));
+        check(onlyMetric(absent).usage.completionTokens == -1, "usage was inferred from characters or configured cap");
+        JSONObject partial = new JSONObject(completion("正文")).put("usage", new JSONObject().put("prompt_tokens", "20")
+                .put("completion_tokens", 0).put("total_tokens", 4.5));
+        UsageStats counts = onlyMetric(invoke(200, partial.toString(), config("local", ""))).usage;
+        check(counts.promptTokens == -1 && counts.completionTokens == 0 && counts.totalTokens == -1 && counts.reasoningTokens == -1,
+                "invalid counts were coerced or missing fields became zero");
+        AiSummaryClient.RequestMetrics failed = onlyMetric(invoke(401, "SECRET", config("local", "")));
+        check(!failed.succeeded && !failed.usageFinal && failed.firstVisibleElapsedMs == -1 && failed.usage.totalTokens == -1,
+                "HTTP failure claimed generated usage");
+    }
+
+    private static AiSummaryClient.RequestMetrics onlyMetric(Result result) {
+        check(result.metrics.size() == 1, "request needs exactly one terminal metric");
+        AiSummaryClient.RequestMetrics metric = result.metrics.get(0);
+        check(metric.requestIndex == 1 && metric.stage == AiSummaryClient.Stage.SOURCE && metric.partIndex == 1
+                && metric.partTotal == 1 && metric.mergeRound == 0, "source request context wrong");
+        check(metric.elapsedMs >= 0 && (metric.firstContentElapsedMs < 0 || metric.firstContentElapsedMs <= metric.elapsedMs)
+                && (metric.firstVisibleElapsedMs < 0 || metric.firstVisibleElapsedMs >= metric.firstContentElapsedMs
+                && metric.firstVisibleElapsedMs <= metric.elapsedMs), "invalid timing ordering");
+        check(result.events.get(result.events.size() - 2).equals("METRICS:1"), "metrics did not precede terminal callback");
+        return metric;
+    }
+
+    private static void streamUsage() throws Exception {
+        for (boolean length : new boolean[]{false, true}) {
+            String stream = usageEvent(usage(11, 2, 13, 1)) + delta("<think>PRIVATE_REASONING</think>【话题】可见正文")
+                    + finish(length ? "length" : "stop") + usageEvent(usage(11, 23, 34, 7))
+                    + usageEvent(usage(11, 23, 34, 7)) + "data: [DONE]\n\n";
+            nextReply.set(sse(stream));
+            AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
+            try { client.summarize(streamConfig(), MESSAGES, TEST_PROMPT, result); await(result); }
+            finally { client.cancel(); }
+            AiSummaryClient.RequestMetrics metric = onlyMetric(result);
+            check(metric.streaming && metric.usageFinal && metric.succeeded != length, "SSE terminal classification wrong");
+            check(metric.usage.promptTokens == 11 && metric.usage.completionTokens == 23 && metric.usage.totalTokens == 34
+                    && metric.usage.reasoningTokens == 7, "trailing cumulative usage was dropped or added twice");
+            check(metric.firstVisibleElapsedMs >= 0 && !result.partials.isEmpty(), "safe visible body had no timing");
+            for (String text : result.partials) check(!text.contains("PRIVATE_REASONING"), "usage handling exposed reasoning");
+            check(!lastBody.get().has("stream_options"), "SSE metrics added an unsupported request parameter");
+        }
+        nextReply.set(sse(delta("【话题】末尾usage为空") + usageEvent(usage(5, 2, 7, 0)) + finish("stop")
+                + usageEvent(new JSONObject().put("prompt_tokens", 5)) + "data: [DONE]\n\n"));
+        AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
+        try { client.summarize(streamConfig(), MESSAGES, TEST_PROMPT, result); await(result); }
+        finally { client.cancel(); }
+        check(onlyMetric(result).usage.completionTokens == -1, "missing field in final snapshot borrowed an earlier estimate");
+    }
+
+    private static void interruptedUsage() throws Exception {
+        nextReply.set(sse(delta("【话题】未完成") + usageEvent(usage(12, 4, 16, 0))));
+        AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
+        try { client.summarize(streamConfig(), MESSAGES, TEST_PROMPT, result); await(result); }
+        finally { client.cancel(); }
+        AiSummaryClient.RequestMetrics metric = onlyMetric(result);
+        check(!metric.succeeded && !metric.usageFinal && metric.usage.completionTokens == 4,
+                "interrupted stream lost its provisional usage or claimed a final total");
+        for (String finish : new String[]{"stop", "length"}) {
+            nextReply.set(sse(delta("【话题】有正常EOF") + finish(finish) + usageEvent(usage(9, 4, 13, 0))));
+            result = new Result();
+            try { client.summarize(streamConfig(), MESSAGES, TEST_PROMPT, result); await(result); }
+            finally { client.cancel(); }
+            metric = onlyMetric(result);
+            check(metric.usageFinal && metric.succeeded == finish.equals("stop") && metric.usage.totalTokens == 13,
+                    "clean EOF after finish must keep final usage without requiring DONE");
+        }
+        for (String tail : new String[]{"data: {\"error\":\"PRIVATE_TAIL_FAILURE\"}\n\n", "data: {malformed\n\n"}) {
+            nextReply.set(sse(delta("【话题】已明确超限") + finish("length") + usageEvent(usage(12, 4, 16, 0)) + tail));
+            result = new Result();
+            try { client.summarize(streamConfig(), MESSAGES, TEST_PROMPT, result); await(result); }
+            finally { client.cancel(); }
+            metric = onlyMetric(result);
+            check(!metric.usageFinal && result.error.contains("512 tokens") && !result.error.contains("PRIVATE"),
+                    "bad tail masked a known output limit or leaked error details");
+        }
+    }
+
+    private static void boundedLengthUsage() throws Exception {
+        CountDownLatch release = new CountDownLatch(1);
+        String path = "/usage-tail/v1/chat/completions";
+        server.createContext(path, exchange -> {
+            exchange.getRequestBody().readAllBytes();
+            exchange.getResponseHeaders().set("Content-Type", "text/event-stream");
+            exchange.sendResponseHeaders(200, 0);
+            try {
+                exchange.getResponseBody().write((delta("【话题】已到上限") + usageEvent(usage(10, 5, 15, 0)) + finish("length"))
+                        .getBytes(StandardCharsets.UTF_8));
+                exchange.getResponseBody().flush();
+                release.await(15, TimeUnit.SECONDS);
+                exchange.getResponseBody().write((usageEvent(usage(999, 999, 1998, 0)) + "data: [DONE]\n\n")
+                        .getBytes(StandardCharsets.UTF_8));
+            } catch (InterruptedException error) { Thread.currentThread().interrupt(); }
+            finally { exchange.close(); }
+        });
+        AiSummaryClient client = new AiSummaryClient(1000, 30000, 30000);
+        List<Result> results = new ArrayList<>();
+        try {
+            for (int i = 0; i < 3; i++) {
+                Result result = new Result(); results.add(result);
+                long started = System.nanoTime();
+                client.summarize(new AiSummarySettings.Config(base + "/usage-tail/v1", "local", "", 512, true), MESSAGES, TEST_PROMPT, result);
+                await(result);
+                long elapsed = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+                AiSummaryClient.RequestMetrics metric = onlyMetric(result);
+                check(elapsed < 4000 && !metric.succeeded && !metric.usageFinal && metric.usage.totalTokens == 15
+                        && result.error.contains("512 tokens"), "stalled usage tail waited for the full generation timeout or lost length status");
+                long readers = Thread.getAllStackTraces().keySet().stream().filter(t -> t.isAlive() && t.getName().equals("ai-summary-usage-tail")).count();
+                check(readers <= 2, "stalled tails created unbounded reader threads");
+                java.lang.reflect.Field field = AiSummarySse.class.getDeclaredField("USAGE_TAIL_READERS"); field.setAccessible(true);
+                java.util.concurrent.ThreadPoolExecutor executor = (java.util.concurrent.ThreadPoolExecutor) field.get(null);
+                check(executor.getQueue().size() <= 2 && executor.getQueue().remainingCapacity() + executor.getQueue().size() == 2,
+                        "tail queue has no fixed capacity");
+            }
+            Result cancelled = new Result();
+            client.summarize(new AiSummarySettings.Config(base + "/usage-tail/v1", "local", "", 512, true), MESSAGES, TEST_PROMPT, cancelled);
+            awaitStatus(() -> !cancelled.partials.isEmpty());
+            long cancelStarted = System.nanoTime();
+            client.cancel();
+            check(TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - cancelStarted) < 1000, "cancelling a usage tail blocked UI");
+            release.countDown();
+            nextReply.set(new Reply(200, completion("尾部中断后仍可普通生成")));
+            check(afterCancellation(client).summary != null, "bounded tail retained the endpoint lease");
+            for (Result result : results) check(result.calls == 1 && result.metrics.size() == 1 && result.metrics.get(0).usage.totalTokens == 15,
+                    "late usage mutated an already-terminated request");
+            check(cancelled.calls == 0 && cancelled.metrics.isEmpty(), "cancelled tail delivered stale metrics/result");
+        } finally { client.cancel(); release.countDown(); server.removeContext(path); }
+    }
+
+    private static void visibleMetrics() throws Exception {
+        for (String content : new String[]{"<think>PRIVATE_REASONING", "未标记的未完成正文"}) {
+            nextReply.set(sse(delta(content) + finish("length") + usageEvent(usage(8, 20, 28, 15)) + "data: [DONE]\n\n"));
+            AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
+            try { client.summarize(streamConfig(), MESSAGES, TEST_PROMPT, result); await(result); }
+            finally { client.cancel(); }
+            AiSummaryClient.RequestMetrics metric = onlyMetric(result);
+            check(metric.firstContentElapsedMs >= 0 && metric.firstVisibleElapsedMs == -1 && result.partials.isEmpty(),
+                    "hidden/untrusted text was called a visible answer");
+            check(metric.usageFinal && metric.usage.reasoningTokens == 15, "length lost measured reasoning usage");
+        }
+        nextReply.set(sse(delta("任意用户要求的无标题回答") + finish("stop") + "data: [DONE]\n\n"));
+        AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
+        try { client.summarize(streamConfig(), MESSAGES, TEST_PROMPT, result); await(result); }
+        finally { client.cancel(); }
+        check(onlyMetric(result).firstVisibleElapsedMs >= 0 && result.partials.isEmpty() && result.summary != null,
+                "final-only safe text must get visible timing without loosening streaming filtering");
+    }
+
     private static void streamThinking() throws Exception {
         String stream = ": keepalive\r\n\r\ndata:\r\n\r\n"
                 + "data: {\"choices\":[\ndata: {\"delta\":{\"role\":\"assistant\",\"reasoning_content\":\"NEVER_SHOW_FIELD\"}}]}\n\n"
@@ -980,7 +1156,9 @@ public final class AiSummaryClientTest {
             String tail = "进展".repeat(450);
             answers.add(start + tail);
             return new Reply(200, delta("<think>STAGE_THOUGHT_SECRET</think>" + start) + delta(tail)
-                    + finish("stop") + "data: [DONE]\n\n", false, "text/event-stream", 0);
+                    + usageEvent(usage(answers.size() * 10, 2, answers.size() * 10 + 2, 1))
+                    + finish("stop") + usageEvent(usage(answers.size() * 10, 7, answers.size() * 10 + 7, 3))
+                    + "data: [DONE]\n\n", false, "text/event-stream", 0);
         });
         AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
         try {
@@ -1020,6 +1198,32 @@ public final class AiSummaryClientTest {
                 if (progress.stage == AiSummaryClient.Stage.VALIDATING && progress.completed == 1) validating = true;
             }
             check(source && merge && validating, "stage progress missing");
+            check(result.metrics.size() == answers.size(), "some source/merge metrics were omitted");
+            List<UsageStats> usages = new ArrayList<>();
+            int lastRound = 0, lastPart = 0, lastTotal = sources.get();
+            for (int i = 0; i < result.metrics.size(); i++) {
+                AiSummaryClient.RequestMetrics metric = result.metrics.get(i);
+                check(metric.requestIndex == i + 1 && metric.succeeded && metric.usageFinal && metric.streaming,
+                        "request metric index/termination incorrect");
+                check(metric.stage == (i < sources.get() ? AiSummaryClient.Stage.SOURCE : AiSummaryClient.Stage.MERGE), "metric stage wrong");
+                if (metric.mergeRound != lastRound) {
+                    check(metric.mergeRound == lastRound + 1 && lastPart == lastTotal, "merge metric changed round before completing parts");
+                    lastRound = metric.mergeRound; lastPart = 0; lastTotal = metric.partTotal;
+                }
+                check(metric.partIndex == ++lastPart && metric.partTotal == lastTotal, "stage part metrics reset incorrectly");
+                check(metric.usage.promptTokens == (i + 1) * 10 && metric.usage.completionTokens == 7
+                        && metric.firstVisibleElapsedMs >= metric.firstContentElapsedMs && metric.firstVisibleElapsedMs <= metric.elapsedMs,
+                        "per-request usage/time leaked from another request");
+                int eventIndex = result.events.indexOf("METRICS:" + (i + 1));
+                check(eventIndex >= 0 && (i == answers.size() - 1 || result.events.get(eventIndex + 1).equals("SENDING")),
+                        "metrics did not precede the next request boundary");
+                usages.add(metric.usage);
+            }
+            UsageStats total = UsageStats.aggregate(usages);
+            int n = answers.size();
+            check(total.promptTokens == 10L * n * (n + 1) / 2 && total.completionTokens == 7L * n
+                    && total.totalTokens == total.promptTokens + 7L * n && total.reasoningTokens == 3L * n,
+                    "multi-round usage counted cumulative SSE events twice");
         } finally {
             client.cancel(); replyGenerator.set(null);
         }
@@ -1146,7 +1350,7 @@ public final class AiSummaryClientTest {
             nextReply.set(new Reply(200, completion("新的普通请求 [m1]")));
             Result fresh = afterCancellation(client);
             check(stale.calls == 0 && stale.partials.size() == partialCount && stale.progress.size() == progressCount
-                    && stale.statuses.size() == statusCount && stale.inputs.size() == inputCount,
+                    && stale.statuses.size() == statusCount && stale.inputs.size() == inputCount && stale.metrics.isEmpty(),
                     "cancelled stream delivered a later callback");
             check(fresh.summary != null, "client did not recover after stream cancellation");
         } finally {
@@ -1166,7 +1370,7 @@ public final class AiSummaryClientTest {
             releaseRequest.countDown(); AndroidUtilities.drain();
             nextReply.set(new Reply(200, completion("取消之后的新请求 [m1]")));
             check(afterCancellation(client).summary != null, "cancelled worker did not release its endpoint");
-            check(result.inputs.isEmpty() && result.statuses.isEmpty() && result.partials.isEmpty() && result.calls == 0,
+            check(result.inputs.isEmpty() && result.statuses.isEmpty() && result.partials.isEmpty() && result.metrics.isEmpty() && result.calls == 0,
                     "cancelled request exposed a queued input or result");
         } finally {
             client.cancel(); releaseRequest.countDown(); requestStarted = null; releaseRequest = null;

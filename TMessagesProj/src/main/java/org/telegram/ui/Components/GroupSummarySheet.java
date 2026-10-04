@@ -54,6 +54,8 @@ import org.telegram.messenger.ai.SummaryStateStore;
 import org.telegram.messenger.ai.SummarySourceVerifier;
 import org.telegram.messenger.ai.SummaryResultCache;
 import org.telegram.messenger.ai.SummaryFilter;
+import org.telegram.messenger.ai.SummaryExcludedSendersStore;
+import org.telegram.messenger.ai.UsageStats;
 import org.telegram.messenger.ai.SummaryChatExport;
 import org.telegram.ui.ActionBar.AlertDialog;
 import org.telegram.ui.ActionBar.BaseFragment;
@@ -61,6 +63,8 @@ import org.telegram.ui.ActionBar.Theme;
 import org.telegram.ui.SummaryHistoryActivity;
 
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Set;
 import java.util.Locale;
 import java.util.Date;
 import java.util.HashMap;
@@ -80,7 +84,7 @@ public final class GroupSummarySheet {
         void open(long dialogId, int messageId);
     }
 
-    enum RangeMode { RECENT, TODAY, SINCE, UNREAD, REPLAY }
+    enum RangeMode { RECENT, TODAY, SINCE, UNREAD, REPLAY, SELECTED }
 
     static final class RangeRequest {
         final RangeMode mode;
@@ -290,6 +294,17 @@ public final class GroupSummarySheet {
     private SummaryFilter.Options filterOptions = SummaryFilter.Options.DEFAULT;
     private boolean includePublished;
     private AiSummarySettings.Config selectionConfig;
+    private TextView selectionProfileLabel;
+    private boolean selectionPageVisible;
+    private SummaryHistoryLoader.Result selectedSnapshot;
+    private boolean selectedSnapshotInvalid;
+    private Runnable selectedDiscarded, selectedInvalidated;
+    private boolean startingManagedTask;
+    private Set<Long> excludedSenderIds = Collections.emptySet();
+    private boolean exclusionsLoaded;
+    private TextView exclusionStatus;
+    private TextView requestMetricsView;
+    private int renderedMetricsCount = -1;
 
     private boolean summaryFiltered;
     private SummaryQuestionSheet questionSheet;
@@ -339,15 +354,28 @@ public final class GroupSummarySheet {
     public static GroupSummarySheet createEmbedded(BaseFragment fragment, int account, long dialogId, long topicId,
             int unreadLower, int unreadUpper, boolean entryUnreadSnapshot, SourceNavigator navigator,
             Runnable historyAction) {
+        return createEmbedded(fragment, account, dialogId, topicId, unreadLower, unreadUpper,
+                entryUnreadSnapshot, navigator, historyAction, null);
+    }
+
+    public static GroupSummarySheet createEmbedded(BaseFragment fragment, int account, long dialogId, long topicId,
+            int unreadLower, int unreadUpper, boolean entryUnreadSnapshot, SourceNavigator navigator,
+            Runnable historyAction, SummaryHistoryLoader.Result selectedSnapshot) {
+        if (selectedSnapshot != null && !selectedSnapshot.matchesSelectedScope(account,
+                UserConfig.getInstance(account).getClientUserId(), dialogId, topicId)) {
+            throw new IllegalArgumentException("所选消息已失效或不属于当前来源，请重新选择。");
+        }
         GroupSummarySheet sheet = new GroupSummarySheet(fragment, account, dialogId, topicId,
                 unreadLower, unreadUpper, navigator);
         sheet.embedded = true;
+        sheet.selectedSnapshot = selectedSnapshot;
+        if (selectedSnapshot != null) sheet.rangeMode = RangeMode.SELECTED;
         sheet.entryUnreadSnapshot = entryUnreadSnapshot;
         sheet.historyAction = historyAction;
         sheet.taskController = SummaryTaskController.get(account);
         sheet.taskController.addListener(sheet.taskListener);
         SummaryTaskController.Session task = sheet.taskController.current();
-        if (task != null && task.dialogId == dialogId && task.topicId == topicId) {
+        if (selectedSnapshot == null && task != null && task.dialogId == dialogId && task.topicId == topicId) {
             sheet.managedTaskVisible = true;
             sheet.onManagedTaskChanged(task);
         }
@@ -358,6 +386,11 @@ public final class GroupSummarySheet {
 
     public View getContentView() { return content; }
 
+    public void setSelectedSnapshotCallbacks(Runnable discarded, Runnable invalidated) {
+        selectedDiscarded = discarded;
+        selectedInvalidated = invalidated;
+    }
+
     public void setAttached(boolean value) {
         if (closed || attached == value) return;
         attached = value;
@@ -367,7 +400,14 @@ public final class GroupSummarySheet {
         } else if (taskController != null) {
             SummaryTaskController.Session task = taskController.current();
             managedRenderedState = null;
-            if (task != null && task.dialogId == dialogId && task.topicId == topicId && (task.running() || managedTaskVisible)) onManagedTaskChanged(task);
+            if (task != null && task.dialogId == dialogId && task.topicId == topicId
+                    && (rangeMode != RangeMode.SELECTED || managedTaskVisible)
+                    && (task.running() || managedTaskVisible)) onManagedTaskChanged(task);
+            else if (selectionPageVisible) {
+                selectionConfig = null;
+                exclusionsLoaded = false;
+                showSelection();
+            }
         }
     }
 
@@ -414,6 +454,8 @@ public final class GroupSummarySheet {
         sourceMessages = null;
         coverageNote = null;
         sessionPrompt = null;
+        selectedSnapshot = null;
+        selectedDiscarded = selectedInvalidated = null;
         summaryPrompt = null;
         summaryConfig = null;
         lastSuccessfulSources = null;
@@ -622,6 +664,11 @@ public final class GroupSummarySheet {
         if (closed) return;
         if (!checkAccountOwner()) return;
         SourceUpdate update = new SourceUpdate(null, 0, false);
+        if (historySourceChanged(selectedSnapshot, messageId, update)) {
+            invalidateSelectedSnapshot();
+            invalidateSources("所选消息已删除，请返回聊天重新选择。", false);
+            return;
+        }
         if (exportTask != null && sourceChanged(exportTask.rawSources, messageId, update)) {
             invalidateExportSources("导出范围内的原消息已删除，请重新读取后导出。");
             return;
@@ -641,6 +688,11 @@ public final class GroupSummarySheet {
         if (closed) return;
         if (!checkAccountOwner()) return;
         SourceUpdate update = new SourceUpdate(text, editDate, usable);
+        if (historySourceChanged(selectedSnapshot, messageId, update)) {
+            invalidateSelectedSnapshot();
+            invalidateSources("所选消息已修改或不可用，请返回聊天重新选择。", false);
+            return;
+        }
         if (exportTask != null && sourceChanged(exportTask.rawSources, messageId, update)) {
             invalidateExportSources("导出范围内的原消息已修改或不可用，请重新读取后导出。");
             return;
@@ -657,7 +709,22 @@ public final class GroupSummarySheet {
     }
 
     public void onAccessRevoked() {
+        invalidateSelectedSnapshot();
         if (!closed) invalidateSources("当前聊天已不可访问，已清除摘要和原文快照。", true);
+    }
+
+    public void invalidateSelectedSourceSnapshot() {
+        if (closed || !checkAccountOwner()) return;
+        rangeMode = RangeMode.SELECTED;
+        invalidateSelectedSnapshot();
+        invalidateSources("所选消息已失效，请返回聊天重新选择。", false);
+    }
+
+    private void invalidateSelectedSnapshot() {
+        boolean wasSelected = selectedSnapshot != null || rangeMode == RangeMode.SELECTED;
+        if (wasSelected) selectedSnapshotInvalid = true;
+        selectedSnapshot = null;
+        if (wasSelected && selectedInvalidated != null) selectedInvalidated.run();
     }
 
     private boolean sourceChanged(ArrayList<SummaryMessage> sources, int messageId, SourceUpdate update) {
@@ -703,9 +770,11 @@ public final class GroupSummarySheet {
     }
 
     private void cacheCompletedResult(String summary) {
+        if (embedded && managedTask != null && managedTask.record != null && !managedTask.historySaved) return;
         if (sourceSnapshotInvalid || summaryHistory == null || !summaryHistory.complete
                 || sourceMessages == null || sourceMessages.isEmpty()
-                || summaryRange == null || !resultCommitted && summaryRange.mode != RangeMode.REPLAY) return;
+                || summaryRange == null || !resultCommitted && summaryRange.mode != RangeMode.REPLAY
+                    && summaryRange.mode != RangeMode.SELECTED) return;
         try {
             SummaryResultCache.Key key = SummaryResultCache.key(account, ownerId, dialogId, topicId,
                     sourceMessages, summaryPrompt, summaryConfig, null);
@@ -1000,6 +1069,11 @@ public final class GroupSummarySheet {
     }
 
     private void clearContent() {
+        selectionPageVisible = false;
+        selectionProfileLabel = null;
+        exclusionStatus = null;
+        requestMetricsView = null;
+        renderedMetricsCount = -1;
         requestInputsButton = null;
         historySaveStatus = null;
         historySaveRetry = null;
@@ -1028,7 +1102,7 @@ public final class GroupSummarySheet {
             if (historyAction != null) historyAction.run();
             return;
         }
-        if (taskController != null) {
+        if (taskController != null && selectedSnapshot == null && !selectedSnapshotInvalid) {
             SummaryTaskController.Session running = taskController.current();
             if (running != null && running.running() && running.dialogId == dialogId && running.topicId == topicId) {
                 managedRenderedState = null;
@@ -1044,15 +1118,21 @@ public final class GroupSummarySheet {
             addText("当前聊天已不可访问，请返回聊天确认读取权限后重试。", false);
             return;
         }
+        if (rangeMode == RangeMode.SELECTED && (selectedSnapshotInvalid || selectedSnapshot == null)) {
+            addText("所选消息已失效，请返回聊天重新选择。不会自动改为最近消息。", true);
+            addAction("明确放弃所选消息，改用普通范围", this::leaveSelectedRange);
+            return;
+        }
         if (!promptLoaded) {
             loadPromptPreferences();
             return;
         }
-        if (summaryState == null) {
+        if (summaryState == null && rangeMode != RangeMode.SELECTED) {
             loadSummaryState(false);
             return;
         }
-        addText(topicId == 0 ? "选择当前聊天的文字消息范围" : "仅总结当前话题的文字消息", true);
+        selectionPageVisible = true;
+        addText(rangeMode == RangeMode.SELECTED ? "确认所选消息" : topicId == 0 ? "选择当前聊天的文字消息范围" : "仅总结当前话题的文字消息", true);
         if (settingsNotice != null) {
             addText(settingsNotice, false);
         }
@@ -1063,8 +1143,10 @@ public final class GroupSummarySheet {
 
         RadioGroup choices = new RadioGroup(context);
         choices.setOrientation(RadioGroup.VERTICAL);
-        for (RangeMode mode : new RangeMode[] {RangeMode.RECENT, RangeMode.TODAY, RangeMode.SINCE, RangeMode.UNREAD}) {
-            RadioButton option = radio(mode == RangeMode.RECENT ? "最近 N 条文字消息"
+        for (RangeMode mode : rangeMode == RangeMode.SELECTED ? new RangeMode[] {RangeMode.SELECTED}
+                : new RangeMode[] {RangeMode.RECENT, RangeMode.TODAY, RangeMode.SINCE, RangeMode.UNREAD}) {
+            RadioButton option = radio(mode == RangeMode.SELECTED ? "仅本次手动选择的 " + selectedSnapshot.messages.size() + " 条文字"
+                    : mode == RangeMode.RECENT ? "最近 N 条文字消息"
                     : mode == RangeMode.TODAY ? "当日文字消息"
                     : mode == RangeMode.SINCE ? "上次总结之后"
                     : entryUnreadSnapshot ? "进入聊天时的未读消息" : "选择来源时的未读消息");
@@ -1081,13 +1163,21 @@ public final class GroupSummarySheet {
 
         EditTextBoldCursor count = edit("条数（1–" + SummaryHistoryLoader.MAX_RECENT_COUNT + "）", recentCountText,
                 InputType.TYPE_CLASS_NUMBER);
+        count.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence value, int start, int length, int after) { }
+            @Override public void onTextChanged(CharSequence value, int start, int before, int length) { recentCountText = value.toString(); }
+            @Override public void afterTextChanged(Editable value) { }
+        });
         TextView rangeNote = addText("", false);
         Runnable updateRange = () -> {
-            count.setEnabled(rangeMode != RangeMode.TODAY);
+            count.setEnabled(rangeMode != RangeMode.TODAY && rangeMode != RangeMode.SELECTED);
+            count.setVisibility(rangeMode == RangeMode.SELECTED ? View.GONE : View.VISIBLE);
             count.setAlpha(rangeMode == RangeMode.TODAY ? 0.5f : 1f);
             count.setHint((rangeMode == RangeMode.UNREAD || rangeMode == RangeMode.SINCE && summaryState.cursor > 0
                     ? "每批历史条数" : "文字条数") + "（1–" + SummaryHistoryLoader.MAX_RECENT_COUNT + "）");
-            rangeNote.setText(rangeMode == RangeMode.SINCE
+            rangeNote.setText(rangeMode == RangeMode.SELECTED ? selectedSnapshot.coverageNote
+                    + "\n将应用当前总结筛选与排除名单；不补抓其他消息，不推进增量进度。"
+                    : rangeMode == RangeMode.SINCE
                     ? summaryState.cursor == 0
                         ? "尚无增量起点。本次以最近 N 条文字初始化，之前的历史不包含；成功后从该位置继续补齐新消息。"
                         : "从已记录位置之后按时间先后分批补齐。每批历史条数包含媒体和服务消息，但只有文字会发送给模型。"
@@ -1104,7 +1194,7 @@ public final class GroupSummarySheet {
             updateRange.run();
         });
         updateRange.run();
-        if (!hasUnreadSnapshot()) {
+        if (rangeMode != RangeMode.SELECTED && !hasUnreadSnapshot()) {
             addText("本次未取得可靠的未读边界，未读范围不可用。整个论坛需选择具体话题；其他范围仍可使用。", false);
         }
         addText("点击“开始总结”才会将文字发送到已配置的模型 API。也可独立导出待总结消息，不需要配置或启动模型。已完成的摘要自动加密保存在本机总结历史。", false);
@@ -1133,7 +1223,19 @@ public final class GroupSummarySheet {
             showFilterEditor();
         });
 
-        addAction("MNN API 设置", () -> {
+        exclusionStatus = addText(exclusionsLoaded ? exclusionLabel() : "本群排除 UID：正在读取…", false);
+        addAction("编辑本群排除 UID", () -> {
+            recentCountText = count.getText().toString();
+            fragment.presentFragment(new org.telegram.ui.SummaryExcludedSendersActivity(account, ownerId, dialogId, ids -> {
+                if (closed || !checkAccountOwner()) return;
+                excludedSenderIds = ids;
+                exclusionsLoaded = true;
+                if (selectionPageVisible) showSelection();
+            }));
+        });
+        addText("仅总结输入排除名单中的真实用户发言，未知或匿名身份不会按昵称猜测；不影响导出。", false);
+        selectionProfileLabel = addText(selectionConfigLabel(), true);
+        addAction("切换或管理 API 配置", () -> {
             recentCountText = count.getText().toString();
             showSettings();
         });
@@ -1147,11 +1249,14 @@ public final class GroupSummarySheet {
         TextView start = addAction("开始总结", () -> {
             if (readSelectedCount(count)) startSummary();
         });
-        if (embedded) prepareSelectionConfig(start);
+        prepareSelectionConfig(start);
         addAction("导出待总结消息", () -> {
             if (readSelectedCount(count)) showExportFormats(selectedRangeRequest());
         });
-        if (lastSuccessfulHistory != null && lastSuccessfulSources != null) {
+        if (rangeMode == RangeMode.SELECTED) {
+            addAction("明确放弃所选消息，改用普通范围", this::leaveSelectedRange);
+        }
+        if (rangeMode != RangeMode.SELECTED && lastSuccessfulHistory != null && lastSuccessfulSources != null) {
             addAction("用当前要求重做上次成功范围", () -> {
                 recentCountText = count.getText().toString();
                 RangeRequest request = new RangeRequest(RangeMode.REPLAY, recentCount, summaryState.cursor,
@@ -1161,7 +1266,7 @@ public final class GroupSummarySheet {
             });
             addText("重做使用上次成功范围的原始文字快照，重新应用当前筛选与核心总结要求，不移动增量进度；任务快照只在当前进程内短时保留，切换来源不会复用临时核心要求。", false);
         }
-        if (summaryState.completedAt > 0) {
+        if (rangeMode != RangeMode.SELECTED && summaryState != null && summaryState.completedAt > 0) {
             addAction("按已保存范围分批重读并重做", () -> {
                 recentCountText = count.getText().toString();
                 startSummary(new RangeRequest(RangeMode.REPLAY, SummaryHistoryLoader.MAX_RECENT_COUNT,
@@ -1178,7 +1283,7 @@ public final class GroupSummarySheet {
 
     private boolean readSelectedCount(EditTextBoldCursor count) {
         recentCountText = count.getText().toString().trim();
-        if (rangeMode == RangeMode.TODAY) return true;
+        if (rangeMode == RangeMode.TODAY || rangeMode == RangeMode.SELECTED) return true;
         try {
             recentCount = Integer.parseInt(recentCountText);
         } catch (NumberFormatException ignored) {
@@ -1192,7 +1297,19 @@ public final class GroupSummarySheet {
         return true;
     }
 
+    private void leaveSelectedRange() {
+        selectedSnapshot = null;
+        selectedSnapshotInvalid = false;
+        rangeMode = RangeMode.RECENT;
+        if (selectedDiscarded != null) selectedDiscarded.run();
+        showSelection();
+    }
+
     private RangeRequest selectedRangeRequest() {
+        if (rangeMode == RangeMode.SELECTED) {
+            return new RangeRequest(RangeMode.SELECTED, selectedSnapshot.messages.size(), 0, 0, 0, false,
+                    selectedSnapshot, selectedSnapshot.messages, filterOptions, includePublished);
+        }
         return new RangeRequest(rangeMode, recentCount, summaryState.cursor,
                 rangeMode == RangeMode.UNREAD ? unreadLower : summaryState.cursor,
                 rangeMode == RangeMode.UNREAD ? unreadUpper : -1,
@@ -1200,6 +1317,7 @@ public final class GroupSummarySheet {
     }
 
     private String exportRangeLabel(RangeRequest request) {
+        if (request.mode == RangeMode.SELECTED) return "仅本次手动选择的文字消息（不补抓其他消息）";
         if (request.mode == RangeMode.TODAY) return "当日文字消息（手机时区，今天 00:00 起）";
         if (request.mode == RangeMode.RECENT) return "最近 " + request.count + " 条有效文字消息（不含其他类型）";
         if (request.mode == RangeMode.SINCE && request.initialize) {
@@ -1239,6 +1357,12 @@ public final class GroupSummarySheet {
         addText(exportRangeLabel(request), false);
         addText("不连接 MNN，不改变总结进度。", false);
         addAction("取消导出", this::showSelection);
+        if (request.mode == RangeMode.SELECTED) {
+            if (request.replayHistory == null || !request.replayHistory.matchesSelectedScope(account, ownerId, dialogId, topicId)) {
+                showExportError(task, "所选消息已失效，请返回聊天重新选择。");
+            } else prepareExport(task, request.replayHistory, generation);
+            return;
+        }
         historyLoader = new SummaryHistoryLoader(account, dialogId, topicId);
         SummaryHistoryLoader.Callback callback = new SummaryHistoryLoader.Callback() {
             @Override public void onLoaded(SummaryHistoryLoader.Result result) {
@@ -1746,28 +1870,62 @@ public final class GroupSummarySheet {
         });
     }
 
+    private String selectionConfigLabel() {
+        return selectionConfig == null ? "当前 API：正在读取或尚未选择"
+                : "当前 API：" + (selectionConfig.profileName.isEmpty() ? "未命名配置" : selectionConfig.profileName)
+                    + " · " + (selectionConfig.model.isEmpty() ? "服务当前模型" : selectionConfig.model);
+    }
+
+    public void refreshApiSelection() {
+        if (closed || !checkAccountOwner()) return;
+        selectionConfig = null;
+        if (dialogId != 0 && selectionPageVisible) showSelection();
+    }
+
+    private String exclusionLabel() {
+        return "本群排除 UID：" + excludedSenderIds.size() + " 个（本群所有话题共享）";
+    }
+
     private void prepareSelectionConfig(TextView start) {
-        if (selectionConfig != null) return;
+        if (selectionConfig != null && exclusionsLoaded) return;
         start.setEnabled(false);
-        start.setText("正在读取 API 设置…");
+        start.setText("正在读取 API 配置与排除名单…");
         final int generation = operation;
+        final AiSummarySettings.Config cachedConfig = selectionConfig;
+        final Set<Long> cachedIds = exclusionsLoaded ? excludedSenderIds : null;
         Utilities.globalQueue.postRunnable(() -> {
-            AiSummarySettings.Config loaded = null;
-            try { if (sameAccountOwner()) loaded = AiSummarySettings.load(account, ownerId); }
-            catch (RuntimeException ignored) { }
+            if (!sameAccountOwner()) return;
+            AiSummarySettings.Config loaded = cachedConfig;
+            Set<Long> ids = cachedIds;
+            if (loaded == null) {
+                try { loaded = AiSummarySettings.load(account, ownerId); }
+                catch (RuntimeException ignored) { }
+            }
+            if (ids == null) {
+                try { ids = SummaryExcludedSendersStore.load(account, ownerId, dialogId).ids; }
+                catch (RuntimeException ignored) { }
+            }
             final AiSummarySettings.Config result = loaded;
+            final Set<Long> loadedIds = ids;
             AndroidUtilities.runOnUIThread(() -> {
                 if (!active(generation)) return;
                 selectionConfig = result;
-                start.setText(result == null ? "无法读取设置，请打开 API 设置重试" : "开始总结");
-                start.setEnabled(result != null);
+                exclusionsLoaded = loadedIds != null;
+                if (loadedIds != null) excludedSenderIds = loadedIds;
+                if (selectionProfileLabel != null) selectionProfileLabel.setText(result == null
+                        ? "当前 API：未选择或暂时无法读取，请打开配置列表" : selectionConfigLabel());
+                if (exclusionStatus != null) exclusionStatus.setText(exclusionsLoaded ? exclusionLabel()
+                        : "无法读取本群排除名单，未按空名单继续。请编辑名单重试读取。");
+                start.setText(result == null ? "请先选择可用的 API 配置"
+                        : exclusionsLoaded ? "开始总结" : "请先重新读取排除名单");
+                start.setEnabled(result != null && exclusionsLoaded);
             });
         });
     }
 
     private void showSettings() {
-        managedTaskVisible = false;
-        loadSettings(this::showSettings);
+        if (closed || !checkAccountOwner() || fragment.isFinished) return;
+        fragment.presentFragment(new org.telegram.ui.ApiProfilesActivity(account, ownerId, this::refreshApiSelection));
     }
 
     private interface ConfigCallback {
@@ -1853,14 +2011,14 @@ public final class GroupSummarySheet {
         validation.setTextColor(color(Theme.key_text_RedRegular));
         validation.setVisibility(View.GONE);
         addAction("测试连接", () -> {
-            AiSummarySettings.Config snapshot = readSettingsInput(address, model, key, outputTokens, contextBudget,
+            AiSummarySettings.Config snapshot = readSettingsInput(config, address, model, key, outputTokens, contextBudget,
                     validation, streaming.isChecked(), (AiSummarySettings.ServiceType) serviceTypes.findViewById(serviceTypes.getCheckedRadioButtonId()).getTag());
             if (snapshot != null) {
                 testConnection(snapshot);
             }
         });
         addAction("保存设置", () -> {
-            AiSummarySettings.Config updated = readSettingsInput(address, model, key, outputTokens, contextBudget,
+            AiSummarySettings.Config updated = readSettingsInput(config, address, model, key, outputTokens, contextBudget,
                     validation, streaming.isChecked(), (AiSummarySettings.ServiceType) serviceTypes.findViewById(serviceTypes.getCheckedRadioButtonId()).getTag());
             if (updated != null) {
                 saveSettings(updated);
@@ -1869,7 +2027,7 @@ public final class GroupSummarySheet {
         addAction("返回范围选择", this::showSelection);
     }
 
-    private AiSummarySettings.Config readSettingsInput(EditTextBoldCursor address, EditTextBoldCursor model,
+    private AiSummarySettings.Config readSettingsInput(AiSummarySettings.Config opening, EditTextBoldCursor address, EditTextBoldCursor model,
                                                        EditTextBoldCursor key, EditTextBoldCursor outputTokens,
                                                        EditTextBoldCursor contextBudget, TextView validation, boolean stream, AiSummarySettings.ServiceType serviceType) {
         validation.setVisibility(View.GONE);
@@ -1895,7 +2053,7 @@ public final class GroupSummarySheet {
             contextBudget.requestFocus();
             return null;
         }
-        AiSummarySettings.Config config = new AiSummarySettings.Config(address.getText().toString().trim(),
+        AiSummarySettings.Config config = opening.withValues(address.getText().toString().trim(),
                 model.getText().toString().trim(), key.getText().toString().trim(), tokens, stream, inputCharacterBudget, serviceType);
         String error = AiSummarySettings.validate(config);
         if (error != null) {
@@ -2029,6 +2187,12 @@ public final class GroupSummarySheet {
     }
 
     private void startSummary() {
+        if (rangeMode == RangeMode.SELECTED) {
+            if (selectedSnapshotInvalid || selectedSnapshot == null) { showSelection(); return; }
+            startSummary(new RangeRequest(RangeMode.SELECTED, selectedSnapshot.messages.size(), 0, 0, 0,
+                    false, selectedSnapshot, selectedSnapshot.messages));
+            return;
+        }
         if (summaryState == null) {
             loadSummaryState(false);
             return;
@@ -2044,6 +2208,7 @@ public final class GroupSummarySheet {
         if (closed) return;
         if (task == null) {
             if (managedTask != null) {
+                if (!startingManagedTask && managedTask.range.mode == RangeMode.SELECTED) invalidateSelectedSnapshot();
                 clearCachedResult();
                 managedTask = null;
                 managedRenderedState = null;
@@ -2054,11 +2219,13 @@ public final class GroupSummarySheet {
             return;
         }
         if (task.dialogId != dialogId || task.topicId != topicId || task.ownerId != ownerId || !attached) return;
+        if (rangeMode == RangeMode.SELECTED && !managedTaskVisible && task != managedTask) return;
         if (!managedTaskVisible && task == managedTask && !task.running()
                 && task.state != SummaryTaskController.State.INVALIDATED) return;
         managedTaskVisible = true;
         if (managedTask != task) {
             sourceSnapshotInvalid = false;
+            if (task.range.mode == RangeMode.SELECTED) selectedSnapshotInvalid = false;
             viewingCachedResult = false;
             lastSuccessfulHistory = null;
             lastSuccessfulSources = null;
@@ -2069,6 +2236,10 @@ public final class GroupSummarySheet {
             requestInputs.clear();
         }
         summaryRange = task.range;
+        if (task.range.mode == RangeMode.SELECTED && task.range.replayHistory != null) {
+            rangeMode = RangeMode.SELECTED;
+            selectedSnapshot = task.range.replayHistory;
+        }
         summaryPrompt = task.prompt;
         summaryConfig = task.config;
         summaryHistory = task.history;
@@ -2094,7 +2265,7 @@ public final class GroupSummarySheet {
         boolean changed = managedRenderedState != task.state;
         managedRenderedState = task.state;
         if (task.state == SummaryTaskController.State.SUCCESS) {
-            if (task.history != null && task.history.complete && (task.committed || task.range.mode == RangeMode.REPLAY)) {
+            if (task.history != null && task.history.complete && (task.committed || task.range.mode == RangeMode.REPLAY || task.range.mode == RangeMode.SELECTED)) {
                 lastSuccessfulHistory = task.history;
                 lastSuccessfulSources = task.sources == null ? null : new ArrayList<>(task.sources);
             }
@@ -2116,6 +2287,7 @@ public final class GroupSummarySheet {
             if (changed) {
                 cancelWork();
                 sourceSnapshotInvalid = task.state == SummaryTaskController.State.INVALIDATED;
+                if (task.range.mode == RangeMode.SELECTED) invalidateSelectedSnapshot();
                 sourceMessages = null; summaryHistory = null;
                 lastSuccessfulHistory = null; lastSuccessfulSources = null;
                 clearCachedResult();
@@ -2147,6 +2319,7 @@ public final class GroupSummarySheet {
                 addFoldedDetails("运行详情与请求输入", () -> {
                     requestStatus = addText("等待模型接口响应…", false);
                     addRequestInputsAction();
+                    addRequestMetricsView();
                 });
             }
             addText("返回、切换页签或切换 App 不会停止任务；后台由系统通知显示进度，可从任务卡继续查看。", false);
@@ -2164,14 +2337,27 @@ public final class GroupSummarySheet {
         modelRequestStartedAt = task.requestStartedAt;
         updateRequestStatusText();
         updateRequestInputsButton();
+        updateRequestMetricsView();
         if (partialLabel != null) partialLabel.setText(task.requestStage + " · 当前草稿，尚未完成");
         if (task.draft != null && !task.draft.equals(streamingDraft)) updatePartialAnswer(task.draft, operation);
     }
 
     private void startSummary(RangeRequest request) {
+        if (request.mode == RangeMode.SELECTED && (selectedSnapshotInvalid || request.replayHistory == null
+                || !request.replayHistory.matchesSelectedScope(account, ownerId, dialogId, topicId))) {
+            settingsNotice = "所选消息已失效，请返回聊天重新选择。";
+            showSelection();
+            return;
+        }
+        if (request.filters == null && !exclusionsLoaded) {
+            settingsNotice = "排除名单尚未读取完成，请确认名单后再开始总结。";
+            showSelection();
+            return;
+        }
         final RangeRequest snapshot = request.filters == null
                 ? new RangeRequest(request.mode, request.count, request.expectedCursor, request.lower, request.upper,
-                    request.initialize, request.replayHistory, request.replayMessages, filterOptions, includePublished) : request;
+                    request.initialize, request.replayHistory, request.replayMessages,
+                    filterOptions.withExcludedSenderIds(excludedSenderIds), includePublished) : request;
         final PromptOptions prompt = effectivePrompt().withFocusSelf(snapshot.filters.mode == SummaryFilter.Mode.FOCUS_SELF);
         if (!requireCoreSummaryInstructions(prompt)) return;
         summaryRange = snapshot;
@@ -2192,6 +2378,11 @@ public final class GroupSummarySheet {
     private void startSummary(AiSummarySettings.Config config, PromptOptions prompt, RangeRequest request) {
         if (closed || fragment.isFinished || !checkAccountOwner()) return;
         if (!requireCoreSummaryInstructions(prompt)) return;
+        if (request.mode == RangeMode.SELECTED && (selectedSnapshotInvalid || request.replayHistory == null
+                || !request.replayHistory.matchesSelectedScope(account, ownerId, dialogId, topicId))) {
+            showSelection();
+            return;
+        }
         if (isSummaryAccessRevoked()) {
             showSelection();
             return;
@@ -2200,7 +2391,13 @@ public final class GroupSummarySheet {
             cancelWork();
             managedTaskVisible = true;
             managedRenderedState = null;
-            if (!taskController.start(dialogId, topicId, request, config, prompt)) {
+            boolean started;
+            startingManagedTask = true;
+            try { started = taskController.start(dialogId, topicId, request, config, prompt); }
+            finally { startingManagedTask = false; }
+            if (!started) {
+                managedTaskVisible = false;
+                managedRenderedState = null;
                 clearContent();
                 addText("已有总结任务正在运行，请从中心顶部任务卡查看或停止。", true);
                 addAction("返回范围选择", this::showSelection);
@@ -2276,7 +2473,12 @@ public final class GroupSummarySheet {
     }
 
     private void loadRange(SummaryHistoryLoader loader, RangeRequest request, SummaryHistoryLoader.Callback callback) {
-        if (request.mode == RangeMode.TODAY) {
+        if (request.mode == RangeMode.SELECTED) {
+            if (selectedSnapshotInvalid || request.replayHistory == null
+                    || !request.replayHistory.matchesSelectedScope(account, ownerId, dialogId, topicId)) {
+                callback.onError("所选消息已失效，请重新选择；未读取其他历史。");
+            } else callback.onLoaded(request.replayHistory);
+        } else if (request.mode == RangeMode.TODAY) {
             loader.loadToday(callback);
         } else if (request.mode == RangeMode.SINCE && !request.initialize && request.upper < 0) {
             loader.loadSince(request.lower, request.count, callback);
@@ -2384,8 +2586,9 @@ public final class GroupSummarySheet {
             showResult(summary);
             return;
         }
-        if (summaryRange.mode == RangeMode.REPLAY) {
-            completionNotice = "重做完成；已保存的增量进度和原始恢复范围保持不变。";
+        if (summaryRange.mode == RangeMode.REPLAY || summaryRange.mode == RangeMode.SELECTED) {
+            completionNotice = summaryRange.mode == RangeMode.SELECTED ? "所选消息总结完成；增量进度保持不变。"
+                    : "重做完成；已保存的增量进度和原始恢复范围保持不变。";
             lastSuccessfulHistory = summaryHistory;
             lastSuccessfulSources = new ArrayList<>(sourceMessages);
             cacheCompletedResult(summary);
@@ -2467,7 +2670,7 @@ public final class GroupSummarySheet {
             org.telegram.tgnet.TLRPC.Chat chat = MessagesController.getInstance(account).getChat(-dialogId);
             String title = chat == null || chat.title == null ? "聊天 " + (-dialogId) : chat.title;
             RangeMode mode = summaryRange == null ? RangeMode.RECENT : summaryRange.mode;
-            String range = mode == RangeMode.TODAY ? "当日文字消息"
+            String range = mode == RangeMode.SELECTED ? "手动选中的文字消息" : mode == RangeMode.TODAY ? "当日文字消息"
                     : mode == RangeMode.SINCE ? "上次总结之后"
                     : mode == RangeMode.UNREAD ? "进入聊天时的未读消息"
                     : mode == RangeMode.REPLAY ? "重做已记录范围" : "最近 N 条文字消息";
@@ -2563,12 +2766,15 @@ public final class GroupSummarySheet {
             partial.setLinksClickable(false);
         }
         if (!requestInputs.isEmpty()) addRequestInputsAction();
+        if (managedTask != null && !managedTask.requestMetrics.isEmpty()) {
+            addFoldedDetails("本次请求指标", this::addRequestMetricsView);
+        }
         addAction("重试", () -> {
             if (failedRange == null) startSummary();
             else startSummary(failedRange);
         });
         if (allowPlainRetry) {
-            addAction("改用普通模式重新运行", () -> startSummary(new AiSummarySettings.Config(
+            addAction("改用普通模式重新运行", () -> startSummary(failedConfig.withValues(
                     failedConfig.baseUrl, failedConfig.model, failedConfig.apiKey, failedConfig.maxOutputTokens,
                     false, failedConfig.inputCharacterBudget, failedConfig.serviceType), failedPrompt, failedRange));
             addText("仅本次改用普通模式，不修改已保存设置；已成功读取的原文快照保持不变。", false);
@@ -2610,7 +2816,7 @@ public final class GroupSummarySheet {
             addText("下一步打开来源聊天的输入框，可编辑并由你确认发送。", false);
         }
         if (summaryHistory != null && summaryHistory.complete && sourceMessages != null && !sourceMessages.isEmpty()
-                && (resultCommitted || viewingCachedResult || summaryRange.mode == RangeMode.REPLAY)) {
+                && (resultCommitted || viewingCachedResult || summaryRange.mode == RangeMode.REPLAY || summaryRange.mode == RangeMode.SELECTED)) {
             addAction("追问本次消息", this::showQuestions);
         }
         if (!viewingCachedResult && summaryHistory != null && summaryHistory.complete && summaryHistory.hasMore
@@ -2624,16 +2830,20 @@ public final class GroupSummarySheet {
                 if (summaryPrompt.builtinRulesVersion < 6) addText("生成时总结方向：" + PromptOptions.templateLabel(summaryPrompt.templateId), false);
                 if (!summaryPrompt.customInstructions.isEmpty()) addText("生成时核心总结要求：" + summaryPrompt.customInstructions, false);
             }
-            if (summaryRange != null && summaryRange.filters != null) addText("生成时消息选择：" + filterLabel(summaryRange.filters), false);
+            if (summaryRange != null && summaryRange.filters != null) {
+                addText("生成时消息选择：" + filterLabel(summaryRange.filters), false);
+                addText("生成时排除 UID 名单：" + summaryRange.filters.excludedSenderIds.size() + " 个；只用于本次总结输入。", false);
+            }
             if (summaryFiltered) addText("本次实际排除或筛选了消息，通用增量进度未推进。", true);
-            if (summaryConfig != null) addText("请求模型：" + (summaryConfig.model.isEmpty() ? "服务当前模型（未指定名称）" : summaryConfig.model)
+            if (summaryConfig != null) addText("生成时 API：" + summaryConfig.profileName + "；请求模型：" + (summaryConfig.model.isEmpty() ? "服务当前模型（未指定名称）" : summaryConfig.model)
                     + "；字符预算 " + summaryConfig.inputCharacterBudget + "；输出上限 " + summaryConfig.maxOutputTokens + " token。", false);
-            if (managedTask != null && managedTask.firstVisibleBodyElapsedMs >= 0) addText("首段可展示正文："
+            if (!viewingCachedResult && managedTask != null && managedTask.firstVisibleBodyElapsedMs >= 0) addText("首段可展示正文："
                     + managedTask.firstVisibleBodyElapsedMs / 1000.0 + " 秒（自任务开始，包含读取与等待）。", false);
             if (coverageNote != null) addText(coverageNote, false);
             addText("追问依据生成时实际输入文字快照；范围外消息及未观察到的后续修改不会自动同步。", false);
             if (sourceLinks) addText("点击 [m数字] 可核验旧版摘要引用并预览来源。", false);
             if (!requestInputs.isEmpty()) addRequestInputsAction();
+            addRequestMetricsView();
         });
         addAction("查看总结历史", this::openHistory);
         if (viewingCachedResult && summaryHistory != null && sourceMessages != null) {
@@ -2643,6 +2853,61 @@ public final class GroupSummarySheet {
             addAction("按当前设置和要求重新生成", () -> startSummary(regenerate));
         }
         addAction("重新选择范围", this::showSelection);
+    }
+
+    private void addRequestMetricsView() {
+        if (managedTask == null || viewingCachedResult) return;
+        requestMetricsView = addText("", false);
+        requestMetricsView.setTextIsSelectable(true);
+        renderedMetricsCount = -1;
+        updateRequestMetricsView();
+    }
+
+    private void updateRequestMetricsView() {
+        if (requestMetricsView == null || managedTask == null
+                || renderedMetricsCount == managedTask.requestMetrics.size()) return;
+        renderedMetricsCount = managedTask.requestMetrics.size();
+        if (renderedMetricsCount == 0) {
+            requestMetricsView.setText("请求结束后显示服务返回的 token 用量；未返回的字段记为未知。输入字符数与输出预算不是实际 token 用量。");
+            return;
+        }
+        ArrayList<UsageStats> usages = new ArrayList<>();
+        for (AiSummaryClient.RequestMetrics metric : managedTask.requestMetrics) {
+            usages.add(metric.usageFinal && metric.usage != null ? metric.usage : UsageStats.UNKNOWN_USAGE);
+        }
+        UsageStats sum = UsageStats.aggregate(usages);
+        StringBuilder text = new StringBuilder("已结束的 ").append(renderedMetricsCount).append(" 次请求 · token 合计\n")
+                .append(usageText(sum)).append("\n任一请求缺少某字段，该字段合计即为未知；思考 tokens 不另加到输出总量。\n")
+                .append("时间从每次 HTTP 请求开始计，首内容可能包含隐藏思考；首段正文是过滤后可展示内容，不等于首 token。\n");
+        for (AiSummaryClient.RequestMetrics metric : managedTask.requestMetrics) {
+            text.append("\n请求 ").append(metric.requestIndex).append(" · ")
+                    .append(metric.stage == AiSummaryClient.Stage.MERGE ? "第 " + metric.mergeRound + " 轮合并" : "来源分段")
+                    .append(" ").append(metric.partIndex).append("/").append(metric.partTotal)
+                    .append(metric.streaming ? " · 流式" : " · 普通")
+                    .append(metric.succeeded ? " · 完成" : " · 未完成").append("\n")
+                    .append("请求耗时：").append(metricTime(metric.elapsedMs))
+                    .append("；响应头：").append(metricTime(metric.responseElapsedMs))
+                    .append("\n首内容：").append(metricTime(metric.firstContentElapsedMs))
+                    .append("；首段可展示正文：").append(metricTime(metric.firstVisibleElapsedMs))
+                    .append("\n").append(usageText(metric.usage));
+            if (!metric.usageFinal) text.append("（用量未确认完整，不用于精确合计）");
+            if (metric.usageFinal && metric.usage != null && metric.usage.completionTokens >= 0 && metric.elapsedMs > 0) {
+                text.append("\n端到端输出均速：").append(String.format(Locale.US, "%.2f", metric.usage.completionTokens * 1000.0 / metric.elapsedMs))
+                        .append(" tokens/秒（含等待和预填充，并非解码速度）");
+            }
+            text.append('\n');
+        }
+        requestMetricsView.setText(text);
+    }
+
+    private static String usageText(UsageStats usage) {
+        if (usage == null) return "输入：未知；输出：未知；总量：未知；思考：未知";
+        return "输入：" + metricTokens(usage.promptTokens) + "；输出：" + metricTokens(usage.completionTokens)
+                + "；总量：" + metricTokens(usage.totalTokens) + "；思考：" + metricTokens(usage.reasoningTokens);
+    }
+    private static String metricTokens(long value) { return value < 0 ? "未知" : Long.toString(value); }
+    private static String metricTime(long value) {
+        return value < 0 ? "未观察到" : String.format(Locale.US, "%.2f 秒", value / 1000.0);
     }
 
     private long summaryElapsedMillis() {

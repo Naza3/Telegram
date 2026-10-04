@@ -1,4 +1,4 @@
-// Local test profile: one ABI and a separate debug signing key. Use with debug tasks only.
+// One ABI and the explicitly supplied fork signing key. Use with debug tasks only.
 gradle.beforeProject { target ->
     ['com.android.application', 'com.android.library'].each { pluginId ->
         target.pluginManager.withPlugin(pluginId) {
@@ -16,11 +16,18 @@ gradle.beforeProject { target ->
                         if (!keyPath) {
                             throw new GradleException('Pass -DmnnDebugKeystore=<local debug keystore>')
                         }
+                        def signingValues = ['ANDROID_KEYSTORE_PASSWORD', 'ANDROID_KEY_ALIAS', 'ANDROID_KEY_PASSWORD'].collectEntries { name ->
+                            def value = System.getenv(name)
+                            if (value == null || value.isEmpty()) {
+                                throw new GradleException('Missing signing setting: ' + name)
+                            }
+                            [(name): value]
+                        }
                         android.signingConfigs.getByName('debug').with {
                             storeFile = new File(keyPath)
-                            storePassword = 'android'
-                            keyAlias = 'androiddebugkey'
-                            keyPassword = 'android'
+                            storePassword = signingValues['ANDROID_KEYSTORE_PASSWORD']
+                            keyAlias = signingValues['ANDROID_KEY_ALIAS']
+                            keyPassword = signingValues['ANDROID_KEY_PASSWORD']
                         }
                     }
                 }

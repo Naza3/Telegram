@@ -19,18 +19,24 @@ if [[ ! -x "$JAVA_HOME/bin/javac" || ! -d "$ANDROID_HOME/platforms/android-36" ]
     exit 2
 fi
 
-if [[ ! -f "$task_dir/debug.keystore" ]]; then
-    "$JAVA_HOME/bin/keytool" -genkeypair -noprompt -keystore "$task_dir/debug.keystore" \
-        -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 \
-        -validity 10000 -dname 'CN=Android Debug,O=Android,C=US'
+signing_path="${ANDROID_SIGNING_KEYSTORE_PATH:-$task_dir/signing/current.keystore}"
+if [[ ! -s "$signing_path" ]]; then
+    echo 'Prepare the original signing key with tools/prepare-android-signing.py before building.' >&2
+    exit 2
 fi
+for signing_name in ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_ALIAS ANDROID_KEY_PASSWORD; do
+    if [[ -z "${!signing_name:-}" ]]; then
+        echo "Missing signing setting: $signing_name" >&2
+        exit 2
+    fi
+done
 
 cd "$repo_dir"
 ./gradlew :TMessagesProj_App:assembleAfatDebug --no-daemon \
     --no-build-cache --no-configuration-cache \
     --max-workers="${MNN_BUILD_WORKERS:-3}" --console=plain \
     -I "$repo_dir/tools/mnn-debug.init.gradle" \
-    -DmnnDebugKeystore="$task_dir/debug.keystore" \
+    -DmnnDebugKeystore="$signing_path" \
     -PmnnAbi="${MNN_BUILD_ABI:-arm64-v8a}" "$@"
 
 echo "APK directory: $repo_dir/TMessagesProj_App/build/outputs/apk/afat/debug"

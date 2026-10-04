@@ -329,11 +329,14 @@ export GRADLE_USER_HOME=/workspace/gradle-cache
 IFS= read -r -s -p 'Telegram API ID: ' TELEGRAM_API_ID; printf '\n'
 IFS= read -r -s -p 'Telegram API hash: ' TELEGRAM_API_HASH; printf '\n'
 export TELEGRAM_API_ID TELEGRAM_API_HASH
+# 先按 android-signing-secrets.zh-CN.md 设置四项 ANDROID_* 签名环境变量。
+export ANDROID_SIGNING_KEYSTORE_PATH="$PWD/.local-build/signing/current.keystore"
+python3 tools/prepare-android-signing.py --output "$ANDROID_SIGNING_KEYSTORE_PATH"
 bash tools/build-mnn-debug.sh
 unset TELEGRAM_API_ID TELEGRAM_API_HASH
 ```
 
-如果网络要求代理，按执行环境设置 Java/Gradle 的 HTTP、HTTPS 代理，并保留可信 CA 校验。本工作区代理为 `proxy:8080`。构建脚本使用 `tools/mnn-debug.init.gradle` 限制 ARM64，自动创建 `.local-build/debug.keystore`，仅覆盖 debug 签名。生成目录为 `TMessagesProj_App/build/outputs/apk/afat/debug/`，包名为 `org.telegram.messenger.beta`；该目录及本地密钥/缓存不入 Git。
+如果网络要求代理，按执行环境设置 Java/Gradle 的 HTTP、HTTPS 代理，并保留可信 CA 校验。本工作区代理为 `proxy:8080`。构建脚本使用 `tools/mnn-debug.init.gradle` 限制 ARM64，并读取显式准备的原签名，不再自动创建密钥。签名环境变量及恢复步骤见 [签名 Secrets 配置](android-signing-secrets.zh-CN.md)。生成目录为 `TMessagesProj_App/build/outputs/apk/afat/debug/`，包名为 `org.telegram.messenger.beta`；该目录及本地密钥/缓存不入 Git。
 
 构建现在必须提供自有 `TELEGRAM_API_ID` 和 `TELEGRAM_API_HASH` 环境变量，不再回退到上游默认 API 配置。ID 必须是 1–2147483647 的十进制整数，不带前导零；hash 必须恰好为 32 位十六进制字符，两者都不能有空白。脚本在启动 Gradle 前校验，直接调用 Gradle 也会校验；Android Studio 需要从已设置这两个环境变量的环境启动，已有进程需重启。校验只能检查格式，不能证明凭据在 Telegram 服务端有效。
 
@@ -364,7 +367,7 @@ unset TELEGRAM_API_ID TELEGRAM_API_HASH
 
 CI 使用 Ubuntu 24.04、JDK 21 和与本地相同的 SDK/NDK/CMake 版本，递归检出子模块，执行完整 Gradle 构建、签名与 16 KB 对齐校验。APK 上传前计算 SHA-256。Actions 构建不连接 Telegram 账号或 MNN 服务，仍需真机验收。
 
-CI 独立生成调试签名，并通过 Actions 缓存在后续构建间复用；不上传 keystore 到产物。缓存失效或被清理后会生成新的调试签名。CI 签名与之前的本地 APK 不同；如果手机安装提示签名冲突，应先核对已安装包与新包的证书并找回原签名，不通过卸载来绕过冲突。正式分发应另行配置持久的私有签名密钥。
+CI 签名现改为从四个 [Actions 签名 Secrets](android-signing-secrets.zh-CN.md) 恢复现有密钥，并在构建前后核对第 20 次 APK 的证书；缺失或不符就停止，不回退缓存、不生成替代密钥。需要先在仓库中填写四项 Secrets；不上传 keystore 到 APK 产物。之前的缓存签名已完成 [私密备份](telegram-signing-backup.zh-CN.md)，请自行长期保存。正式分发应沿用同一应用身份和密钥，并递增版本号。
 
 ## 当前构建：UID 排除与总结流程完善（2026-10-04）
 

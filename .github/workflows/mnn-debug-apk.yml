@@ -20,6 +20,7 @@ jobs:
     timeout-minutes: 120
     env:
       MNN_BUILD_DIR: ${{ github.workspace }}/.local-build
+      ANDROID_SIGNING_KEYSTORE_PATH: ${{ github.workspace }}/.local-build/signing/current.keystore
       GRADLE_USER_HOME: ${{ github.workspace }}/.local-build/gradle-user
       ANDROID_USER_HOME: ${{ github.workspace }}/.local-build/android-user
       MNN_BUILD_ABI: arm64-v8a
@@ -54,6 +55,15 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
+
+      - name: Restore and verify the original signing key from Secrets
+        shell: bash
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: python3 tools/prepare-android-signing.py --output "$ANDROID_SIGNING_KEYSTORE_PATH"
 
       - name: Run AI summary regression tests and fixture validation
         timeout-minutes: 10
@@ -100,40 +110,14 @@ jobs:
           restore-keys: |
             mnn-gradle-${{ runner.os }}-
 
-      - name: Restore the CI debug signing key
-        id: debug-key
-        uses: actions/cache/restore@v4
-        with:
-          path: ${{ env.MNN_BUILD_DIR }}/debug.keystore
-          key: mnn-debug-keystore-${{ github.repository_id }}-v1
-
-      - name: Prepare the CI debug signing key
-        shell: bash
-        run: |
-          mkdir -p "$MNN_BUILD_DIR"
-          if [[ ! -s "$MNN_BUILD_DIR/debug.keystore" ]]; then
-            "$JAVA_HOME/bin/keytool" -genkeypair -noprompt \
-              -keystore "$MNN_BUILD_DIR/debug.keystore" \
-              -storepass android -alias androiddebugkey -keypass android \
-              -keyalg RSA -keysize 2048 -validity 10000 \
-              -dname 'CN=Android Debug,O=Android,C=US'
-          fi
-          chmod 600 "$MNN_BUILD_DIR/debug.keystore"
-          # This is a testing key, never a production/release signing credential.
-          # Save before compiling so a failed build does not rotate the next APK's signer.
-
-      - name: Preserve the CI debug signing key
-        if: steps.debug-key.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: ${{ env.MNN_BUILD_DIR }}/debug.keystore
-          key: mnn-debug-keystore-${{ github.repository_id }}-v1
-
       - name: Build the ARM64 AfatDebug APK
         shell: bash
         env:
           TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
           TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           bash tools/build-mnn-debug.sh \
             '-Dorg.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8' \
@@ -159,12 +143,21 @@ jobs:
           apk='TMessagesProj_App/build/outputs/apk/afat/debug/app.apk'
           build_tools="$ANDROID_HOME/build-tools/36.0.0"
           test -s "$apk"
-          "$build_tools/apksigner" verify --verbose --print-certs "$apk"
+          "$build_tools/apksigner" verify --verbose --print-certs "$apk" > "$RUNNER_TEMP/telegram-apk-signature.txt"
+          cat "$RUNNER_TEMP/telegram-apk-signature.txt"
           "$build_tools/zipalign" -c -P 16 -v 4 "$apk"
-          python3 - "$apk" <<'PY'
+          python3 - "$apk" "$RUNNER_TEMP/telegram-apk-signature.txt" <<'PY'
+          import pathlib
+          import re
           import sys
           import zipfile
 
+          expected = 'c8715ba0c50510b9c1cc4d52b0fd2b0aed82dd55675f89c4f48d68978b7df313'
+          report = pathlib.Path(sys.argv[2]).read_text()
+          signers = re.findall(r'^Signer #\d+ certificate SHA-256 digest: ([0-9a-fA-F]+)$', report, re.MULTILINE)
+          if [digest.lower() for digest in signers] != [expected]:
+              raise SystemExit('APK signing certificate does not match the original Telegram signer')
+          print('Verified APK certificate matches the original Telegram signer')
           with zipfile.ZipFile(sys.argv[1]) as archive:
               abis = {name.split('/')[1] for name in archive.namelist()
                       if name.startswith('lib/') and name.endswith('.so')}
@@ -183,9 +176,9 @@ jobs:
             echo 'Download the APK and its .sha256 checksum from the artifact below.'
             echo 'Architecture: arm64-v8a. Package: org.telegram.messenger.beta.'
             echo 'Telegram API credentials were supplied by repository Actions Secrets; upstream defaults are not used.'
-            echo 'The CI debug signing key is reused from GitHub cache and is not included in the artifact.'
-            echo 'Cache eviction or a different cache scope can create a new signer; replacing an older APK may then require uninstalling it first.'
-            echo 'The CI signer also differs from APKs built elsewhere unless the same key was used.'
+            echo 'The original signing key was restored from Actions Secrets and its certificate was verified before building.'
+            echo 'Missing or incorrect signing Secrets stop the build; no replacement key is generated.'
+            echo 'The signing key is not included in this APK artifact.'
             echo
             echo '```text'
             cat artifacts/Telegram-MNN-arm64-debug.apk.sha256
@@ -210,6 +203,11 @@ jobs:
         shell: bash
         run: |
           printf '\n[Download the verified APK and checksum](%s)\n' "$APK_ARTIFACT_URL" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove the temporary signing key
+        if: always()
+        shell: bash
+        run: rm -f -- "$ANDROID_SIGNING_KEYSTORE_PATH"
 
       - name: Report remaining disk and memory
         if: always()

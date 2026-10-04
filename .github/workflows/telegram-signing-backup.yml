@@ -1,0 +1,58 @@
+name: Preserve current Telegram signing identity
+
+on:
+  push:
+    branches: [feature/mnn-group-summary]
+    paths:
+      - '.github/workflows/telegram-signing-backup.yml'
+      - 'tools/telegram_signing_backup/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: telegram-signing-backup-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  encrypted-backup:
+    if: github.repository == 'Naza3/Telegram' && github.ref == 'refs/heads/feature/mnn-group-summary'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out reviewed backup tools and public recipient key
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Use JDK 21 for certificate verification
+        uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Test encryption and rejection of invalid backups
+        run: node --test tools/telegram_signing_backup/backup.test.mjs
+      - name: Restore only the existing signing cache
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          # Keep this identical to the APK workflow: cache version includes path.
+          path: ${{ github.workspace }}/.local-build/debug.keystore
+          key: mnn-debug-keystore-${{ github.repository_id }}-v1
+          fail-on-cache-miss: true
+      - name: Verify the current signer and encrypt its existing keystore
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p "$RUNNER_TEMP/telegram-signing-backup"
+          node tools/telegram_signing_backup/backup.mjs encrypt \
+            --keystore "$GITHUB_WORKSPACE/.local-build/debug.keystore" \
+            --recipient tools/telegram_signing_backup/recipient-public.pem \
+            --expected-sha256 c8715ba0c50510b9c1cc4d52b0fd2b0aed82dd55675f89c4f48d68978b7df313 \
+            --output "$RUNNER_TEMP/telegram-signing-backup/telegram-signing-key.encrypted.json"
+      - name: Upload only the encrypted backup
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: telegram-encrypted-signing-backup-${{ github.run_id }}
+          path: ${{ runner.temp }}/telegram-signing-backup/telegram-signing-key.encrypted.json
+          if-no-files-found: error
+          retention-days: 30

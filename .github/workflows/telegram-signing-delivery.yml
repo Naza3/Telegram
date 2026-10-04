@@ -1,0 +1,89 @@
+name: Deliver encrypted Telegram signing backup
+
+on:
+  push:
+    branches: [backup/telegram-signing-delivery-20261004]
+    paths:
+      - '.github/workflows/telegram-signing-delivery.yml'
+  workflow_dispatch:
+    inputs:
+      payload_base64:
+        description: Base64 of the already encrypted 7z archive (never a password)
+        required: true
+        type: string
+      payload_sha256:
+        description: SHA-256 of the encrypted 7z archive
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  encrypted-delivery:
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'Naza3/Telegram' && github.ref == 'refs/heads/backup/telegram-signing-delivery-20261004'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Validate and prepare the encrypted archive
+        env:
+          DELIVERY_PAYLOAD_BASE64: ${{ inputs.payload_base64 }}
+          DELIVERY_PAYLOAD_SHA256: ${{ inputs.payload_sha256 }}
+        run: |
+          python3 - <<'PY'
+          import base64
+          import hashlib
+          import hmac
+          import os
+          from pathlib import Path
+          import re
+          import sys
+
+          def prepare():
+              encoded = os.environ.get('DELIVERY_PAYLOAD_BASE64', '')
+              expected = os.environ.get('DELIVERY_PAYLOAD_SHA256', '')
+              if not 1 <= len(encoded) <= 64 * 1024:
+                  raise ValueError('invalid delivery')
+              if re.fullmatch(r'[0-9a-fA-F]{64}', expected) is None:
+                  raise ValueError('invalid delivery')
+              archive = base64.b64decode(encoded, validate=True)
+              if not 6 <= len(archive) <= 48 * 1024:
+                  raise ValueError('invalid delivery')
+              if base64.b64encode(archive).decode('ascii') != encoded:
+                  raise ValueError('invalid delivery')
+              if not archive.startswith(b'7z\xbc\xaf\x27\x1c'):
+                  raise ValueError('invalid delivery')
+              actual = hashlib.sha256(archive).hexdigest()
+              if not hmac.compare_digest(actual, expected.lower()):
+                  raise ValueError('invalid delivery')
+
+              os.umask(0o077)
+              directory = Path(os.environ['RUNNER_TEMP']) / 'signing-delivery'
+              directory.mkdir(mode=0o700, exist_ok=False)
+              output = directory / 'Telegram-signing.7z'
+              checksum = directory / 'Telegram-signing.7z.sha256'
+              for path, data in (
+                  (output, archive),
+                  (checksum, (actual + '  Telegram-signing.7z\n').encode('ascii')),
+              ):
+                  descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                  with os.fdopen(descriptor, 'wb') as stream:
+                      stream.write(data)
+
+          try:
+              prepare()
+          except Exception:
+              print('Encrypted delivery validation failed.', file=sys.stderr)
+              sys.exit(1)
+          print('Encrypted delivery prepared.')
+          PY
+      - name: Upload only the encrypted archive and checksum
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: Telegram-signing-encrypted-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/signing-delivery/Telegram-signing.7z
+            ${{ runner.temp }}/signing-delivery/Telegram-signing.7z.sha256
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0

@@ -79,6 +79,8 @@ public final class TLRPC {
         public ArrayList<MessageEntity> entities = new ArrayList<>();
     }
     public static class TL_message extends Message {}
+    public static class TL_message_secret extends TL_message {}
+    public static class TL_message_secret_layer72 extends TL_message {}
     public static class TL_messageEmpty extends Message {}
     public static class TL_messageService extends Message {}
     public static class TL_error extends TLObject {

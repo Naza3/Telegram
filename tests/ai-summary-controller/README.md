@@ -36,6 +36,11 @@ account/owner changes, source edits/deletes/access revocation, checkpoint task-I
 fencing, archive failure versus cursor advancement, stale archive retries, partial
 coverage/replay/empty batches, foreground-service refusal/failure/stop callbacks,
 and bounded request-input retention. Reentrant listener cancellation is exercised.
+Additional cases cover bounded and deduplicated terminal request metrics, late
+metrics after cancellation/account replacement, UID filtering before inference,
+selected snapshots with no history RPC or generic completion/cursor write, and
+same-text changes to sender/topic/date/reply metadata. The selected-snapshot
+factory itself is tested in the separate core harness.
 
 Passing this harness establishes controller decisions and boundary calls. It does
 not establish actual Android service startup, notification/wake-lock behavior,

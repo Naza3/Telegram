@@ -3,6 +3,8 @@ package org.telegram.ui.Components;
 
 import android.os.Bundle;
 import android.text.TextUtils;
+import android.widget.LinearLayout;
+import android.widget.TextView;
 
 import org.telegram.messenger.AndroidUtilities;
 import org.telegram.messenger.ChatObject;
@@ -14,11 +16,14 @@ import org.telegram.messenger.Utilities;
 import org.telegram.messenger.ai.SummaryHistoryStore;
 import org.telegram.tgnet.TLRPC;
 import org.telegram.ui.ActionBar.BaseFragment;
+import org.telegram.ui.ActionBar.AlertDialog;
+import org.telegram.ui.ActionBar.Theme;
 import org.telegram.ui.ChatActivity;
 import org.telegram.ui.TopicsFragment;
 
 import java.lang.ref.WeakReference;
 import java.util.ArrayList;
+import java.util.List;
 import java.util.WeakHashMap;
 
 /** Explicit, owner-bound handoff to Telegram's editor. This class never sends messages. */
@@ -192,6 +197,50 @@ public final class SummaryPublishHelper {
         if (fragment != null && !fragment.isFinished && fragment.getParentActivity() != null) {
             AlertsCreator.showSimpleAlert(fragment, "编辑并发回", error);
         }
+    }
+
+    /** The displayed strings are the final native message bodies, never reparsed after confirmation. */
+    public static AlertDialog showPartsPreview(BaseFragment fragment, Draft draft, List<String> parts,
+                                               Runnable confirm, Runnable cancel) {
+        if (!active(fragment, draft.account, draft.ownerId) || parts.isEmpty()) return null;
+        LinearLayout body = new LinearLayout(fragment.getParentActivity());
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setPadding(AndroidUtilities.dp(24), 0, AndroidUtilities.dp(24), AndroidUtilities.dp(8));
+        TLRPC.Chat chat = MessagesController.getInstance(draft.account).getChat(-draft.record.dialogId);
+        String destination = chat == null ? "来源群" : chat.title;
+        if (draft.topicId > 0) {
+            TLRPC.TL_forumTopic topic = MessagesController.getInstance(draft.account).getTopicsController()
+                    .findTopic(-draft.record.dialogId, draft.topicId);
+            if (topic != null) destination += " · " + topic.title;
+        }
+        addPreviewText(body, "发送到：" + destination + "\n共 " + parts.size()
+                + " 条，将按下列顺序发送。取消会保留编辑器正文。", true);
+        for (int i = 0; i < parts.size(); i++) {
+            addPreviewText(body, "第 " + (i + 1) + " / " + parts.size() + " 条", true);
+            addPreviewText(body, parts.get(i), false);
+        }
+        addPreviewText(body, "如部分消息失败，请在聊天中重试失败的原消息，避免整批重复发送。", true);
+        boolean[] confirmed = {false};
+        AlertDialog dialog = new AlertDialog.Builder(fragment.getParentActivity(), fragment.getResourceProvider())
+                .setTitle("确认发送总结")
+                .setView(body)
+                .setPositiveButton("确认发送 " + parts.size() + " 条", (ignored, which) -> {
+                    confirmed[0] = true;
+                    confirm.run();
+                })
+                .setNegativeButton("返回编辑", null)
+                .create();
+        return fragment.showDialog(dialog, false, ignored -> { if (!confirmed[0]) cancel.run(); }) == null ? null : dialog;
+    }
+
+    private static void addPreviewText(LinearLayout body, String value, boolean label) {
+        TextView text = new TextView(body.getContext());
+        text.setText(value);
+        text.setTextSize(label ? 14 : 16);
+        text.setTextColor(Theme.getColor(Theme.key_dialogTextBlack));
+        text.setTextIsSelectable(!label);
+        if (label) text.setTypeface(AndroidUtilities.bold());
+        body.addView(text, LayoutHelper.createLinear(-1, -2, 0, label ? 16 : 8, 0, 8));
     }
 
     /** Called by logout after the original owner has been captured. No native draft is sent here. */

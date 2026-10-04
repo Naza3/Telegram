@@ -10,6 +10,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.TreeSet;
 
 /** Deterministic selection from an already loaded snapshot. It never fetches more history. */
 public final class SummaryFilter {
@@ -60,19 +61,38 @@ public final class SummaryFilter {
         /** Telegram peer ID, including negative anonymous/channel sender IDs; zero means any. */
         public final long senderId;
         public final String keyword;
+        /** Real Telegram user IDs only. Anonymous/channel senders use different, negative IDs. */
+        public final Set<Long> excludedSenderIds;
 
         public Options(Mode mode, long senderId, String keyword) {
+            this(mode, senderId, keyword, Collections.emptySet());
+        }
+
+        public Options(Mode mode, long senderId, String keyword, Set<Long> excludedSenderIds) {
             this.mode = mode == null ? Mode.ALL : mode;
             this.senderId = senderId;
             this.keyword = keyword == null ? "" : keyword.trim();
             if (this.keyword.codePointCount(0, this.keyword.length()) > 128) {
                 throw new IllegalArgumentException("关键词最多 128 个字符。");
             }
+            if (excludedSenderIds == null || excludedSenderIds.size() > 1000) {
+                throw new IllegalArgumentException("排除名单最多 1000 个 Telegram 用户 UID。");
+            }
+            TreeSet<Long> copy = new TreeSet<>();
+            for (Long id : excludedSenderIds) {
+                if (id == null || id <= 0) throw new IllegalArgumentException("排除 UID 必须为正整数。");
+                copy.add(id);
+            }
+            this.excludedSenderIds = Collections.unmodifiableSet(copy);
+        }
+
+        public Options withExcludedSenderIds(Set<Long> ids) {
+            return new Options(mode, senderId, keyword, ids);
         }
 
         /** True even if every source happens to match: filtered tasks must not advance a cursor. */
         public boolean hasFilters() {
-            return mode == Mode.FILTER_SELF || senderId != 0 || !keyword.isEmpty();
+            return mode == Mode.FILTER_SELF || senderId != 0 || !keyword.isEmpty() || !excludedSenderIds.isEmpty();
         }
     }
 
@@ -80,14 +100,17 @@ public final class SummaryFilter {
         public final ArrayList<SummaryMessage> messages;
         public final int matchedCount;
         public final int contextCount;
+        /** Unique source identities removed by the UID list, before matching or context selection. */
+        public final int excludedSenderCount;
         public final boolean filtered;
         public final String coverageNote;
 
         private Result(ArrayList<SummaryMessage> messages, int matchedCount, int contextCount,
-                boolean filtered, String coverageNote) {
+                int excludedSenderCount, boolean filtered, String coverageNote) {
             this.messages = new ArrayList<>(messages);
             this.matchedCount = matchedCount;
             this.contextCount = contextCount;
+            this.excludedSenderCount = excludedSenderCount;
             this.filtered = filtered;
             this.coverageNote = coverageNote;
         }
@@ -143,15 +166,21 @@ public final class SummaryFilter {
         // SummaryMessage is immutable. Copy the list and keep the first occurrence of a source
         // identity so repeated context references never duplicate a message or a task.
         LinkedHashMap<SourceKey, SummaryMessage> unique = new LinkedHashMap<>();
+        HashSet<SourceKey> excludedSources = new HashSet<>();
         for (SummaryMessage message : new ArrayList<>(messages)) {
             if (message == null) {
                 throw new IllegalArgumentException("消息快照包含无效来源，请重新读取。");
             }
             SourceKey key = new SourceKey(message.dialogId, message.id);
+            // A duplicate identity with conflicting sender metadata must not bypass exclusion.
+            if (config.excludedSenderIds.contains(message.senderId)) excludedSources.add(key);
             if (!unique.containsKey(key)) {
                 unique.put(key, message);
             }
         }
+        int originalUniqueCount = unique.size();
+        for (SourceKey key : excludedSources) unique.remove(key);
+        int excludedSenderCount = originalUniqueCount - unique.size();
         ArrayList<SummaryMessage> snapshot = new ArrayList<>(unique.values());
         HashMap<SourceKey, Integer> indices = new HashMap<>();
         for (int i = 0; i < snapshot.size(); i++) {
@@ -205,6 +234,10 @@ public final class SummaryFilter {
         int context = selected.cardinality() - matched;
         boolean filtered = config.hasFilters();
         StringBuilder note = new StringBuilder();
+        if (!config.excludedSenderIds.isEmpty()) {
+            note.append("本次所选范围原有 ").append(originalUniqueCount).append(" 条唯一文字，按用户 UID 排除 ")
+                    .append(excludedSenderCount).append(" 条；不补抓更早消息，排除内容不会作为上下文恢复。 ");
+        }
         if (config.mode == Mode.FOCUS_SELF) {
             note.append("总结方向突出与我相关的内容；该方向本身保留全部范围内文字。 ");
         } else if (config.mode == Mode.FILTER_SELF) {
@@ -229,7 +262,7 @@ public final class SummaryFilter {
         if (config.mode != Mode.ALL) {
             note.append(" 没有明确提及或缺少回复关系，不能据此判定其他讨论与我无关。");
         }
-        return new Result(selectedMessages, matched, context, filtered, note.toString());
+        return new Result(selectedMessages, matched, context, excludedSenderCount, filtered, note.toString());
     }
 
     private static final class SourceKey {

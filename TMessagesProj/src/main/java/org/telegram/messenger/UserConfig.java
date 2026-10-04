@@ -477,6 +477,16 @@ public class UserConfig extends BaseController {
         });
         Utilities.globalQueue.postRunnable(() -> {
             try {
+                org.telegram.messenger.ai.ApiProfilesStore.clearOwner(currentAccount, summaryOwnerId);
+            } catch (RuntimeException error) {
+                FileLog.e("Unable to clear AI API profiles for the logged-out owner");
+            }
+            try {
+                org.telegram.messenger.ai.SummaryExcludedSendersStore.clearOwner(currentAccount, summaryOwnerId);
+            } catch (RuntimeException error) {
+                FileLog.e("Unable to clear summary sender exclusions for the logged-out owner");
+            }
+            try {
                 org.telegram.messenger.ai.SummaryPublishStore.clearOwner(currentAccount, summaryOwnerId);
             } catch (RuntimeException error) {
                 FileLog.e(error);

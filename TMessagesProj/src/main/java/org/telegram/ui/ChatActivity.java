@@ -874,6 +874,7 @@ public class ChatActivity extends BaseFragment implements
     private LongSparseArray<MessageObject> conversionMessages = new LongSparseArray<>();
     public ArrayList<MessageObject> messages = new ArrayList<>();
     private GroupSummarySheet groupSummarySheet;
+    private long summarySelectionOwnerId;
     private SummaryPublishHelper.Draft pendingSummaryPublishDraft;
     private long summaryUnreadTopicId = -1;
     private int summaryUnreadLowerId = -1;
@@ -1424,6 +1425,48 @@ public class ChatActivity extends BaseFragment implements
             && (threadMessageId == 0 || isTopic) && !isReport() && !inPreviewMode;
     }
 
+    private boolean canSummarizeSelection() {
+        if (!canSummarizeGroup() || UserConfig.selectedAccount != currentAccount
+                || summarySelectionOwnerId <= 0 || getUserConfig().getClientUserId() != summarySelectionOwnerId
+                || currentChat.migrated_to != null
+                || selectedMessagesIds[1].size() != 0 || selectedMessagesIds[0].size() == 0) return false;
+        boolean hasText = false;
+        int now = getConnectionsManager().getCurrentTime();
+        for (int i = 0; i < selectedMessagesIds[0].size(); i++) {
+            MessageObject message = selectedMessagesIds[0].valueAt(i);
+            if (message == null || message.currentAccount != currentAccount || message.messageOwner == null
+                    || message.getDialogId() != dialog_id
+                    || DialogObject.getPeerDialogId(message.messageOwner.peer_id) != dialog_id) return false;
+            if (getTopicId() != 0 && MessageObject.getTopicId(currentAccount, message.messageOwner, currentChat.forum) != getTopicId()) return false;
+            if (!message.scheduled
+                    && !(message.messageOwner instanceof TLRPC.TL_message_secret)
+                    && !(message.messageOwner instanceof TLRPC.TL_message_secret_layer72)
+                    && org.telegram.messenger.ai.SummaryHistoryLoader.isUsableText(message.messageOwner, now)) hasText = true;
+        }
+        return hasText;
+    }
+
+    private void openSelectedSummary() {
+        if (!canSummarizeSelection()) return;
+        long ownerId = summarySelectionOwnerId;
+        long selectedTopicId = getTopicId();
+        ArrayList<MessageObject> selected = new ArrayList<>();
+        for (int i = 0; i < selectedMessagesIds[0].size(); i++) selected.add(selectedMessagesIds[0].valueAt(i));
+        try {
+            org.telegram.messenger.ai.SummaryHistoryLoader.Result snapshot =
+                    org.telegram.messenger.ai.SummaryHistoryLoader.snapshotSelected(
+                            currentAccount, ownerId, dialog_id, selectedTopicId, selected);
+            SummaryCenterActivity center = SummaryCenterActivity.forSelected(
+                    currentAccount, ownerId, dialog_id, selectedTopicId, snapshot);
+            if (presentFragment(center)) clearSelectionMode();
+        } catch (IllegalArgumentException invalidSelection) {
+            showDialog(new AlertDialog.Builder(getParentActivity(), themeDelegate)
+                    .setTitle("无法总结所选消息")
+                    .setMessage("所选消息已变化或不属于当前账号和聊天，请重新选择可用的普通文字消息。")
+                    .setPositiveButton(getString(R.string.OK), null).create());
+        }
+    }
+
     private void updateSummaryMenuVisibility() {
         if (headerItem == null) return;
         // A preview can later become the full chat without recreating its menu.
@@ -1741,6 +1784,7 @@ public class ChatActivity extends BaseFragment implements
 
     private final static int chat_menu_topic_create = 73;
     private final static int ai_group_summary = 75;
+    private final static int ai_summary_selected = 76;
 
     private final static int id_chat_compose_panel = 1000;
 
@@ -2720,6 +2764,7 @@ public class ChatActivity extends BaseFragment implements
 
     @Override
     public boolean onFragmentCreate() {
+        summarySelectionOwnerId = getUserConfig().getClientUserId();
         final long chatId = arguments.getLong("chat_id", 0);
         final long userId = arguments.getLong("user_id", 0);
         final int encId = arguments.getInt("enc_id", 0);
@@ -3769,6 +3814,8 @@ public class ChatActivity extends BaseFragment implements
                             finishFragment();
                         }
                     }
+                } else if (id == ai_summary_selected) {
+                    openSelectedSummary();
                 } else if (id == ai_group_summary) {
                     if (canSummarizeGroup()) {
                         if (groupSummarySheet != null) {
@@ -10394,6 +10441,7 @@ public class ChatActivity extends BaseFragment implements
                 actionModeViews.add(actionMode.addItemWithWidth(forward, R.drawable.msg_forward, dp(48), LocaleController.getString(R.string.Forward)));
             }
             actionModeViews.add(actionMode.addItemWithWidth(share, R.drawable.msg_shareout, dp(48), LocaleController.getString(R.string.ShareFile)));
+            actionModeViews.add(actionMode.addItemWithWidth(ai_summary_selected, R.drawable.msg_list, dp(48), "AI 总结所选"));
             actionModeViews.add(actionMode.addItemWithWidth(delete, R.drawable.msg_delete, dp(48), LocaleController.getString(R.string.Delete)));
         } else {
             actionModeViews.add(actionMode.addItemWithWidth(edit, R.drawable.msg_edit, dp(48), LocaleController.getString(R.string.Edit)));
@@ -10407,6 +10455,7 @@ public class ChatActivity extends BaseFragment implements
         actionMode.setItemVisibility(delete, cantDeleteMessagesCount == 0 ? View.VISIBLE : View.GONE);
         actionMode.setItemVisibility(tag_message, getUserConfig().isPremium() ? View.VISIBLE : View.GONE);
         actionMode.setItemVisibility(share, View.GONE);
+        actionMode.setItemVisibility(ai_summary_selected, canSummarizeSelection() ? View.VISIBLE : View.GONE);
     }
 
     private void hideTagSelector() {
@@ -19328,6 +19377,8 @@ public class ChatActivity extends BaseFragment implements
                 ActionBarMenuItem deleteItem = actionBar.createActionMode().getItem(delete);
                 ActionBarMenuItem tagItem = actionBar.createActionMode().getItem(tag_message);
                 ActionBarMenuItem shareItem = actionBar.createActionMode().getItem(share);
+                actionBar.createActionMode().setItemVisibility(ai_summary_selected,
+                        canSummarizeSelection() ? View.VISIBLE : View.GONE);
 
                 boolean noforwards = isPeerNoForwards() || hasSelectedNoforwardsMessage();
                 if (prevCantForwardCount == 0 && cantForwardMessagesCount != 0 || prevCantForwardCount != 0 && cantForwardMessagesCount == 0) {

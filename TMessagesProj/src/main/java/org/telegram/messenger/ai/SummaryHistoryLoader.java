@@ -24,6 +24,7 @@ import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Locale;
+import java.util.List;
 import java.util.TimeZone;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -38,6 +39,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 public final class SummaryHistoryLoader {
     public static final int MAX_RECENT_COUNT = 500;
     public static final int MAX_TODAY_MESSAGES = 2000;
+    public static final int MAX_SELECTED_COUNT = 100;
     private static final int PAGE_SIZE = 100;
     private static final int MAX_SCANNED_MESSAGES = 10000;
     private static final long PAGE_TIMEOUT_MS = 45000;
@@ -61,10 +63,22 @@ public final class SummaryHistoryLoader {
         public final boolean hasMore;
         public final boolean partial;
         public final int scannedMessageCount;
+        public final boolean selectedSnapshot;
+        public final int selectedAccount;
+        public final long selectedOwnerId, selectedDialogId, selectedTopicId;
+        private final List<SummaryMessage> selectedSources;
 
         private Result(ArrayList<SummaryMessage> messages, boolean truncated, String coverageNote,
                 int lowerExclusiveId, int upperInclusiveId, int coveredThroughId,
                 boolean hasMore, int scannedMessageCount) {
+            this(messages, truncated, coverageNote, lowerExclusiveId, upperInclusiveId,
+                    coveredThroughId, hasMore, scannedMessageCount, -1, 0, 0, 0);
+        }
+
+        private Result(ArrayList<SummaryMessage> messages, boolean truncated, String coverageNote,
+                int lowerExclusiveId, int upperInclusiveId, int coveredThroughId,
+                boolean hasMore, int scannedMessageCount, int selectedAccount, long selectedOwnerId,
+                long selectedDialogId, long selectedTopicId) {
             this.messages = new ArrayList<>(messages);
             this.truncated = truncated;
             this.coverageNote = coverageNote;
@@ -75,6 +89,20 @@ public final class SummaryHistoryLoader {
             this.hasMore = hasMore;
             this.partial = truncated;
             this.scannedMessageCount = scannedMessageCount;
+            this.selectedSnapshot = selectedAccount >= 0;
+            this.selectedAccount = selectedAccount;
+            this.selectedOwnerId = selectedOwnerId;
+            this.selectedDialogId = selectedDialogId;
+            this.selectedTopicId = selectedTopicId;
+            this.selectedSources = selectedSnapshot
+                    ? Collections.unmodifiableList(new ArrayList<>(messages)) : Collections.emptyList();
+        }
+
+        /** The compatibility messages list must still contain the original immutable sources. */
+        public boolean matchesSelectedScope(int account, long ownerId, long dialogId, long topicId) {
+            return selectedSnapshot && selectedAccount == account && selectedOwnerId == ownerId
+                    && selectedDialogId == dialogId && selectedTopicId == topicId
+                    && !selectedSources.isEmpty() && messages.equals(selectedSources);
         }
     }
 
@@ -91,6 +119,83 @@ public final class SummaryHistoryLoader {
                 ? UserConfig.getInstance(account).getClientUserId() : 0;
         this.dialogId = dialogId;
         this.topicId = topicId;
+    }
+
+    /**
+     * Freeze exactly the usable text in an explicit UI selection. This never requests history,
+     * marks messages read, or establishes continuous coverage for an incremental cursor.
+     * Call on the UI thread before clearing Telegram's selection; the result retains no TL objects.
+     */
+    public static Result snapshotSelected(int account, long ownerId, long dialogId, long topicId,
+            List<MessageObject> selected) {
+        if (account < 0 || account >= UserConfig.MAX_ACCOUNT_COUNT || ownerId <= 0
+                || UserConfig.selectedAccount != account
+                || UserConfig.getInstance(account).getClientUserId() != ownerId) {
+            throw new IllegalArgumentException("当前账号已切换或退出，请重新选择消息。");
+        }
+        MessagesController controller = MessagesController.getInstance(account);
+        TLRPC.Chat chat = DialogObject.isChatDialog(dialogId) ? controller.getChat(-dialogId) : null;
+        if (chat == null || ChatObject.isKickedFromChat(chat) || chat.monoforum || chat.migrated_to != null) {
+            throw new IllegalArgumentException("请选择当前账号可读取的群或频道消息。");
+        }
+        if (topicId < 0 || topicId > Integer.MAX_VALUE || topicId != 0 && !chat.forum) {
+            throw new IllegalArgumentException("所选消息的话题范围无效，请重新选择。");
+        }
+        if (selected == null || selected.isEmpty() || selected.size() > MAX_SELECTED_COUNT) {
+            throw new IllegalArgumentException("请选择 1–" + MAX_SELECTED_COUNT + " 条消息。");
+        }
+        int now = ConnectionsManager.getInstance(account).getCurrentTime();
+        SummaryHistoryLoader converter = new SummaryHistoryLoader(account, dialogId, topicId);
+        Run run = new Run(account, ownerId, 0, false, selected.size(), null,
+                now * 1000L, TimeZone.getDefault(), controller, chat, 0, 0, false);
+        int skipped = 0;
+        for (MessageObject object : new ArrayList<>(selected)) {
+            TLRPC.Message message = object == null ? null : object.messageOwner;
+            if (object == null || object.currentAccount != account || message == null
+                    || object.getDialogId() != dialogId || message.peer_id == null
+                    || DialogObject.getPeerDialogId(message.peer_id) != dialogId
+                    || (ChatObject.isChannel(chat) ? !(message.peer_id instanceof TLRPC.TL_peerChannel)
+                        : !(message.peer_id instanceof TLRPC.TL_peerChat))) {
+                throw new IllegalArgumentException("所选消息包含其他账号或聊天，无法确认范围，请重新选择。");
+            }
+            if (topicId != 0 && MessageObject.getTopicId(account, message, chat.forum) != topicId) {
+                throw new IllegalArgumentException("所选消息包含其他话题，请在同一话题内重新选择。");
+            }
+            if (object.scheduled || message instanceof TLRPC.TL_message_secret
+                    || message instanceof TLRPC.TL_message_secret_layer72 || !isUsableText(message, now)) {
+                skipped++;
+                continue;
+            }
+            if (!run.seen.add(message.id)) {
+                throw new IllegalArgumentException("所选消息存在重复标识，请重新选择。");
+            }
+            run.messages.add(converter.toSummaryMessage(run, message));
+            long senderId = DialogObject.getPeerDialogId(message.from_id);
+            if (senderId != 0) run.senders.put(message.id, senderId);
+        }
+        if (run.messages.isEmpty()) {
+            throw new IllegalArgumentException("所选消息没有可总结的普通文字；媒体、未发送或已过期消息不纳入。");
+        }
+        Collections.sort(run.messages, (left, right) -> {
+            int byDate = Integer.compare(left.date, right.date);
+            return byDate != 0 ? byDate : Integer.compare(left.id, right.id);
+        });
+        converter.resolveReplySenders(run);
+        if (UserConfig.selectedAccount != account
+                || UserConfig.getInstance(account).getClientUserId() != ownerId) {
+            throw new IllegalArgumentException("当前账号已变化，请重新选择消息。");
+        }
+        SummaryMessage first = run.messages.get(0), last = run.messages.get(run.messages.size() - 1);
+        SimpleDateFormat format = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US);
+        format.setTimeZone(run.timeZone);
+        String note = "仅当前所选消息：选中 " + selected.size() + " 条，实际纳入 " + run.messages.size()
+                + " 条普通文字，跳过 " + skipped + " 条不适用消息。\n手机时区 " + run.timeZone.getID()
+                + "；最早 #" + first.id + " · " + format.format(new Date(first.date * 1000L))
+                + " — 最新 #" + last.id + " · " + format.format(new Date(last.date * 1000L))
+                + "。\n仅使用选择时的文字快照，不补抓中间或上下文消息，不代表连续历史覆盖，不推进增量进度。";
+        // Zero coverage IDs deliberately prevent selection gaps from claiming history coverage.
+        return new Result(run.messages, false, note, 0, 0, 0, false, selected.size(),
+                account, ownerId, dialogId, topicId);
     }
 
     public void loadRecent(int count, Callback callback) {

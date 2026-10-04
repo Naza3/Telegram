@@ -293,7 +293,7 @@ public final class SummaryQuestionSheet {
         addAction("谁负责跟进", () -> fillQuestion("谁负责跟进，明确约定的待办和时间分别是什么？"));
         addAction(lastError == null ? "提问" : "重试本轮", () -> ask(config));
         if (lastError != null && config.stream) {
-            addAction("使用普通模式重试", () -> ask(new AiSummarySettings.Config(config.baseUrl,
+            addAction("使用普通模式重试", () -> ask(config.withValues(config.baseUrl,
                     config.model, config.apiKey, config.maxOutputTokens, false, config.inputCharacterBudget, config.serviceType)));
             addText("仅本轮使用普通模式，沿用相同原文和已完成的问答。", false);
         }

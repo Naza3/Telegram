@@ -43,6 +43,13 @@ public final class SummaryTaskControllerTest {
         run("FGS asynchronous failure stops task and ignores old callback", SummaryTaskControllerTest::foregroundFailure);
         run("publish reentrant cancellation does not start networking", SummaryTaskControllerTest::cancelFromListener);
         run("input snapshots are bounded", SummaryTaskControllerTest::boundedInputs);
+        run("request metrics are bounded and deduplicated", SummaryTaskControllerTest::boundedMetrics);
+        run("terminal metrics survive success and error but ignore late callbacks", SummaryTaskControllerTest::terminalMetrics);
+        run("cancelled and replaced tasks reject late request metrics", SummaryTaskControllerTest::lateMetrics);
+        run("selected snapshot skips history and never records generic coverage", SummaryTaskControllerTest::selectedSnapshot);
+        run("missing and foreign selected snapshots fail before any IO", SummaryTaskControllerTest::invalidSelection);
+        run("UID exclusions precede inference and never advance generic cursor", SummaryTaskControllerTest::excludedSenders);
+        run("same-body source identity and topic changes invalidate selected input", SummaryTaskControllerTest::selectionMetadataChanged);
         run("listeners are weak references with no direct View field", SummaryTaskControllerTest::weakListeners);
         System.out.println("SummaryTaskControllerTest: "+(tests-failures)+" / "+tests+" cases passed, "+assertions+" assertions");
         if(failures!=0) throw new AssertionError(failures+" controller lifecycle cases failed");
@@ -110,6 +117,81 @@ public final class SummaryTaskControllerTest {
     private static void foregroundFailure(){SummaryTaskController.Session task=start();SummaryForegroundService.Task registration=SummaryForegroundService.active.get(task.taskId);check(registration!=null,"FGS registration missing");registration.failure.onFailure("background support failed");terminal(task,SummaryTaskController.State.ERROR);SummaryTaskController.Session next=start();registration.failure.onFailure("late failure");check(controller.current()==next&&next.running()&&SummaryForegroundService.active.containsKey(next.taskId),"old FGS failure hit new task");}
     private static void cancelFromListener(){SummaryTaskController.Listener listener=task->{if(task!=null&&task.state==SummaryTaskController.State.LOADING)controller.cancel();};controller.addListener(listener);SummaryTaskController.Session task=start();controller.removeListener(listener);flush();terminal(task,SummaryTaskController.State.CANCELLED);check(SummaryHistoryLoader.created.isEmpty()&&AiSummaryClient.created.isEmpty(),"reentrant cancellation still started IO");check(SummaryTaskCheckpoint.read(0,OWNER)==null,"reentrant cancellation left checkpoint marker");}
     private static void boundedInputs(){SummaryTaskController.Session task=start();loaded();for(int i=0;i<150;i++)client().callback.onRequestInput(new AiSummaryClient.RequestInput(1));check(task.inputs.size()==128,"input snapshot count unbounded");controller.cancel();check(task.inputs.isEmpty(),"cancel retained model inputs");}
+    private static void boundedMetrics(){
+        SummaryTaskController.Session task=start();loaded();AiSummaryClient model=client();
+        model.callback.onRequestMetrics(null);model.callback.onRequestMetrics(new AiSummaryClient.RequestMetrics(0));
+        model.callback.onRequestMetrics(new AiSummaryClient.RequestMetrics(-1));
+        for(int i=1;i<=150;i++){model.callback.onRequestMetrics(new AiSummaryClient.RequestMetrics(i));model.callback.onRequestMetrics(new AiSummaryClient.RequestMetrics(i));}
+        check(task.requestMetrics.size()==128,"request metrics count invalid or duplicate index accepted");
+        for(int i=0;i<128;i++)check(task.requestMetrics.get(i).requestIndex==i+1,"request metrics order changed");
+        controller.clear();check(task.requestMetrics.isEmpty(),"released task retained metrics");
+    }
+    private static void terminalMetrics(){
+        SummaryTaskController.Session task=start();loaded();AiSummaryClient model=client();
+        model.callback.onRequestMetrics(new AiSummaryClient.RequestMetrics(1));model.callback.onSuccess("done");
+        model.callback.onRequestMetrics(new AiSummaryClient.RequestMetrics(2));flush();
+        check(task.state==SummaryTaskController.State.SUCCESS&&task.requestMetrics.size()==1,"success lost metrics or accepted late values");
+        task=start();loaded();model=client();model.callback.onRequestMetrics(new AiSummaryClient.RequestMetrics(1));
+        model.callback.onError("length");model.callback.onRequestMetrics(new AiSummaryClient.RequestMetrics(2));
+        check(task.state==SummaryTaskController.State.ERROR&&task.requestMetrics.size()==1,"failure lost diagnostics or accepted late metrics");
+    }
+    private static void lateMetrics(){
+        SummaryTaskController.Session old=start();loaded();AiSummaryClient model=client();controller.cancel();
+        model.callback.onRequestMetrics(new AiSummaryClient.RequestMetrics(1));check(old.requestMetrics.isEmpty(),"cancelled task accepted late metrics");
+        SummaryTaskController.Session next=start();loaded();model.callback.onRequestMetrics(new AiSummaryClient.RequestMetrics(2));
+        check(next.requestMetrics.isEmpty()&&old.requestMetrics.isEmpty(),"old request metrics affected newer task");
+        UserConfig.getInstance(0).owner=2000;client().callback.onRequestMetrics(new AiSummaryClient.RequestMetrics(1));
+        check(controller.current()==null&&next.requestMetrics.isEmpty(),"metrics leaked across account-slot owner change");
+    }
+    private static GroupSummarySheet.RangeRequest selectedRequest(SummaryHistoryLoader.Result history){
+        return new GroupSummarySheet.RangeRequest(GroupSummarySheet.RangeMode.SELECTED,1,0,0,0,false,history,null,SummaryFilter.Options.DEFAULT);
+    }
+    private static SummaryHistoryLoader.Result selectedHistory(){
+        SummaryHistoryLoader.Result history=new SummaryHistoryLoader.Result(messages(),0,0,true);
+        history.selectedSnapshot=true;history.selectedAccount=0;history.selectedOwnerId=OWNER;history.selectedDialogId=DIALOG;history.selectedTopicId=0;return history;
+    }
+    private static void selectedSnapshot(){
+        SummaryTaskController.Session task=start(selectedRequest(selectedHistory()));flush();
+        check(SummaryHistoryLoader.created.isEmpty()&&AiSummaryClient.created.size()==1,"selected input fetched history or failed to start");
+        check(task.sources.size()==1&&task.sources.get(0).text.equals("original text"),"selected input changed");
+        client().callback.onSuccess("selected summary");flush();terminal(task,SummaryTaskController.State.SUCCESS);
+        check(task.historySaved&&!task.committed&&task.savedState==null&&cursor()==0,"selected task recorded generic coverage");
+        check(SummaryStateStore.load(0,OWNER,DIALOG,0).completedAt==0,"selected task changed previous generic completion");
+        check(SummaryHistoryStore.saved.size()==1&&SummaryHistoryStore.saved.get(0).rangeLabel.equals("手动选中的文字消息"),"selected result not separately labelled");
+    }
+    private static void invalidSelection(){
+        SummaryTaskController.Session task=start(selectedRequest(null));terminal(task,SummaryTaskController.State.ERROR);
+        for(int mismatch=0;mismatch<4;mismatch++){
+            SummaryHistoryLoader.Result history=selectedHistory();
+            if(mismatch==0)history.selectedOwnerId++;else if(mismatch==1)history.selectedAccount++;
+            else if(mismatch==2)history.selectedDialogId--;else history.selectedTopicId++;
+            task=start(selectedRequest(history));terminal(task,SummaryTaskController.State.ERROR);
+        }
+        check(SummaryHistoryLoader.created.isEmpty()&&AiSummaryClient.created.isEmpty()&&SummaryForegroundService.starts==0,"invalid selection started IO or fetched recent messages");
+    }
+    private static void excludedSenders(){
+        SummaryFilter.Options filters=SummaryFilter.Options.DEFAULT.withExcludedSenderIds(new java.util.HashSet<>(Arrays.asList(42L)));
+        SummaryTaskController.Session task=start(new GroupSummarySheet.RangeRequest(GroupSummarySheet.RangeMode.SINCE,20,0,0,10,true,null,null,filters));
+        ArrayList<SummaryMessage> raw=messages();raw.add(new SummaryMessage(DIALOG,9,99,"Bot","excluded",42,0,0,false,false,0,false,false));
+        loader().callback.onLoaded(new SummaryHistoryLoader.Result(raw,0,10,true));flush();
+        check(task.sources.size()==1&&!task.sources.get(0).text.equals("excluded")&&task.filtered,"excluded author reached model source list");
+        client().callback.onSuccess("filtered summary");flush();check(cursor()==0&&task.historySaved,"UID filter advanced cursor or failed to archive");
+    }
+    private static void selectionMetadataChanged(){
+        for(int kind=0;kind<5;kind++){
+            MessagesController.getInstance(0).getChat(100).forum=true;
+            SummaryTaskController.Session task=start(selectedRequest(selectedHistory()));flush();
+            TLRPC.Message update=new TLRPC.Message();update.id=10;update.date=100;update.dialogId=DIALOG;update.message="original text";
+            NotificationCenter.getInstance(0).post(NotificationCenter.replaceMessagesObjects,0,DIALOG,new ArrayList<>(Arrays.asList(new MessageObject(update))));
+            check(task.state==SummaryTaskController.State.GENERATING,"unchanged source metadata falsely invalidated selection");
+            if(kind==0)update.topicId=5;else if(kind==1){update.from_id=new TLRPC.Peer();update.from_id.id=42;}
+            else if(kind==2)update.date=101;else if(kind==3)update.out=true;
+            else{update.reply_to=new TLRPC.ReplyHeader();update.reply_to.reply_to_msg_id=9;update.reply_to.flags=64;update.reply_to.quote_text="new quote";}
+            NotificationCenter.getInstance(0).post(NotificationCenter.replaceMessagesObjects,0,DIALOG,new ArrayList<>(Arrays.asList(new MessageObject(update))));
+            terminal(task,SummaryTaskController.State.INVALIDATED);
+            check(task.sources==null&&client().cancelled,"same-body source metadata change remained usable");
+        }
+    }
     private static void weakListeners() throws Exception {SummaryTaskController.Listener listener=task->{};controller.addListener(listener);Field field=SummaryTaskController.class.getDeclaredField("listeners");field.setAccessible(true);ArrayList<?> values=(ArrayList<?>)field.get(controller);check(values.get(0) instanceof WeakReference,"listener retained strongly");for(Field f:SummaryTaskController.class.getDeclaredFields()){String type=f.getType().getName();check(!type.startsWith("android.view.")&&!type.equals("android.app.Activity")&&!type.equals("android.content.Context"),"controller directly retains a UI object");}controller.removeListener(listener);}
     private static void check(boolean condition,String message){assertions++;if(!condition)throw new AssertionError(message);}
 }

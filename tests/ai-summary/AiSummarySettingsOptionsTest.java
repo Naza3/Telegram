@@ -9,6 +9,8 @@ public final class AiSummarySettingsOptionsTest {
         long owner = 1000;
         UserConfig.getInstance(account).setClientUserId(owner);
         MessagesController.getMainSettings(account).values.clear();
+        SummaryPrivateStorage.reset();
+        AiSummarySecretStore.reset();
         AiSummarySettings.Config old = new AiSummarySettings.Config("http://127.0.0.1:8080/v1", "mnn-local", "", 512);
         check(!old.stream && old.inputCharacterBudget == 6000, "old configurations remain non-streaming");
         AiSummarySettings.Config configured = new AiSummarySettings.Config(old.baseUrl, old.model, "", 1024, true, 12000);
@@ -28,7 +30,8 @@ public final class AiSummarySettingsOptionsTest {
         AiSummarySettings.Config maximum = new AiSummarySettings.Config(old.baseUrl, old.model, "", 8192, true, 64000);
         check(AiSummarySettings.validate(maximum) == null && AiSummarySettings.MAX_INPUT_CHARACTER_BUDGET == 64000,
                 "64k context accepted without reducing the existing 8192 output limit");
-        AiSummarySettings.save(account, 2000, maximum);
+        AiSummarySettings.save(account, 2000, loaded.withValues(maximum.baseUrl, maximum.model, maximum.apiKey,
+                maximum.maxOutputTokens, maximum.stream, maximum.inputCharacterBudget, maximum.serviceType));
         loaded = AiSummarySettings.load(account, 2000);
         check(loaded.inputCharacterBudget == 64000 && loaded.maxOutputTokens == 8192,
                 "64k profile survives save and reload without normalization to the old bound");
@@ -39,7 +42,8 @@ public final class AiSummarySettingsOptionsTest {
         AiSummarySettings.Config mnn = new AiSummarySettings.Config(old.baseUrl, old.model, "", 2048,
                 true, 64000, AiSummarySettings.ServiceType.MNN_LOCAL);
         check(AiSummarySettings.validate(mnn) == null, "explicit supported MNN profile accepted");
-        AiSummarySettings.save(account, 2000, mnn);
+        AiSummarySettings.save(account, 2000, loaded.withValues(mnn.baseUrl, mnn.model, mnn.apiKey,
+                mnn.maxOutputTokens, mnn.stream, mnn.inputCharacterBudget, mnn.serviceType));
         check(AiSummarySettings.load(account, 2000).serviceType == AiSummarySettings.ServiceType.MNN_LOCAL,
                 "explicit service profile survives reload");
         check(AiSummarySettings.validate(new AiSummarySettings.Config(old.baseUrl, old.model, "", 4096,

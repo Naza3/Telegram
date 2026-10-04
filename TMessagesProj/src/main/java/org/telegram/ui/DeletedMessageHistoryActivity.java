@@ -25,6 +25,9 @@ import org.telegram.ui.ActionBar.AlertDialog;
 import org.telegram.ui.ActionBar.BackDrawable;
 import org.telegram.ui.ActionBar.BaseFragment;
 import org.telegram.ui.ActionBar.Theme;
+import org.telegram.ui.ActionBar.ThemeDescription;
+import org.telegram.ui.Cells.TextInfoPrivacyCell;
+import org.telegram.ui.Cells.TextSettingsCell;
 import org.telegram.ui.Components.LayoutHelper;
 
 import java.text.SimpleDateFormat;
@@ -39,7 +42,10 @@ public final class DeletedMessageHistoryActivity extends BaseFragment implements
     private final long ownerId, dialogId;
     private final ArrayList<DeletedMessageRecord> records = new ArrayList<>();
     private final SimpleDateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault());
-    private TextView status, recoveryButton;
+    private TextInfoPrivacyCell status;
+    private TextSettingsCell recoveryButton;
+    private RecyclerView listView;
+    private final ArrayList<ThemeDescription> themeDescriptions = new ArrayList<>();
     private HistoryAdapter adapter;
     private boolean resumed, destroyed, invalidated, clearing;
     private int operation;
@@ -73,24 +79,45 @@ public final class DeletedMessageHistoryActivity extends BaseFragment implements
         });
         LinearLayout root = new LinearLayout(context);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(getThemedColor(Theme.key_windowBackgroundWhite));
-        status = new TextView(context);
-        status.setTextSize(14); status.setTextColor(getThemedColor(Theme.key_windowBackgroundWhiteGrayText));
-        status.setPadding(dp(20), dp(12), dp(20), dp(12));
+        root.setBackgroundColor(getThemedColor(Theme.key_windowBackgroundGray));
+        themeDescriptions.clear();
+        status = new TextInfoPrivacyCell(context, getResourceProvider());
         status.setText(sameOwner() ? "正在读取…" : "账号已切换或退出，请重新打开撤回记录。");
         status.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
         root.addView(status, LayoutHelper.createLinear(-1, -2));
-        recoveryButton = new TextView(context);
-        recoveryButton.setText("重置本账号撤回记录"); recoveryButton.setTextSize(16);
+        recoveryButton = new TextSettingsCell(context, getResourceProvider());
+        recoveryButton.setText("重置本账号撤回记录", false);
         recoveryButton.setTextColor(getThemedColor(Theme.key_text_RedRegular));
-        recoveryButton.setPadding(dp(20), dp(12), dp(20), dp(12)); recoveryButton.setMinHeight(dp(48));
-        recoveryButton.setBackground(Theme.createSelectorDrawable(getThemedColor(Theme.key_listSelector), 2));
+        recoveryButton.setBackground(Theme.createSelectorWithBackgroundDrawable(getThemedColor(Theme.key_windowBackgroundWhite), getThemedColor(Theme.key_listSelector)));
         recoveryButton.setVisibility(View.GONE); recoveryButton.setOnClickListener(view -> confirmResetOwner());
         root.addView(recoveryButton, LayoutHelper.createLinear(-1, -2));
-        RecyclerView list = new RecyclerView(context);
-        list.setLayoutManager(new LinearLayoutManager(context));
-        list.setAdapter(adapter = new HistoryAdapter());
-        root.addView(list, LayoutHelper.createLinear(-1, 0, 1));
+        listView = new RecyclerView(context);
+        listView.setLayoutManager(new LinearLayoutManager(context));
+        listView.setAdapter(adapter = new HistoryAdapter());
+        listView.addOnChildAttachStateChangeListener(new RecyclerView.OnChildAttachStateChangeListener() {
+            @Override public void onChildViewAttachedToWindow(View view) {
+                RecyclerView.ViewHolder holder = listView.getChildViewHolder(view);
+                if (holder instanceof Holder) ((Holder) holder).updateColors();
+            }
+            @Override public void onChildViewDetachedFromWindow(View view) { }
+        });
+        listView.setClipToPadding(false);
+        listView.setPadding(0, 0, 0, dp(16));
+        root.addView(listView, LayoutHelper.createLinear(-1, 0, 1));
+        themeDescriptions.add(new ThemeDescription(root, ThemeDescription.FLAG_BACKGROUND, null, null, null, null, Theme.key_windowBackgroundGray));
+        themeDescriptions.add(new ThemeDescription(actionBar, ThemeDescription.FLAG_BACKGROUND, null, null, null, null, Theme.key_actionBarDefault));
+        themeDescriptions.add(new ThemeDescription(actionBar, ThemeDescription.FLAG_AB_ITEMSCOLOR, null, null, null, null, Theme.key_actionBarDefaultIcon));
+        themeDescriptions.add(new ThemeDescription(actionBar, ThemeDescription.FLAG_AB_TITLECOLOR, null, null, null, null, Theme.key_actionBarDefaultTitle));
+        themeDescriptions.add(new ThemeDescription(actionBar, ThemeDescription.FLAG_AB_SUBTITLECOLOR, null, null, null, null, Theme.key_actionBarDefaultSubtitle));
+        themeDescriptions.add(new ThemeDescription(actionBar, ThemeDescription.FLAG_AB_SELECTORCOLOR, null, null, null, null, Theme.key_actionBarDefaultSelector));
+        themeDescriptions.add(new ThemeDescription(status, 0, new Class[]{TextInfoPrivacyCell.class}, new String[]{"textView"}, null, null, null, Theme.key_windowBackgroundWhiteGrayText4));
+        themeDescriptions.add(new ThemeDescription(recoveryButton, 0, new Class[]{TextSettingsCell.class}, new String[]{"textView"}, null, null, null, Theme.key_text_RedRegular));
+        themeDescriptions.add(new ThemeDescription(recoveryButton, ThemeDescription.FLAG_SELECTORWHITE, null, null, null, null, Theme.key_windowBackgroundWhite));
+        themeDescriptions.add(new ThemeDescription(recoveryButton, ThemeDescription.FLAG_SELECTORWHITE, null, null, null, null, Theme.key_listSelector));
+        for (int key : new int[]{Theme.key_windowBackgroundWhite, Theme.key_windowBackgroundWhiteBlackText,
+                Theme.key_windowBackgroundWhiteGrayText, Theme.key_listSelector, Theme.key_divider}) {
+            themeDescriptions.add(new ThemeDescription(null, 0, null, null, null, this::updateRows, key));
+        }
         fragmentView = root;
         return root;
     }
@@ -204,32 +231,64 @@ public final class DeletedMessageHistoryActivity extends BaseFragment implements
         if (actionBar != null) actionBar.setSubtitle(null);
         dismissCurrentDialog();
     }
+    private void updateRows() {
+        if (listView == null) return;
+        for (int i = 0; i < listView.getChildCount(); i++) {
+            RecyclerView.ViewHolder holder = listView.getChildViewHolder(listView.getChildAt(i));
+            if (holder instanceof Holder) ((Holder) holder).updateColors();
+        }
+    }
+    @Override public ArrayList<ThemeDescription> getThemeDescriptions() { return themeDescriptions; }
     private final class HistoryAdapter extends RecyclerView.Adapter<Holder> {
         @Override public Holder onCreateViewHolder(ViewGroup parent, int viewType) {
             LinearLayout row = new LinearLayout(parent.getContext());
-            row.setOrientation(LinearLayout.VERTICAL); row.setPadding(dp(20), dp(12), dp(20), dp(12));
-            row.setBackground(Theme.createSelectorDrawable(getThemedColor(Theme.key_listSelector), 2));
+            row.setOrientation(LinearLayout.VERTICAL);
             row.setLayoutParams(new RecyclerView.LayoutParams(-1, -2));
+            row.setFocusable(true);
+            LinearLayout content = new LinearLayout(parent.getContext());
+            content.setOrientation(LinearLayout.VERTICAL);
+            content.setPadding(dp(21), dp(14), dp(21), dp(14));
             TextView title = new TextView(parent.getContext());
-            title.setTextSize(14); title.setTextColor(getThemedColor(Theme.key_windowBackgroundWhiteGrayText));
+            title.setTextSize(16); title.setTypeface(AndroidUtilities.bold());
+            title.setGravity(Gravity.START); title.setMaxLines(2);
+            title.setEllipsize(android.text.TextUtils.TruncateAt.END);
             TextView body = new TextView(parent.getContext());
-            body.setTextSize(16); body.setTextColor(getThemedColor(Theme.key_windowBackgroundWhiteBlackText));
-            body.setPadding(0, dp(8), 0, 0); body.setGravity(Gravity.START); body.setMaxLines(6);
+            body.setTextSize(16); body.setGravity(Gravity.START); body.setMaxLines(6);
             body.setEllipsize(android.text.TextUtils.TruncateAt.END);
-            row.addView(title, LayoutHelper.createLinear(-1, -2)); row.addView(body, LayoutHelper.createLinear(-1, -2));
-            return new Holder(row, title, body);
+            TextView time = new TextView(parent.getContext());
+            time.setTextSize(13); time.setGravity(Gravity.START);
+            content.addView(title, LayoutHelper.createLinear(-1, -2));
+            content.addView(body, LayoutHelper.createLinear(-1, -2, 0, 6, 0, 0));
+            content.addView(time, LayoutHelper.createLinear(-1, -2, 0, 8, 0, 0));
+            row.addView(content, LayoutHelper.createLinear(-1, -2));
+            View divider = new View(parent.getContext());
+            row.addView(divider, LayoutHelper.createLinear(-1, 1, 21, 0, 21, 0));
+            return new Holder(row, title, body, time, divider);
         }
         @Override public void onBindViewHolder(Holder holder, int position) {
             DeletedMessageRecord record = records.get(position);
-            holder.title.setText(sender(record) + "\n" + metadata(record));
+            holder.title.setText(sender(record));
             holder.body.setText(record.text.length() > 800 ? record.text.substring(0, 800) + "…" : record.text);
+            holder.time.setText(metadata(record));
+            holder.divider.setVisibility(position == records.size() - 1 ? View.GONE : View.VISIBLE);
+            holder.updateColors();
             holder.itemView.setOnClickListener(view -> open(record));
         }
         @Override public int getItemCount() { return records.size(); }
     }
-    private static final class Holder extends RecyclerView.ViewHolder {
-        final TextView title, body;
-        Holder(View view, TextView title, TextView body) { super(view); this.title = title; this.body = body; }
+    private final class Holder extends RecyclerView.ViewHolder {
+        final TextView title, body, time;
+        final View divider;
+        Holder(View view, TextView title, TextView body, TextView time, View divider) {
+            super(view); this.title = title; this.body = body; this.time = time; this.divider = divider;
+        }
+        void updateColors() {
+            itemView.setBackground(Theme.createSelectorWithBackgroundDrawable(getThemedColor(Theme.key_windowBackgroundWhite), getThemedColor(Theme.key_listSelector)));
+            title.setTextColor(getThemedColor(Theme.key_windowBackgroundWhiteBlackText));
+            body.setTextColor(getThemedColor(Theme.key_windowBackgroundWhiteBlackText));
+            time.setTextColor(getThemedColor(Theme.key_windowBackgroundWhiteGrayText));
+            divider.setBackgroundColor(getThemedColor(Theme.key_divider));
+        }
     }
     private static int dp(float value) { return AndroidUtilities.dp(value); }
 }

@@ -4,9 +4,10 @@ package org.telegram.ui;
 import android.content.Context;
 import android.text.Editable;
 import android.text.TextWatcher;
+import android.text.TextUtils;
 import android.view.Gravity;
 import android.view.View;
-import android.widget.EditText;
+import android.view.ViewGroup;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -22,6 +23,9 @@ import org.telegram.ui.ActionBar.AlertDialog;
 import org.telegram.ui.ActionBar.BaseFragment;
 import org.telegram.ui.ActionBar.Theme;
 import org.telegram.ui.Components.LayoutHelper;
+import org.telegram.ui.Components.EditTextBoldCursor;
+import org.telegram.ui.Components.FeatureUi;
+import org.telegram.ui.Cells.HeaderCell;
 import org.telegram.ui.Components.SummaryPublishStatusText;
 
 import java.text.SimpleDateFormat;
@@ -37,6 +41,13 @@ import java.util.Locale;
 
 /** Shared list view, not a nested Fragment. Host forwards visible-tab lifecycle events. */
 public final class SummaryHistoryPanel implements NotificationCenter.NotificationCenterDelegate {
+    static final int[] THEME_KEYS = { Theme.key_windowBackgroundGray, Theme.key_windowBackgroundWhite,
+            Theme.key_windowBackgroundWhiteBlackText, Theme.key_windowBackgroundWhiteGrayText,
+            Theme.key_windowBackgroundWhiteBlueText, Theme.key_windowBackgroundWhiteBlueHeader,
+            Theme.key_windowBackgroundWhiteHintText, Theme.key_windowBackgroundWhiteLinkText,
+            Theme.key_windowBackgroundWhiteInputField, Theme.key_windowBackgroundWhiteInputFieldActivated,
+            Theme.key_listSelector, Theme.key_text_RedRegular, Theme.key_featuredStickers_addButton,
+            Theme.key_featuredStickers_addButtonPressed, Theme.key_featuredStickers_buttonText };
     private final BaseFragment parent;
     private final int account;
     private final long ownerId;
@@ -47,9 +58,9 @@ public final class SummaryHistoryPanel implements NotificationCenter.Notificatio
     private boolean publishStatusUnavailable;
     private long filterDialogId;
     private long filterTopicId;
-    private LinearLayout content;
+    private LinearLayout root, toolbar, content;
     private TextView scopeButton;
-    private EditText search;
+    private EditTextBoldCursor search;
     private boolean resumed;
     private boolean destroyed;
     private boolean invalidated;
@@ -77,10 +88,11 @@ public final class SummaryHistoryPanel implements NotificationCenter.Notificatio
     }
 
     public View createView(Context context) {
-        LinearLayout root = new LinearLayout(context);
+        root = new LinearLayout(context);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(color(Theme.key_windowBackgroundGray));
-        search = new EditText(context);
+        search = new EditTextBoldCursor(context);
+        FeatureUi.styleInput(search, parent.getResourceProvider(), false);
         search.setSingleLine(true);
         search.setTextSize(16);
         search.setTextColor(color(Theme.key_windowBackgroundWhiteBlackText));
@@ -88,6 +100,7 @@ public final class SummaryHistoryPanel implements NotificationCenter.Notificatio
         search.setHint("搜索群名或总结正文");
         search.setContentDescription("搜索当前账号本机保存的总结，不联网");
         search.setMinHeight(dp(48));
+        search.setBackground(Theme.createRoundRectDrawable(dp(8), color(Theme.key_windowBackgroundWhite)));
         search.setPadding(dp(16), dp(8), dp(16), dp(8));
         search.setText(query);
         search.addTextChangedListener(new TextWatcher() {
@@ -98,18 +111,26 @@ public final class SummaryHistoryPanel implements NotificationCenter.Notificatio
             }
             @Override public void afterTextChanged(Editable editable) { }
         });
-        root.addView(search, LayoutHelper.createLinear(-1, -2, 12, 4, 12, 0));
-        LinearLayout toolbar = new LinearLayout(context);
+        root.addView(search, LayoutHelper.createLinear(-1, -2, 12, 12, 12, 8));
+        toolbar = new LinearLayout(context);
+        toolbar.setBackgroundColor(color(Theme.key_windowBackgroundWhite));
         toolbar.setGravity(Gravity.CENTER_VERTICAL);
         scopeButton = button(toolbar, "全部群／话题", this::chooseScope);
         button(toolbar, "刷新", this::refresh);
-        button(toolbar, "清空", this::confirmClear);
-        root.addView(toolbar, LayoutHelper.createLinear(-1, -2, 12, 0, 12, 0));
+        TextView clear = button(toolbar, "清空", this::confirmClear);
+        clear.setTag("danger");
+        FeatureUi.styleDangerAction(clear, parent.getResourceProvider());
+        scopeButton.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
+        scopeButton.setSingleLine(true);
+        scopeButton.setEllipsize(TextUtils.TruncateAt.END);
+        scopeButton.setContentDescription("筛选来源群或话题");
+        scopeButton.setLayoutParams(LayoutHelper.createLinear(0, -2, 1f));
+        root.addView(toolbar, LayoutHelper.createLinear(-1, -2));
         ScrollView scroll = new ScrollView(context);
         scroll.setFillViewport(true);
         content = new LinearLayout(context);
         content.setOrientation(LinearLayout.VERTICAL);
-        content.setPadding(dp(16), dp(4), dp(16), dp(24));
+        content.setPadding(0, dp(4), 0, dp(24));
         scroll.addView(content, new ScrollView.LayoutParams(-1, -2));
         root.addView(scroll, LayoutHelper.createLinear(-1, 0, 1f));
         render();
@@ -288,6 +309,7 @@ public final class SummaryHistoryPanel implements NotificationCenter.Notificatio
         if (content == null || destroyed) return;
         content.removeAllViews();
         scopeButton.setText(scopeLabel());
+        scopeButton.setContentDescription("筛选来源：" + scopeLabel());
         if (loading) { text(content, "正在读取本机总结…", 16, true); return; }
         if (error != null) { text(content, error, 16, true); return; }
         List<SummaryHistoryStore.Record> visible = SummaryHistoryQuery.filter(records, filterDialogId, filterTopicId, query);
@@ -301,15 +323,27 @@ public final class SummaryHistoryPanel implements NotificationCenter.Notificatio
         SimpleDateFormat dayKey = new SimpleDateFormat("yyyy-MM-dd", Locale.getDefault());
         for (SummaryHistoryStore.Record record : visible) {
             String day = dayKey.format(new Date(record.generatedAtMillis));
-            if (!day.equals(previousDay)) { text(content, dateLabel(record.generatedAtMillis), 15, true); previousDay = day; }
+            if (!day.equals(previousDay)) {
+                HeaderCell header = new HeaderCell(content.getContext(), parent.getResourceProvider());
+                header.setText(dateLabel(record.generatedAtMillis));
+                content.addView(header, LayoutHelper.createLinear(-1, -2));
+                previousDay = day;
+            }
             LinearLayout row = new LinearLayout(content.getContext());
             row.setOrientation(LinearLayout.VERTICAL);
-            row.setPadding(dp(14), dp(8), dp(14), dp(12));
-            row.setBackground(Theme.createSimpleSelectorRoundRectDrawable(dp(8), color(Theme.key_windowBackgroundWhite), color(Theme.key_listSelector)));
-            text(row, SummaryHistoryActivity.chatLabel(record), 16, true);
+            row.setPadding(dp(21), dp(6), dp(21), dp(10));
+            row.setTag("record");
+            row.setBackground(Theme.getSelectorDrawable(true, parent.getResourceProvider()));
+            TextView title = text(row, SummaryHistoryActivity.chatLabel(record), 16, true);
+            title.setMaxLines(2);
+            title.setEllipsize(TextUtils.TruncateAt.END);
             text(row, new SimpleDateFormat("HH:mm", Locale.getDefault()).format(new Date(record.generatedAtMillis))
                     + " · " + record.sources.size() + " 条文字 · " + record.rangeLabel + (record.partial ? " · 部分覆盖" : ""), 13, false);
-            text(row, excerpt(record.summary, 100), 14, false);
+            TextView preview = text(row, excerpt(record.summary, 100), 15, false);
+            preview.setTag(Theme.key_windowBackgroundWhiteBlackText);
+            preview.setTextColor(color(Theme.key_windowBackgroundWhiteBlackText));
+            preview.setMaxLines(3);
+            preview.setEllipsize(TextUtils.TruncateAt.END);
             SummaryPublishStore.Attempt attempt = latestAttempts.get(record.id);
             if (attempt != null) text(row, SummaryPublishStatusText.label(attempt), 13, false);
             row.setFocusable(true);
@@ -317,7 +351,7 @@ public final class SummaryHistoryPanel implements NotificationCenter.Notificatio
                 if (active() && !loading) parent.presentFragment(new SummaryHistoryDetailActivity(account, record.id));
             });
             row.setOnLongClickListener(view -> { confirmDelete(record); return true; });
-            content.addView(row, LayoutHelper.createLinear(-1, -2, 0, 4, 0, 4));
+            content.addView(row, LayoutHelper.createLinear(-1, -2, 0, 0, 0, 1));
         }
         text(content, "最多保留 100 条、8 MiB；不保存 API Key 或原消息正文。", 13, false);
     }
@@ -339,25 +373,48 @@ public final class SummaryHistoryPanel implements NotificationCenter.Notificatio
     private TextView button(LinearLayout parentView, String title, Runnable action) {
         TextView button = new TextView(parentView.getContext());
         button.setText(title);
-        button.setTextSize(14);
-        button.setTextColor(color(Theme.key_windowBackgroundWhiteBlueText));
-        button.setGravity(Gravity.CENTER);
-        button.setMinHeight(dp(48));
-        button.setPadding(dp(8), dp(8), dp(8), dp(8));
-        button.setFocusable(true);
+        button.setTag("action");
+        FeatureUi.styleAction(button, parent.getResourceProvider());
+        button.setMinWidth(dp(64));
         button.setOnClickListener(view -> { if (active()) action.run(); });
-        parentView.addView(button, LayoutHelper.createLinear(0, -2, 1f));
+        parentView.addView(button, LayoutHelper.createLinear(-2, -2));
         return button;
     }
 
     private TextView text(LinearLayout parentView, CharSequence value, int size, boolean bold) {
         TextView view = new TextView(parentView.getContext());
         view.setText(value); view.setTextSize(size);
-        view.setTextColor(color(bold ? Theme.key_windowBackgroundWhiteBlackText : Theme.key_windowBackgroundWhiteGrayText));
+        int key = bold ? Theme.key_windowBackgroundWhiteBlackText : Theme.key_windowBackgroundWhiteGrayText;
+        view.setTag(key);
+        view.setTextColor(color(key));
         view.setGravity(Gravity.START); view.setLineSpacing(dp(2), 1f);
         if (bold) view.setTypeface(AndroidUtilities.bold());
-        parentView.addView(view, LayoutHelper.createLinear(-1, -2, 0, 6, 0, 4));
+        int inset = parentView == content ? 24 : 0;
+        parentView.addView(view, LayoutHelper.createLinear(-1, -2, inset, 6, inset, 4));
         return view;
+    }
+
+    /** Refresh colors in place so a theme change preserves search, scroll and the loaded records. */
+    public void updateColors() {
+        if (root == null) return;
+        root.setBackgroundColor(color(Theme.key_windowBackgroundGray));
+        toolbar.setBackgroundColor(color(Theme.key_windowBackgroundWhite));
+        FeatureUi.styleInput(search, parent.getResourceProvider(), false);
+        search.setBackground(Theme.createRoundRectDrawable(dp(8), color(Theme.key_windowBackgroundWhite)));
+        applyColors(root);
+    }
+
+    private void applyColors(View view) {
+        Object tag = view.getTag();
+        if (view instanceof TextView && tag instanceof Integer) ((TextView) view).setTextColor(color((Integer) tag));
+        if (view instanceof TextView && "action".equals(tag)) FeatureUi.styleAction((TextView) view, parent.getResourceProvider());
+        if (view instanceof TextView && "danger".equals(tag)) FeatureUi.styleDangerAction((TextView) view, parent.getResourceProvider());
+        if ("record".equals(tag)) view.setBackground(Theme.getSelectorDrawable(true, parent.getResourceProvider()));
+        if (view instanceof HeaderCell) ((HeaderCell) view).setTextColor(color(Theme.key_windowBackgroundWhiteBlueHeader));
+        if (view instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) view;
+            for (int i = 0; i < group.getChildCount(); i++) applyColors(group.getChildAt(i));
+        }
     }
 
     private static String excerpt(String text, int limit) {

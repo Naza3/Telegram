@@ -27,12 +27,10 @@ import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewParent;
+import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.view.inputmethod.EditorInfo;
 import android.widget.LinearLayout;
-import android.widget.CheckBox;
-import android.widget.RadioButton;
-import android.widget.RadioGroup;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
@@ -60,6 +58,9 @@ import org.telegram.messenger.ai.SummaryChatExport;
 import org.telegram.ui.ActionBar.AlertDialog;
 import org.telegram.ui.ActionBar.BaseFragment;
 import org.telegram.ui.ActionBar.Theme;
+import org.telegram.ui.Cells.HeaderCell;
+import org.telegram.ui.Cells.RadioCell;
+import org.telegram.ui.Cells.TextCheckCell;
 import org.telegram.ui.SummaryHistoryActivity;
 
 import java.util.ArrayList;
@@ -68,6 +69,8 @@ import java.util.Set;
 import java.util.Locale;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
+import java.util.Map;
 import java.text.SimpleDateFormat;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -231,6 +234,8 @@ public final class GroupSummarySheet {
     private final Theme.ResourcesProvider resourcesProvider;
     private final LinearLayout content;
     private final AlertDialog dialog;
+    private final IdentityHashMap<View, Runnable> themeBindings = new IdentityHashMap<>();
+    private final IdentityHashMap<TextView, Integer> textColorKeys = new IdentityHashMap<>();
 
     private SummaryHistoryLoader historyLoader;
     private AiSummaryClient client;
@@ -368,6 +373,8 @@ public final class GroupSummarySheet {
         GroupSummarySheet sheet = new GroupSummarySheet(fragment, account, dialogId, topicId,
                 unreadLower, unreadUpper, navigator);
         sheet.embedded = true;
+        sheet.content.setPadding(0, 0, 0, dp(16));
+        sheet.content.setBackgroundColor(sheet.color(Theme.key_windowBackgroundGray));
         sheet.selectedSnapshot = selectedSnapshot;
         if (selectedSnapshot != null) sheet.rangeMode = RangeMode.SELECTED;
         sheet.entryUnreadSnapshot = entryUnreadSnapshot;
@@ -430,6 +437,7 @@ public final class GroupSummarySheet {
         content.setOrientation(LinearLayout.VERTICAL);
         content.setFocusableInTouchMode(true);
         content.setPadding(dp(24), 0, dp(24), dp(8));
+        FeatureUi.bindThemeUpdates(content, this::updateColors);
         // Telegram's AlertDialog already puts its custom view inside a scroll container.
         dialog = new AlertDialog.Builder(context, resourcesProvider)
                 .setTitle(topicId == 0 ? "AI 群聊总结" : "AI 话题总结")
@@ -465,7 +473,7 @@ public final class GroupSummarySheet {
         historyRecord = null;
         historySaveStatus = null;
         historySaveRetry = null;
-        content.removeAllViews();
+        clearViews(content);
     }
 
     private void cancelWork() {
@@ -517,7 +525,7 @@ public final class GroupSummarySheet {
         AlertDialog previous = requestInputsDialog;
         requestInputsDialog = null;
         requestInputsListVisible = false;
-        if (requestInputsContent != null) requestInputsContent.removeAllViews();
+        if (requestInputsContent != null) clearViews(requestInputsContent);
         requestInputsContent = null;
         if (previous != null) previous.dismiss();
     }
@@ -579,7 +587,7 @@ public final class GroupSummarySheet {
     private void renderRequestInputList() {
         if (requestInputsContent == null) return;
         requestInputsListVisible = true;
-        requestInputsContent.removeAllViews();
+        clearViews(requestInputsContent);
         addText(requestInputsContent, "仅保留本次任务的请求输入。重新总结、重试或关闭面板后清除，不写入总结历史。", false);
         addText(requestInputsContent, "以下是请求 messages 中的 system 和 user 原文；字符数不是 token 数，输出预留不属于输入文本。", false);
         for (int i = 0; i < requestInputs.size(); i++) addRequestInputRow(i);
@@ -596,7 +604,7 @@ public final class GroupSummarySheet {
         if (!requestInputsViewerActive() || index < 0 || index >= requestInputs.size()) return;
         RequestInputEntry entry = requestInputs.get(index);
         requestInputsListVisible = false;
-        requestInputsContent.removeAllViews();
+        clearViews(requestInputsContent);
         addAction(requestInputsContent, "返回请求列表", () -> {
             if (requestInputsViewerActive()) renderRequestInputList();
         });
@@ -630,7 +638,7 @@ public final class GroupSummarySheet {
 
     private void addRequestInputText(String text) {
         TextView view = addText(requestInputsContent, text, false);
-        view.setTextColor(color(Theme.key_dialogTextBlack));
+        setTextColor(view, Theme.key_dialogTextBlack);
         view.setTypeface(Typeface.MONOSPACE);
         view.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 13);
         view.setTextIsSelectable(true);
@@ -832,6 +840,7 @@ public final class GroupSummarySheet {
         }
         AlertDialog previous = sourceDialog;
         sourceDialog = null;
+        clearViews(sourceContent);
         sourceContent = null;
         if (previous != null) previous.dismiss();
     }
@@ -870,7 +879,7 @@ public final class GroupSummarySheet {
     private void verifySource(SummaryMessage expected, int parentGeneration, int previewGeneration, boolean jump) {
         if (!sourcePreviewActive(parentGeneration, previewGeneration)) return;
         if (sourceVerifier != null) sourceVerifier.cancel();
-        sourceContent.removeAllViews();
+        clearViews(sourceContent);
         addText(sourceContent, jump ? "正在重新核验原消息…" : "正在读取并核验原消息…", true);
         sourceVerifier = new SummarySourceVerifier(account, ownerId, dialogId, topicId);
         sourceVerifier.verify(expected, new SummarySourceVerifier.Callback() {
@@ -885,13 +894,13 @@ public final class GroupSummarySheet {
                     }
                     return;
                 }
-                sourceContent.removeAllViews();
+                clearViews(sourceContent);
                 addText(sourceContent, current.sender, true);
                 addText(sourceContent, new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault())
                         .format(new Date(current.date * 1000L)), false);
                 TextView original = addText(sourceContent, current.text, false);
-                original.setTextColor(color(Theme.key_dialogTextBlack));
-                original.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 16);
+                setTextColor(original, Theme.key_dialogTextBlack);
+                original.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
                 original.setTextIsSelectable(true);
                 addAction(sourceContent, "跳回群聊", () ->
                         verifySource(current, parentGeneration, previewGeneration, true));
@@ -906,7 +915,7 @@ public final class GroupSummarySheet {
             public void onError(String message) {
                 if (!sourcePreviewActive(parentGeneration, previewGeneration)) return;
                 sourceVerifier = null;
-                sourceContent.removeAllViews();
+                clearViews(sourceContent);
                 addText(sourceContent, "暂时无法显示原文", true);
                 addText(sourceContent, message, false);
                 addAction(sourceContent, "重新核验", () ->
@@ -1079,7 +1088,7 @@ public final class GroupSummarySheet {
         historySaveRetry = null;
         requestStatus = null;
         AndroidUtilities.hideKeyboard(content);
-        content.removeAllViews();
+        clearViews(content);
         content.requestFocus();
         content.post(() -> {
             ViewParent parent = content.getParent();
@@ -1132,7 +1141,7 @@ public final class GroupSummarySheet {
             return;
         }
         selectionPageVisible = true;
-        addText(rangeMode == RangeMode.SELECTED ? "确认所选消息" : topicId == 0 ? "选择当前聊天的文字消息范围" : "仅总结当前话题的文字消息", true);
+        addSection(rangeMode == RangeMode.SELECTED ? "确认所选消息" : topicId == 0 ? "文字消息范围" : "当前话题的文字消息");
         if (settingsNotice != null) {
             addText(settingsNotice, false);
         }
@@ -1141,11 +1150,11 @@ public final class GroupSummarySheet {
                     .format(new Date(cachedResult.generatedAt)) + "）", this::viewExistingResult);
         }
 
-        RadioGroup choices = new RadioGroup(context);
-        choices.setOrientation(RadioGroup.VERTICAL);
+        ChoiceGroup choices = new ChoiceGroup(context);
+        choices.setOrientation(ChoiceGroup.VERTICAL);
         for (RangeMode mode : rangeMode == RangeMode.SELECTED ? new RangeMode[] {RangeMode.SELECTED}
                 : new RangeMode[] {RangeMode.RECENT, RangeMode.TODAY, RangeMode.SINCE, RangeMode.UNREAD}) {
-            RadioButton option = radio(mode == RangeMode.SELECTED ? "仅本次手动选择的 " + selectedSnapshot.messages.size() + " 条文字"
+            RadioCell option = radio(mode == RangeMode.SELECTED ? "仅本次手动选择的 " + selectedSnapshot.messages.size() + " 条文字"
                     : mode == RangeMode.RECENT ? "最近 N 条文字消息"
                     : mode == RangeMode.TODAY ? "当日文字消息"
                     : mode == RangeMode.SINCE ? "上次总结之后"
@@ -1156,7 +1165,7 @@ public final class GroupSummarySheet {
                 option.setEnabled(false);
                 option.setAlpha(0.5f);
             }
-            choices.addView(option, new RadioGroup.LayoutParams(-1, dp(46)));
+            choices.addView(option, LayoutHelper.createLinear(-1, -2));
             if (mode == rangeMode) choices.check(option.getId());
         }
         content.addView(choices, LayoutHelper.createLinear(-1, -2, 0, 4, 0, 4));
@@ -1172,6 +1181,7 @@ public final class GroupSummarySheet {
         Runnable updateRange = () -> {
             count.setEnabled(rangeMode != RangeMode.TODAY && rangeMode != RangeMode.SELECTED);
             count.setVisibility(rangeMode == RangeMode.SELECTED ? View.GONE : View.VISIBLE);
+            ((View) count.getParent()).setVisibility(count.getVisibility());
             count.setAlpha(rangeMode == RangeMode.TODAY ? 0.5f : 1f);
             count.setHint((rangeMode == RangeMode.UNREAD || rangeMode == RangeMode.SINCE && summaryState.cursor > 0
                     ? "每批历史条数" : "文字条数") + "（1–" + SummaryHistoryLoader.MAX_RECENT_COUNT + "）");
@@ -1189,7 +1199,7 @@ public final class GroupSummarySheet {
                         : "从最新消息向前选取 N 条有效文字，再按时间先后总结；不移动增量进度。需要建立增量起点时请选择“上次总结之后”。");
         };
         choices.setOnCheckedChangeListener((group, checkedId) -> {
-            RadioButton checked = choices.findViewById(checkedId);
+            RadioCell checked = choices.findViewById(checkedId);
             rangeMode = (RangeMode) checked.getTag();
             updateRange.run();
         });
@@ -1199,6 +1209,7 @@ public final class GroupSummarySheet {
         }
         addText("点击“开始总结”才会将文字发送到已配置的模型 API。也可独立导出待总结消息，不需要配置或启动模型。已完成的摘要自动加密保存在本机总结历史。", false);
 
+        addSection("总结要求");
         PromptOptions direction = effectivePrompt();
         addText("核心总结要求：" + (direction.customInstructions.isEmpty() ? "未填写" : "已填写") + " · "
                 + promptScopeLabel(sessionPrompt != null ? PromptPreferences.Scope.SESSION : savedPromptScope), true);
@@ -1214,6 +1225,7 @@ public final class GroupSummarySheet {
             showPromptEditor(effectivePrompt(), PromptPreferences.Scope.SESSION, null);
         });
 
+        addSection("筛选与排除");
         addText("消息选择：" + filterLabel(filterOptions), false);
         if (filterOptions.hasFilters()) {
             addText("已启用实际消息筛选：本次不会建立或推进通用增量起点。要补齐全部消息，请恢复全部文字后运行。", true);
@@ -1234,19 +1246,19 @@ public final class GroupSummarySheet {
             }));
         });
         addText("仅总结输入排除名单中的真实用户发言，未知或匿名身份不会按昵称猜测；不影响导出。", false);
+        addSection("模型与运行");
         selectionProfileLabel = addText(selectionConfigLabel(), true);
         addAction("切换或管理 API 配置", () -> {
             recentCountText = count.getText().toString();
             showSettings();
         });
-        CheckBox include = new CheckBox(context);
-        include.setText("包含本人已发布的 AI 总结");
-        include.setTextColor(color(Theme.key_dialogTextBlack));
-        include.setChecked(includePublished);
-        include.setOnCheckedChangeListener((button, checked) -> includePublished = checked);
-        content.addView(include, LayoutHelper.createLinear(-1, -2));
+        TextCheckCell include = check("包含本人已发布的 AI 总结", includePublished);
+        include.setOnClickListener(view -> {
+            includePublished = !include.isChecked();
+            include.setChecked(includePublished);
+        });
         addText("默认仅在总结输入中排除已确认发送的本人 AI 总结；导出仍保留原始范围内的文字。实际排除后不推进通用增量进度。", false);
-        TextView start = addAction("开始总结", () -> {
+        TextView start = addPrimaryAction("开始总结", () -> {
             if (readSelectedCount(count)) startSummary();
         });
         prepareSelectionConfig(start);
@@ -1600,31 +1612,31 @@ public final class GroupSummarySheet {
     private void showFilterEditor() {
         cancelWork();
         clearContent();
-        addText("与我相关与筛选", true);
+        addSection("与我相关与筛选");
         addText("仅作用于本面板，先读取选定范围，再筛选其中的文字。", false);
-        RadioGroup modes = new RadioGroup(context);
-        modes.setOrientation(RadioGroup.VERTICAL);
+        ChoiceGroup modes = new ChoiceGroup(context);
+        modes.setOrientation(ChoiceGroup.VERTICAL);
         for (SummaryFilter.Mode mode : SummaryFilter.Mode.values()) {
-            RadioButton option = radio(mode == SummaryFilter.Mode.ALL ? "总结全部文字"
+            RadioCell option = radio(mode == SummaryFilter.Mode.ALL ? "总结全部文字"
                     : mode == SummaryFilter.Mode.FOCUS_SELF ? "保留全部，提供与我相关标记" : "仅总结与我相关及必要上下文");
             option.setId(View.generateViewId());
             option.setTag(mode);
-            modes.addView(option, new RadioGroup.LayoutParams(-1, -2));
+            modes.addView(option, LayoutHelper.createLinear(-1, -2));
             if (mode == filterOptions.mode) modes.check(option.getId());
         }
         content.addView(modes, LayoutHelper.createLinear(-1, -2, 0, 4, 0, 4));
         addText("与我相关仅按明确 @ 我、已确认回复我、本人身份可确认的发言匹配，不猜测匿名身份。仅相关模式还会带入范围内前后各一条文字及明确回复的原文，作为必要上下文。", false);
         addText("你可以在核心总结要求中说明如何使用本人及与我相关标记。", false);
-        addText("成员 ID（可留空）", true);
+        addSection("成员 ID（可留空）");
         EditTextBoldCursor sender = edit("留空为全部成员", filterOptions.senderId == 0 ? "" : Long.toString(filterOptions.senderId),
                 InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_SIGNED);
         addText("按 Telegram 真实发言者 ID 精确筛选；本人 ID：" + ownerId + "。不按显示名猜测成员。", false);
-        addText("正文关键词（可留空，最多 128 个字符）", true);
+        addSection("正文关键词（可留空，最多 128 个字符）");
         EditTextBoldCursor keyword = edit("不区分大小写的字面匹配", filterOptions.keyword, InputType.TYPE_CLASS_TEXT);
         addText("成员、关键词和仅相关条件同时满足才匹配；额外上下文可能不满足条件。任何实际筛选都不会推进通用“上次总结之后”进度，零匹配也不会退回全部消息。", false);
         TextView validation = addText("", false);
-        validation.setTextColor(color(Theme.key_text_RedRegular));
-        addAction("应用本次筛选", () -> {
+        setTextColor(validation, Theme.key_text_RedRegular);
+        addPrimaryAction("应用本次筛选", () -> {
             long senderId = 0;
             String senderText = sender.getText().toString().trim();
             if (!senderText.isEmpty()) {
@@ -1639,7 +1651,7 @@ public final class GroupSummarySheet {
                     return;
                 }
             }
-            RadioButton selected = modes.findViewById(modes.getCheckedRadioButtonId());
+            RadioCell selected = modes.findViewById(modes.getCheckedRadioButtonId());
             try {
                 filterOptions = new SummaryFilter.Options((SummaryFilter.Mode) selected.getTag(), senderId,
                         keyword.getText().toString());
@@ -1740,7 +1752,7 @@ public final class GroupSummarySheet {
         if (closed || !checkAccountOwner()) return;
         cancelWork();
         clearContent();
-        addText("核心总结要求", true);
+        addSection("核心总结要求");
         addText("手动填写你希望模型如何总结所选消息。开始总结前需要填写；可以清空并保存。", false);
         addText("最多 " + PromptOptions.MAX_CUSTOM_CODE_POINTS + " 个 Unicode 字符", false);
         EditTextBoldCursor custom = edit("请输入核心总结要求",
@@ -1755,8 +1767,8 @@ public final class GroupSummarySheet {
             String text = custom.getText().toString();
             int count = text.codePointCount(0, text.length());
             counter.setText(count + " / " + PromptOptions.MAX_CUSTOM_CODE_POINTS + " 字符");
-            counter.setTextColor(color(count > PromptOptions.MAX_CUSTOM_CODE_POINTS
-                    ? Theme.key_text_RedRegular : Theme.key_dialogTextGray));
+            setTextColor(counter, count > PromptOptions.MAX_CUSTOM_CODE_POINTS
+                    ? Theme.key_text_RedRegular : bodyColor(false));
         };
         custom.addTextChangedListener(new TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
@@ -1768,27 +1780,27 @@ public final class GroupSummarySheet {
             if (!closed && checkAccountOwner()) custom.setText(text);
         }, custom.getText().toString())));
 
-        addText("应用范围", true);
-        RadioGroup scopes = new RadioGroup(context);
-        scopes.setOrientation(RadioGroup.VERTICAL);
+        addSection("应用范围");
+        ChoiceGroup scopes = new ChoiceGroup(context);
+        scopes.setOrientation(ChoiceGroup.VERTICAL);
         for (PromptPreferences.Scope scope : new PromptPreferences.Scope[] {PromptPreferences.Scope.SESSION,
                 PromptPreferences.Scope.CHAT, PromptPreferences.Scope.ACCOUNT}) {
             String label = scope == PromptPreferences.Scope.SESSION ? "仅本次面板，不保存"
                     : scope == PromptPreferences.Scope.CHAT ? (topicId == 0 ? "保存为本群偏好" : "保存为当前话题偏好")
                     : "保存为当前账号默认";
-            RadioButton option = radio(label);
+            RadioCell option = radio(label);
             option.setId(View.generateViewId());
             option.setTag(scope);
-            scopes.addView(option, new RadioGroup.LayoutParams(-1, dp(44)));
+            scopes.addView(option, LayoutHelper.createLinear(-1, -2));
             if (scope == selectedScope) scopes.check(option.getId());
         }
         content.addView(scopes, LayoutHelper.createLinear(-1, -2, 0, 4, 0, 4));
         addText("本次面板优先于群／话题偏好，群／话题偏好优先于账号默认。保存账号默认不会覆盖已保存的群偏好。", false);
         TextView validation = addText(error == null ? "" : error, false);
-        validation.setTextColor(color(Theme.key_text_RedRegular));
+        setTextColor(validation, Theme.key_text_RedRegular);
         validation.setVisibility(error == null ? View.GONE : View.VISIBLE);
-        addAction("应用核心总结要求", () -> {
-            RadioButton scope = scopes.findViewById(scopes.getCheckedRadioButtonId());
+        addPrimaryAction("应用核心总结要求", () -> {
+            RadioCell scope = scopes.findViewById(scopes.getCheckedRadioButtonId());
             try {
                 PromptOptions options = new PromptOptions(PromptOptions.GENERAL, custom.getText().toString());
                 savePromptOptions(options, (PromptPreferences.Scope) scope.getTag());
@@ -1965,10 +1977,10 @@ public final class GroupSummarySheet {
 
     private void showSettings(AiSummarySettings.Config config) {
         clearContent();
-        addText("模型 API 设置", true);
-        RadioGroup serviceTypes = new RadioGroup(context);
+        addSection("模型 API 设置");
+        ChoiceGroup serviceTypes = new ChoiceGroup(context);
         for (AiSummarySettings.ServiceType type : AiSummarySettings.ServiceType.values()) {
-            RadioButton choice = radio(type == AiSummarySettings.ServiceType.MNN_LOCAL ? "MNN Chat 本机服务" : "通用 OpenAI 兼容服务");
+            RadioCell choice = radio(type == AiSummarySettings.ServiceType.MNN_LOCAL ? "MNN Chat 本机服务" : "通用 OpenAI 兼容服务");
             choice.setId(View.generateViewId()); choice.setTag(type);
             serviceTypes.addView(choice);
             if (type == config.serviceType) serviceTypes.check(choice.getId());
@@ -1976,31 +1988,26 @@ public final class GroupSummarySheet {
         content.addView(serviceTypes, LayoutHelper.createLinear(-1, -2));
         addText("先在 MNN Chat 加载模型并开启 API 服务，再复制服务地址与 API Key。同一手机默认地址为 http://127.0.0.1:8080/v1。", false);
 
-        addText("服务地址", true);
+        addSection("服务地址");
         EditTextBoldCursor address = edit("http://127.0.0.1:8080/v1", config.baseUrl,
                 InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-        addText("模型名称（可留空）", true);
+        addSection("模型名称（可留空）");
         EditTextBoldCursor model = edit("留空使用 MNN 当前已加载的模型", config.model,
                 InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
         addText("填写模型名不会切换 MNN 中已加载的模型。", false);
-        addText("最大输出 token（64–8192）", true);
+        addSection("最大输出 token（64–8192）");
         EditTextBoldCursor outputTokens = edit("512", Integer.toString(config.maxOutputTokens),
                 InputType.TYPE_CLASS_NUMBER);
         addText("MNN 本机 API 最高支持 2048，建议先用 512；其他服务按其限制填写。", false);
-        addText("上下文字符预算（2048–" + AiSummarySettings.MAX_INPUT_CHARACTER_BUDGET + "）", true);
+        addSection("上下文字符预算（2048–" + AiSummarySettings.MAX_INPUT_CHARACTER_BUDGET + "）");
         EditTextBoldCursor contextBudget = edit("6000", Integer.toString(config.inputCharacterBudget),
                 InputType.TYPE_CLASS_NUMBER);
         addText("这是保守的字符估计，不是模型 token 数。输出按每 token 预留 4 字符，此外还需容纳核心总结要求、输入说明和聊天内容。", false);
         addText("常用搭配（最大输出 / 字符预算）：512 / 6000、1024 / 12000、2048 / 16000。较大预算可能增加手机内存及耗时。", false);
-        CheckBox streaming = new CheckBox(context);
-        streaming.setText("流式显示（需要服务支持）");
-        streaming.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 16);
-        streaming.setTextColor(color(Theme.key_dialogTextBlack));
-        streaming.setChecked(config.stream);
-        streaming.setMinHeight(dp(48));
-        content.addView(streaming, LayoutHelper.createLinear(-1, -2, 0, 4, 0, 4));
+        TextCheckCell streaming = check("流式显示（需要服务支持）", config.stream);
+        streaming.setOnClickListener(view -> streaming.setChecked(!streaming.isChecked()));
         addText("流式显示当前来源分段或合并草稿，全部完成后才是最终总结。连接测试使用普通请求，不代表已验证流式支持。", false);
-        addText("API Key（按 MNN 服务设置填写）", true);
+        addSection("API Key（按 MNN 服务设置填写）");
         EditTextBoldCursor key = edit("服务关闭鉴权时可留空", config.apiKey,
                 InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
         key.setTransformationMethod(PasswordTransformationMethod.getInstance());
@@ -2008,7 +2015,7 @@ public final class GroupSummarySheet {
         addText("API Key 在支持的设备上加密保存；加密保存不可用时仅本次运行有效。", false);
 
         TextView validation = addText("", false);
-        validation.setTextColor(color(Theme.key_text_RedRegular));
+        setTextColor(validation, Theme.key_text_RedRegular);
         validation.setVisibility(View.GONE);
         addAction("测试连接", () -> {
             AiSummarySettings.Config snapshot = readSettingsInput(config, address, model, key, outputTokens, contextBudget,
@@ -2017,7 +2024,7 @@ public final class GroupSummarySheet {
                 testConnection(snapshot);
             }
         });
-        addAction("保存设置", () -> {
+        addPrimaryAction("保存设置", () -> {
             AiSummarySettings.Config updated = readSettingsInput(config, address, model, key, outputTokens, contextBudget,
                     validation, streaming.isChecked(), (AiSummarySettings.ServiceType) serviceTypes.findViewById(serviceTypes.getCheckedRadioButtonId()).getTag());
             if (updated != null) {
@@ -2308,7 +2315,7 @@ public final class GroupSummarySheet {
                 partialLabel = addText("", true);
                 partialLabel.setVisibility(View.GONE);
                 partialAnswer = addText("", false);
-                partialAnswer.setTextColor(color(Theme.key_dialogTextBlack));
+                styleBody(partialAnswer);
                 partialAnswer.setLinksClickable(false);
                 partialAnswer.setVisibility(View.GONE);
                 addAction("回到最新内容", () -> {
@@ -2537,7 +2544,7 @@ public final class GroupSummarySheet {
         partialLabel = addText("生成中，尚未完成或校验", true);
         partialLabel.setVisibility(View.GONE);
         partialAnswer = addText("", false);
-        partialAnswer.setTextColor(color(Theme.key_dialogTextBlack));
+        styleBody(partialAnswer);
         partialAnswer.setLinksClickable(false);
         partialAnswer.setVisibility(View.GONE);
         addAction("取消并返回", this::showSelection);
@@ -2801,8 +2808,7 @@ public final class GroupSummarySheet {
         }
         boolean sourceLinks = supportsSummarySourceLinks();
         TextView result = addText(linkSources(summary), false);
-        result.setTextColor(color(Theme.key_dialogTextBlack));
-        result.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 16);
+        styleBody(result);
         result.setTextIsSelectable(true);
         if (sourceLinks) result.setMovementMethod(LinkMovementMethod.getInstance());
         result.setLinksClickable(sourceLinks);
@@ -2812,7 +2818,7 @@ public final class GroupSummarySheet {
         });
         if (historyRecord != null && !historySavePending && !historySaveFailed) {
             final SummaryHistoryStore.Record publishRecord = historyRecord;
-            addAction("发送到来源群…", () -> SummaryPublishHelper.open(fragment, account, ownerId, publishRecord));
+            addPrimaryAction("发送到来源群…", () -> SummaryPublishHelper.open(fragment, account, ownerId, publishRecord));
             addText("下一步打开来源聊天的输入框，可编辑并由你确认发送。", false);
         }
         if (summaryHistory != null && summaryHistory.complete && sourceMessages != null && !sourceMessages.isEmpty()
@@ -2979,28 +2985,124 @@ public final class GroupSummarySheet {
         return text;
     }
 
-    private RadioButton radio(String label) {
-        RadioButton button = new RadioButton(context);
-        button.setText(label);
-        button.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 16);
-        button.setTextColor(color(Theme.key_dialogTextBlack));
-        return button;
+    /** Recolors existing controls without rebuilding a page or changing an editor draft. */
+    public void updateColors() {
+        if (closed) return;
+        if (embedded) content.setBackgroundColor(color(Theme.key_windowBackgroundGray));
+        for (Runnable binding : new ArrayList<>(themeBindings.values())) binding.run();
+        for (Map.Entry<TextView, Integer> entry : textColorKeys.entrySet()) {
+            entry.getKey().setTextColor(color(entry.getValue()));
+        }
+    }
+
+    private void bind(View view, Runnable colors) {
+        themeBindings.put(view, colors);
+        colors.run();
+    }
+
+    private void setTextColor(TextView view, int key) {
+        textColorKeys.put(view, key);
+        view.setTextColor(color(key));
+    }
+
+    private int bodyColor(boolean primary) {
+        return embedded ? (primary ? Theme.key_windowBackgroundWhiteBlackText : Theme.key_windowBackgroundWhiteGrayText4)
+                : (primary ? Theme.key_dialogTextBlack : Theme.key_dialogTextGray);
+    }
+
+    private void forget(View view) {
+        themeBindings.remove(view);
+        textColorKeys.remove(view);
+        if (view instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) view;
+            for (int i = 0; i < group.getChildCount(); i++) forget(group.getChildAt(i));
+        }
+    }
+
+    private void clearViews(LinearLayout parent) {
+        if (parent == null) return;
+        for (int i = 0; i < parent.getChildCount(); i++) forget(parent.getChildAt(i));
+        parent.removeAllViews();
+    }
+
+    private final class ChoiceGroup extends LinearLayout {
+        private int checkedId = View.NO_ID;
+        private ChoiceChanged listener;
+        ChoiceGroup(Context context) { super(context); setOrientation(VERTICAL); }
+        void check(int id) {
+            if (id == checkedId) return;
+            checkedId = id;
+            for (int i = 0; i < getChildCount(); i++) {
+                RadioCell cell = (RadioCell) getChildAt(i);
+                cell.setChecked(cell.getId() == id, listener != null);
+            }
+            if (listener != null) listener.onChanged(this, id);
+        }
+        int getCheckedRadioButtonId() { return checkedId; }
+        void setOnCheckedChangeListener(ChoiceChanged value) { listener = value; }
+    }
+
+    private interface ChoiceChanged { void onChanged(ChoiceGroup group, int checkedId); }
+
+    private RadioCell radio(String label) {
+        RadioCell cell = new RadioCell(context, !embedded, embedded ? 21 : 0, resourcesProvider);
+        cell.setText(label, false, false);
+        cell.setFocusable(true);
+        cell.setOnClickListener(view -> {
+            if (view.getParent() instanceof ChoiceGroup) ((ChoiceGroup) view.getParent()).check(view.getId());
+        });
+        bind(cell, () -> {
+            cell.setTextColor(color(bodyColor(true)));
+            cell.setBackground(Theme.createSelectorWithBackgroundDrawable(color(embedded
+                    ? Theme.key_windowBackgroundWhite : Theme.key_dialogBackground), color(Theme.key_listSelector)));
+            for (int i = 0; i < cell.getChildCount(); i++) {
+                if (cell.getChildAt(i) instanceof RadioButton) {
+                    ((RadioButton) cell.getChildAt(i)).setColor(color(embedded ? Theme.key_radioBackground : Theme.key_dialogRadioBackground),
+                            color(embedded ? Theme.key_radioBackgroundChecked : Theme.key_dialogRadioBackgroundChecked));
+                }
+            }
+        });
+        return cell;
+    }
+
+    private TextCheckCell check(String label, boolean checked) {
+        TextCheckCell cell = new TextCheckCell(context, embedded ? 21 : 0, !embedded, resourcesProvider);
+        cell.setTextAndCheck(label, checked, false);
+        bind(cell, () -> {
+            cell.setColors(bodyColor(true), Theme.key_switchTrack, Theme.key_switchTrackChecked,
+                    embedded ? Theme.key_windowBackgroundWhite : Theme.key_dialogBackground,
+                    embedded ? Theme.key_windowBackgroundWhite : Theme.key_dialogBackground);
+            cell.setBackground(Theme.createSelectorWithBackgroundDrawable(color(embedded
+                    ? Theme.key_windowBackgroundWhite : Theme.key_dialogBackground), color(Theme.key_listSelector)));
+        });
+        content.addView(cell, LayoutHelper.createLinear(-1, -2));
+        return cell;
+    }
+
+    private void addSection(String text) {
+        HeaderCell cell = new HeaderCell(context, Theme.key_windowBackgroundWhiteBlueHeader, embedded ? 21 : 0, 12, false, resourcesProvider);
+        cell.setText(text);
+        bind(cell, () -> {
+            cell.setTextColor(color(embedded ? Theme.key_windowBackgroundWhiteBlueHeader : Theme.key_dialogTextLink));
+            cell.setBackgroundColor(color(embedded ? Theme.key_windowBackgroundWhite : Theme.key_dialogBackground));
+        });
+        content.addView(cell, LayoutHelper.createLinear(-1, -2, 0, 12, 0, 0));
     }
 
     private EditTextBoldCursor edit(String hint, String value, int inputType) {
+        LinearLayout row = new LinearLayout(context);
+        row.setPadding(embedded ? dp(21) : 0, 0, embedded ? dp(21) : 0, dp(8));
+        bind(row, () -> row.setBackgroundColor(color(embedded ? Theme.key_windowBackgroundWhite : Theme.key_dialogBackground)));
         EditTextBoldCursor edit = new EditTextBoldCursor(context);
-        edit.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 16);
-        edit.setTextColor(color(Theme.key_dialogTextBlack));
-        edit.setHintTextColor(color(Theme.key_dialogTextGray));
-        edit.setCursorColor(color(Theme.key_dialogTextLink));
-        edit.setCursorWidth(1.5f);
+        bind(edit, () -> FeatureUi.styleInput(edit, resourcesProvider, !embedded));
         edit.setInputType(inputType);
         edit.setSingleLine(true);
         edit.setImeOptions(EditorInfo.IME_ACTION_DONE | EditorInfo.IME_FLAG_NO_EXTRACT_UI);
-        edit.setPadding(dp(2), dp(10), dp(2), dp(10));
+        edit.setPadding(0, dp(12), 0, dp(12));
         edit.setHint(hint);
         edit.setText(value);
-        content.addView(edit, LayoutHelper.createLinear(-1, -2, 0, 0, 0, 8));
+        row.addView(edit, LayoutHelper.createLinear(-1, -2));
+        content.addView(row, LayoutHelper.createLinear(-1, -2));
         return edit;
     }
 
@@ -3009,16 +3111,32 @@ public final class GroupSummarySheet {
     }
 
     private TextView addText(LinearLayout parent, CharSequence text, boolean title) {
+        final boolean page = embedded && parent == content;
         TextView view = new TextView(context);
         view.setText(text);
-        view.setTextSize(TypedValue.COMPLEX_UNIT_DIP, title ? 16 : 14);
-        view.setTextColor(color(title ? Theme.key_dialogTextBlack : Theme.key_dialogTextGray));
+        view.setTextSize(TypedValue.COMPLEX_UNIT_SP, title ? 16 : 14);
+        view.setGravity(Gravity.START);
         view.setLineSpacing(dp(3), 1f);
-        if (title) {
-            view.setTypeface(AndroidUtilities.bold());
-        }
-        parent.addView(view, LayoutHelper.createLinear(-1, -2, 0, title ? 12 : 6, 0, 6));
+        if (title) view.setTypeface(AndroidUtilities.bold());
+        view.setPadding(page ? dp(title ? 21 : 24) : 0, dp(title ? 12 : 8), page ? dp(title ? 21 : 24) : 0, dp(8));
+        setTextColor(view, page ? (title ? Theme.key_windowBackgroundWhiteBlackText : Theme.key_windowBackgroundWhiteGrayText4)
+                : (title ? Theme.key_dialogTextBlack : Theme.key_dialogTextGray));
+        parent.addView(view, LayoutHelper.createLinear(-1, -2));
         return view;
+    }
+
+    private void styleBody(TextView view) {
+        view.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        view.setPadding(embedded ? dp(21) : 0, dp(14), embedded ? dp(21) : 0, dp(14));
+        setTextColor(view, bodyColor(true));
+        bind(view, () -> view.setBackgroundColor(color(embedded ? Theme.key_windowBackgroundWhite : Theme.key_dialogBackground)));
+    }
+
+    private TextView addPrimaryAction(String label, Runnable action) {
+        TextView button = addAction(label, action);
+        bind(button, () -> FeatureUi.stylePrimaryAction(button, resourcesProvider));
+        button.setLayoutParams(LayoutHelper.createLinear(-1, -2, embedded ? 21 : 0, 12, embedded ? 21 : 0, 8));
+        return button;
     }
 
     private TextView addAction(String label, Runnable action) {
@@ -3027,23 +3145,21 @@ public final class GroupSummarySheet {
 
     private TextView addAction(LinearLayout parent, String label, Runnable action) {
         final int actionOperation = operation;
+        final boolean page = embedded && parent == content;
         TextView button = new TextView(context);
         button.setText(label);
-        button.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 16);
-        button.setTypeface(AndroidUtilities.bold());
-        button.setTextColor(color(Theme.key_dialogTextLink));
-        button.setGravity(Gravity.CENTER);
-        button.setMinHeight(dp(48));
-        button.setPadding(dp(8), dp(10), dp(8), dp(10));
-        button.setBackground(Theme.createSimpleSelectorRoundRectDrawable(dp(6),
-                color(Theme.key_dialogBackgroundGray), color(Theme.key_listSelector)));
-        button.setFocusable(true);
-        button.setOnClickListener(view -> {
-            if (!closed && actionOperation == operation) {
-                action.run();
+        bind(button, () -> {
+            FeatureUi.styleAction(button, resourcesProvider);
+            if (page) button.setBackground(Theme.createSelectorWithBackgroundDrawable(color(Theme.key_windowBackgroundWhite), color(Theme.key_listSelector)));
+            else {
+                button.setPaddingRelative(0, dp(12), 0, dp(12));
+                button.setTextColor(color(Theme.key_dialogTextLink));
             }
         });
-        parent.addView(button, LayoutHelper.createLinear(-1, -2, 0, 8, 0, 0));
+        button.setOnClickListener(view -> {
+            if (!closed && actionOperation == operation) action.run();
+        });
+        parent.addView(button, LayoutHelper.createLinear(-1, -2));
         return button;
     }
 

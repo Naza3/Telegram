@@ -11,8 +11,11 @@ import org.telegram.ui.ActionBar.ActionBar;
 import org.telegram.ui.ActionBar.ActionBarMenuItem;
 import org.telegram.ui.ActionBar.BackDrawable;
 import org.telegram.ui.ActionBar.BaseFragment;
+import org.telegram.ui.ActionBar.Theme;
+import org.telegram.ui.ActionBar.ThemeDescription;
 
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
 import java.util.Date;
 import java.util.Locale;
 
@@ -66,6 +69,21 @@ public final class SummaryHistoryActivity extends BaseFragment {
     @Override public void onResume() { super.onResume(); if (panel != null) panel.onResume(); }
     @Override public void onPause() { if (panel != null) panel.onPause(); super.onPause(); }
     @Override public void onFragmentDestroy() { if (panel != null) panel.destroy(); super.onFragmentDestroy(); }
+
+    @Override public ArrayList<ThemeDescription> getThemeDescriptions() {
+        ArrayList<ThemeDescription> descriptions = new ArrayList<>();
+        descriptions.add(new ThemeDescription(actionBar, ThemeDescription.FLAG_BACKGROUND, null, null, null, null, Theme.key_actionBarDefault));
+        descriptions.add(new ThemeDescription(actionBar, ThemeDescription.FLAG_AB_ITEMSCOLOR, null, null, null, null, Theme.key_actionBarDefaultIcon));
+        descriptions.add(new ThemeDescription(actionBar, ThemeDescription.FLAG_AB_TITLECOLOR, null, null, null, null, Theme.key_actionBarDefaultTitle));
+        descriptions.add(new ThemeDescription(actionBar, ThemeDescription.FLAG_AB_SELECTORCOLOR, null, null, null, null, Theme.key_actionBarDefaultSelector));
+        descriptions.add(new ThemeDescription(actionBar, ThemeDescription.FLAG_AB_SUBMENUITEM, null, null, null, null, Theme.key_actionBarDefaultSubmenuItem));
+        descriptions.add(new ThemeDescription(actionBar, ThemeDescription.FLAG_AB_SUBMENUBACKGROUND, null, null, null, null, Theme.key_actionBarDefaultSubmenuBackground));
+        ThemeDescription.ThemeDescriptionDelegate refresh = () -> { if (panel != null) panel.updateColors(); };
+        for (int key : SummaryHistoryPanel.THEME_KEYS) {
+            descriptions.add(new ThemeDescription(null, 0, null, null, null, refresh, key));
+        }
+        return descriptions;
+    }
 
     static String chatLabel(SummaryHistoryStore.Record record) {
         String title = record.chatTitle.isEmpty() ? "聊天 " + record.dialogId : record.chatTitle;

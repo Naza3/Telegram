@@ -2,6 +2,7 @@
 package org.telegram.ui.Cells;
 
 import android.content.Context;
+import android.graphics.Canvas;
 import android.view.Gravity;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.widget.FrameLayout;
@@ -15,7 +16,8 @@ import org.telegram.ui.Components.LayoutHelper;
 public final class GroupMessageFoldCell extends FrameLayout {
     private final TextView label;
     private final Theme.ResourcesProvider resourcesProvider;
-    private boolean hidden;
+    private boolean hidden, colorsApplied;
+    private int textColor, backgroundColor, pressedColor;
 
     public GroupMessageFoldCell(Context context, Theme.ResourcesProvider resourcesProvider) {
         super(context);
@@ -23,10 +25,11 @@ public final class GroupMessageFoldCell extends FrameLayout {
         label = new TextView(context);
         label.setTextSize(13);
         label.setGravity(Gravity.CENTER);
-        label.setMaxLines(2);
+        setMinimumHeight(AndroidUtilities.dp(48));
+        label.setDuplicateParentStateEnabled(true);
         label.setPadding(AndroidUtilities.dp(12), AndroidUtilities.dp(7), AndroidUtilities.dp(12), AndroidUtilities.dp(7));
         label.setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_NO);
-        addView(label, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.MATCH_PARENT, Gravity.CENTER, 20, 4, 20, 4));
+        addView(label, LayoutHelper.createFrame(LayoutHelper.WRAP_CONTENT, LayoutHelper.WRAP_CONTENT, Gravity.CENTER, 20, 4, 20, 4));
     }
 
     public void bind(boolean hidden, boolean album, boolean uidMatch, Runnable reveal) {
@@ -34,9 +37,7 @@ public final class GroupMessageFoldCell extends FrameLayout {
         String text = hidden ? "" : (album ? "已折叠相册" : "已折叠消息")
                 + (uidMatch ? " · UID 规则" : " · 关键词规则") + " · 点按展开";
         label.setText(text);
-        label.setTextColor(Theme.getColor(Theme.key_chat_serviceText, resourcesProvider));
-        label.setBackground(Theme.createRoundRectDrawable(AndroidUtilities.dp(12),
-                Theme.getColor(Theme.key_chat_serviceBackground, resourcesProvider)));
+        updateColors();
         label.setVisibility(hidden ? GONE : VISIBLE);
         setContentDescription(hidden ? null : text);
         setImportantForAccessibility(hidden ? IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS : IMPORTANT_FOR_ACCESSIBILITY_YES);
@@ -48,8 +49,30 @@ public final class GroupMessageFoldCell extends FrameLayout {
     }
 
     @Override protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+        if (hidden) {
+            setMeasuredDimension(MeasureSpec.getSize(widthMeasureSpec), 0);
+            return;
+        }
+        // The service pill wraps its text; the parent keeps a full-width, 48 dp touch target.
         super.onMeasure(MeasureSpec.makeMeasureSpec(MeasureSpec.getSize(widthMeasureSpec), MeasureSpec.EXACTLY),
-                MeasureSpec.makeMeasureSpec(hidden ? 0 : AndroidUtilities.dp(52), MeasureSpec.EXACTLY));
+                MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED));
+    }
+
+    private void updateColors() {
+        int nextText = Theme.getColor(Theme.key_chat_serviceText, resourcesProvider);
+        int nextBackground = Theme.getColor(Theme.key_chat_serviceBackground, resourcesProvider);
+        int nextPressed = Theme.getColor(Theme.key_chat_serviceBackgroundSelected, resourcesProvider);
+        if (!colorsApplied || textColor != nextText || backgroundColor != nextBackground || pressedColor != nextPressed) {
+            colorsApplied = true;
+            textColor = nextText; backgroundColor = nextBackground; pressedColor = nextPressed;
+            label.setTextColor(textColor);
+            label.setBackground(Theme.createSimpleSelectorRoundRectDrawable(AndroidUtilities.dp(14), backgroundColor, pressedColor));
+        }
+    }
+
+    @Override protected void dispatchDraw(Canvas canvas) {
+        updateColors();
+        super.dispatchDraw(canvas);
     }
 
     @Override public void onInitializeAccessibilityNodeInfo(AccessibilityNodeInfo info) {

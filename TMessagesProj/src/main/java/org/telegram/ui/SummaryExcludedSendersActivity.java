@@ -2,16 +2,17 @@
 package org.telegram.ui;
 
 import android.content.Context;
+import android.graphics.Rect;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
-import android.widget.TextView;
 
 import org.telegram.messenger.AndroidUtilities;
 import org.telegram.messenger.NotificationCenter;
+import org.telegram.messenger.R;
 import org.telegram.messenger.UserConfig;
 import org.telegram.messenger.Utilities;
 import org.telegram.messenger.ai.SummaryExcludedSendersStore;
@@ -19,8 +20,14 @@ import org.telegram.ui.ActionBar.ActionBar;
 import org.telegram.ui.ActionBar.BackDrawable;
 import org.telegram.ui.ActionBar.BaseFragment;
 import org.telegram.ui.ActionBar.Theme;
+import org.telegram.ui.ActionBar.ThemeDescription;
+import org.telegram.ui.Cells.HeaderCell;
+import org.telegram.ui.Cells.TextCell;
+import org.telegram.ui.Cells.TextInfoPrivacyCell;
+import org.telegram.ui.Components.EditTextBoldCursor;
 import org.telegram.ui.Components.LayoutHelper;
 
+import java.util.ArrayList;
 import java.util.Set;
 
 /** Explicit per-group UID editing; never resolves usernames or requests contacts/member access. */
@@ -31,9 +38,10 @@ public final class SummaryExcludedSendersActivity extends BaseFragment implement
     private final long dialogId;
     private Listener listener;
     private EditText input;
-    private TextView status;
-    private TextView saveButton;
-    private TextView retryButton;
+    private TextInfoPrivacyCell status;
+    private View saveButton;
+    private TextCell retryButton;
+    private final ArrayList<ThemeDescription> themeDescriptions = new ArrayList<>();
     private boolean resumed;
     private boolean loading;
     private boolean saving;
@@ -59,43 +67,82 @@ public final class SummaryExcludedSendersActivity extends BaseFragment implement
     }
 
     @Override public View createView(Context context) {
+        themeDescriptions.clear();
         actionBar.setTitle("本群排除 UID");
         actionBar.setBackButtonDrawable(new BackDrawable(false));
         actionBar.setAllowOverlayTitle(true);
         actionBar.setActionBarMenuOnItemClick(new ActionBar.ActionBarMenuOnItemClick() {
-            @Override public void onItemClick(int id) { if (id == -1) finishFragment(); }
+            @Override public void onItemClick(int id) {
+                if (id == -1) finishFragment();
+                else if (id == 1) save();
+            }
         });
+        saveButton = actionBar.createMenu().addItemWithWidth(1, R.drawable.ic_ab_done, dp(56), "保存本群名单");
+        saveButton.setEnabled(false);
+        saveButton.setAlpha(.5f);
         ScrollView scroll = new ScrollView(context);
         scroll.setFillViewport(true);
-        scroll.setBackgroundColor(getThemedColor(Theme.key_windowBackgroundWhite));
+        scroll.setBackgroundColor(getThemedColor(Theme.key_windowBackgroundGray));
         LinearLayout content = new LinearLayout(context);
         content.setOrientation(LinearLayout.VERTICAL);
-        content.setPadding(dp(20), dp(12), dp(20), dp(24));
+        content.setPadding(0, dp(12), 0, dp(24));
+        content.setFocusableInTouchMode(true);
         scroll.addView(content, new ScrollView.LayoutParams(-1, -2));
-        text(content, "在用户主页点按复制 Telegram UID，再粘贴到这里。UID 是 Telegram 官方用户标识，改名或修改 @用户名不会改变它。", false);
-        text(content, "仅从本群的总结输入中排除这些 UID 的发言，适用于本群全部话题；不会删除聊天消息，也不会封禁用户。导出记录保持原有范围和筛选规则。", false);
-        text(content, "每行一个 UID，也可用逗号或空格分隔；最多 " + SummaryExcludedSendersStore.MAX_UIDS + " 个。留空并保存即可清空。", false);
-        input = new EditText(context);
+        HeaderCell header = new HeaderCell(context, 21, getResourceProvider());
+        header.setText("排除的 Telegram UID");
+        header.setBackgroundColor(getThemedColor(Theme.key_windowBackgroundWhite));
+        content.addView(header, LayoutHelper.createLinear(-1, -2));
+        describe(header, ThemeDescription.FLAG_BACKGROUND, Theme.key_windowBackgroundWhite);
+        themeDescriptions.add(new ThemeDescription(header, 0, new Class[]{HeaderCell.class}, new String[]{"textView"},
+                null, null, null, Theme.key_windowBackgroundWhiteBlueHeader));
+        EditTextBoldCursor editText = new EditTextBoldCursor(context) {
+            @Override protected Theme.ResourcesProvider getResourcesProvider() {
+                return SummaryExcludedSendersActivity.this.getResourceProvider();
+            }
+        };
+        input = editText;
         input.setTextSize(16);
         input.setTextColor(getThemedColor(Theme.key_windowBackgroundWhiteBlackText));
-        input.setHintTextColor(getThemedColor(Theme.key_windowBackgroundWhiteGrayText));
+        editText.setHintColor(getThemedColor(Theme.key_windowBackgroundWhiteHintText));
+        editText.setHintTextColor(getThemedColor(Theme.key_windowBackgroundWhiteHintText));
+        editText.setCursorColor(getThemedColor(Theme.key_windowBackgroundWhiteBlackText));
+        editText.setCursorSize(dp(20)); editText.setCursorWidth(1.5f);
+        input.setBackgroundColor(getThemedColor(Theme.key_windowBackgroundWhite));
         input.setHint("123456789\n987654321");
         input.setGravity(Gravity.TOP | Gravity.START);
         input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
         input.setMinHeight(dp(180));
-        input.setPadding(dp(8), dp(12), dp(8), dp(12));
+        input.setPadding(dp(21), dp(12), dp(21), dp(16));
         input.setEnabled(false);
         content.addView(input, LayoutHelper.createLinear(-1, -2));
-        status = text(content, "正在读取…", false);
-        saveButton = text(content, "保存本群名单", true);
-        saveButton.setEnabled(false);
-        saveButton.setOnClickListener(view -> save());
-        retryButton = text(content, "重新读取", true);
+        describe(input, ThemeDescription.FLAG_BACKGROUND, Theme.key_windowBackgroundWhite);
+        describe(input, ThemeDescription.FLAG_TEXTCOLOR, Theme.key_windowBackgroundWhiteBlackText);
+        describe(input, ThemeDescription.FLAG_HINTTEXTCOLOR, Theme.key_windowBackgroundWhiteHintText);
+        themeDescriptions.add(new ThemeDescription(input, 0, null, null, null,
+                () -> editText.setHintTextColor(getThemedColor(Theme.key_windowBackgroundWhiteHintText)),
+                Theme.key_windowBackgroundWhiteHintText));
+        describe(input, ThemeDescription.FLAG_CURSORCOLOR, Theme.key_windowBackgroundWhiteBlackText);
+        info(content, "每行一个 UID，也可用逗号或空格分隔，最多 " + SummaryExcludedSendersStore.MAX_UIDS + " 个。留空并保存即可清空。"
+                + "\n在用户主页点按复制 UID，再粘贴到这里。改名或修改 @用户名不会改变 UID。");
+        status = info(content, "正在读取…");
+        status.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+        retryButton = new TextCell(context, getResourceProvider());
+        retryButton.setText("重新读取", false);
+        retryButton.setTextColor(getThemedColor(Theme.key_windowBackgroundWhiteBlueText));
+        retryButton.setBackground(Theme.createSelectorWithBackgroundDrawable(getThemedColor(Theme.key_windowBackgroundWhite), getThemedColor(Theme.key_listSelector)));
+        retryButton.setFocusable(true);
         retryButton.setVisibility(View.GONE);
         retryButton.setOnClickListener(view -> load());
-        TextView cancel = text(content, "取消", true);
-        cancel.setOnClickListener(view -> finishFragment());
-        text(content, "按实际发言者 UID 精确匹配，不按昵称判断；匿名管理员或以频道身份发言时，无法据此识别背后的个人 UID。名单按账号和群在本机加密保存。", false);
+        content.addView(retryButton, LayoutHelper.createLinear(-1, -2));
+        ThemeDescription.ThemeDescriptionDelegate updateRetry = () -> {
+            retryButton.setTextColor(getThemedColor(Theme.key_windowBackgroundWhiteBlueText));
+            retryButton.setBackground(Theme.createSelectorWithBackgroundDrawable(getThemedColor(Theme.key_windowBackgroundWhite), getThemedColor(Theme.key_listSelector)));
+        };
+        for (int color : new int[]{Theme.key_windowBackgroundWhiteBlueText, Theme.key_windowBackgroundWhite, Theme.key_listSelector}) {
+            themeDescriptions.add(new ThemeDescription(retryButton, 0, null, null, null, updateRetry, color));
+        }
+        info(content, "名单用于本群全部话题的 AI 总结，不会删除消息或封禁用户。导出记录仍按原有范围和规则筛选。"
+                + "\n仅匹配实际发言者 UID；匿名管理员、频道身份背后的个人 UID 无法识别。名单按账号和群在本机加密保存。");
         fragmentView = scroll;
         return scroll;
     }
@@ -148,7 +195,7 @@ public final class SummaryExcludedSendersActivity extends BaseFragment implement
         if (!active() || !loaded || loading || saving || snapshot == null) return;
         final Set<Long> ids;
         try { ids = SummaryExcludedSendersStore.parse(input.getText().toString()); }
-        catch (RuntimeException error) { status.setText(SummaryHistoryActivity.failureMessage(error)); return; }
+        catch (RuntimeException error) { showSaveError(SummaryHistoryActivity.failureMessage(error)); return; }
         final long revision = snapshot.revision;
         final int token = ++operation;
         saving = true; setEditable(false); status.setText("正在保存…");
@@ -165,9 +212,19 @@ public final class SummaryExcludedSendersActivity extends BaseFragment implement
             } catch (RuntimeException error) {
                 AndroidUtilities.runOnUIThread(() -> {
                     if (!sameOwner() || token != operation) return;
-                    saving = false; setEditable(true); status.setText(SummaryHistoryActivity.failureMessage(error));
+                    saving = false; setEditable(true); showSaveError(SummaryHistoryActivity.failureMessage(error));
                     retryButton.setVisibility(View.VISIBLE);
                 });
+            }
+        });
+    }
+
+    private void showSaveError(String message) {
+        status.setText(message);
+        final View errorView = status;
+        errorView.post(() -> {
+            if (sameOwner() && status == errorView && errorView.getParent() != null) {
+                errorView.requestRectangleOnScreen(new Rect(0, 0, errorView.getWidth(), errorView.getHeight()), false);
             }
         });
     }
@@ -199,15 +256,24 @@ public final class SummaryExcludedSendersActivity extends BaseFragment implement
         if (input != null) input.setEnabled(enabled);
         if (saveButton != null) { saveButton.setEnabled(enabled); saveButton.setAlpha(enabled ? 1f : .5f); }
     }
-    private TextView text(LinearLayout content, String value, boolean action) {
-        TextView view = new TextView(content.getContext());
-        view.setText(value); view.setTextSize(action ? 16 : 14);
-        view.setTextColor(getThemedColor(action ? Theme.key_windowBackgroundWhiteBlueText : Theme.key_windowBackgroundWhiteGrayText));
-        view.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
-        view.setPadding(0, dp(12), 0, dp(12));
-        if (action) view.setMinHeight(dp(48));
-        content.addView(view, LayoutHelper.createLinear(-1, -2));
-        return view;
+    private TextInfoPrivacyCell info(LinearLayout content, String value) {
+        TextInfoPrivacyCell cell = new TextInfoPrivacyCell(content.getContext(), getResourceProvider());
+        cell.setText(value);
+        content.addView(cell, LayoutHelper.createLinear(-1, -2));
+        describe(cell.getTextView(), ThemeDescription.FLAG_TEXTCOLOR, Theme.key_windowBackgroundWhiteGrayText4);
+        return cell;
+    }
+    private void describe(View view, int flag, int color) {
+        themeDescriptions.add(new ThemeDescription(view, flag, null, null, null, null, color));
+    }
+    @Override public ArrayList<ThemeDescription> getThemeDescriptions() {
+        ArrayList<ThemeDescription> result = new ArrayList<>(themeDescriptions);
+        result.add(new ThemeDescription(fragmentView, ThemeDescription.FLAG_BACKGROUND, null, null, null, null, Theme.key_windowBackgroundGray));
+        result.add(new ThemeDescription(actionBar, ThemeDescription.FLAG_BACKGROUND, null, null, null, null, Theme.key_actionBarDefault));
+        result.add(new ThemeDescription(actionBar, ThemeDescription.FLAG_AB_ITEMSCOLOR, null, null, null, null, Theme.key_actionBarDefaultIcon));
+        result.add(new ThemeDescription(actionBar, ThemeDescription.FLAG_AB_TITLECOLOR, null, null, null, null, Theme.key_actionBarDefaultTitle));
+        result.add(new ThemeDescription(actionBar, ThemeDescription.FLAG_AB_SELECTORCOLOR, null, null, null, null, Theme.key_actionBarDefaultSelector));
+        return result;
     }
     private int dp(float value) { return AndroidUtilities.dp(value); }
 }

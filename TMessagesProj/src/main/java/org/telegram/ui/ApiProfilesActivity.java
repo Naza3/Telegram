@@ -2,30 +2,40 @@
 package org.telegram.ui;
 
 import android.content.Context;
+import android.graphics.Rect;
 import android.text.InputType;
 import android.text.method.PasswordTransformationMethod;
 import android.view.Gravity;
 import android.view.View;
-import android.widget.CheckBox;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
-import android.widget.RadioButton;
-import android.widget.RadioGroup;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
 import org.telegram.messenger.AndroidUtilities;
+import org.telegram.messenger.LocaleController;
 import org.telegram.messenger.NotificationCenter;
+import org.telegram.messenger.R;
 import org.telegram.messenger.UserConfig;
 import org.telegram.messenger.Utilities;
 import org.telegram.messenger.ai.AiSummaryClient;
 import org.telegram.messenger.ai.AiSummarySettings;
 import org.telegram.messenger.ai.ApiProfilesStore;
 import org.telegram.ui.ActionBar.ActionBar;
+import org.telegram.ui.ActionBar.ActionBarMenuItem;
 import org.telegram.ui.ActionBar.AlertDialog;
 import org.telegram.ui.ActionBar.BackDrawable;
 import org.telegram.ui.ActionBar.BaseFragment;
 import org.telegram.ui.ActionBar.Theme;
+import org.telegram.ui.ActionBar.ThemeDescription;
+import org.telegram.ui.Cells.HeaderCell;
+import org.telegram.ui.Cells.RadioCell;
+import org.telegram.ui.Cells.TextCheckCell;
+import org.telegram.ui.Cells.TextDetailSettingsCell;
+import org.telegram.ui.Cells.TextInfoPrivacyCell;
+import org.telegram.ui.Cells.TextSettingsCell;
 import org.telegram.ui.Components.EditTextBoldCursor;
+import org.telegram.ui.Components.FeatureUi;
 import org.telegram.ui.Components.LayoutHelper;
 
 import java.util.ArrayList;
@@ -38,13 +48,17 @@ public final class ApiProfilesActivity extends BaseFragment implements Notificat
     private final Runnable onChanged;
     private final ArrayList<AiSummarySettings.Config> profiles = new ArrayList<>();
     private final ArrayList<View> editorFields = new ArrayList<>();
+    private final ArrayList<Runnable> themeBindings = new ArrayList<>();
+    private final ArrayList<RadioCell> serviceTypes = new ArrayList<>();
     private String selectedId = "";
     private LinearLayout content;
     private AiSummarySettings.Config opening;
     private EditTextBoldCursor name, address, model, key, output, budget;
-    private RadioGroup serviceTypes;
-    private CheckBox stream;
-    private TextView status, cancelTest;
+    private AiSummarySettings.ServiceType selectedServiceType;
+    private TextCheckCell stream;
+    private TextView status;
+    private TextSettingsCell cancelTest;
+    private ActionBarMenuItem doneButton;
     private AiSummaryClient diagnostic;
     private boolean editing, busy, destroyed, invalidated;
     private int operation;
@@ -68,14 +82,20 @@ public final class ApiProfilesActivity extends BaseFragment implements Notificat
         actionBar.setAllowOverlayTitle(true);
         actionBar.setTitle("模型 API 配置");
         actionBar.setActionBarMenuOnItemClick(new ActionBar.ActionBarMenuOnItemClick() {
-            @Override public void onItemClick(int id) { if (id == -1) back(); }
+            @Override public void onItemClick(int id) {
+                if (id == -1) back();
+                else if (id == 1 && editing && sameOwner() && !busy) save();
+            }
         });
+        doneButton = actionBar.createMenu().addItemWithWidth(1, R.drawable.ic_ab_done, dp(56),
+                LocaleController.getString(R.string.Save));
+        doneButton.setVisibility(View.GONE);
         ScrollView scroll = new ScrollView(context);
         scroll.setFillViewport(true);
-        scroll.setBackgroundColor(getThemedColor(Theme.key_windowBackgroundWhite));
+        scroll.setBackgroundColor(getThemedColor(Theme.key_windowBackgroundGray));
         content = new LinearLayout(context);
         content.setOrientation(LinearLayout.VERTICAL);
-        content.setPadding(dp(20), dp(8), dp(20), dp(24));
+        content.setPadding(0, 0, 0, dp(24));
         scroll.addView(content, new ScrollView.LayoutParams(-1, -2));
         fragmentView = scroll;
         load();
@@ -91,7 +111,7 @@ public final class ApiProfilesActivity extends BaseFragment implements Notificat
         destroyed = true; operation++;
         stopDiagnostic(null);
         clearEditor(); profiles.clear();
-        if (content != null) content.removeAllViews();
+        if (content != null) resetContent();
         NotificationCenter.getGlobalInstance().removeObserver(this, NotificationCenter.activeAccountChanged);
         getNotificationCenter().removeObserver(this, NotificationCenter.appDidLogout);
         super.onFragmentDestroy();
@@ -121,8 +141,9 @@ public final class ApiProfilesActivity extends BaseFragment implements Notificat
         invalidated = true; operation++; stopDiagnostic(null); busy = false;
         clearEditor(); profiles.clear();
         if (content != null) {
-            content.removeAllViews();
-            text("账号已切换或退出，请从当前账号重新打开 API 配置。", true);
+            resetContent();
+            doneButton.setVisibility(View.GONE);
+            text("账号已切换或退出，请从当前账号重新打开 API 配置。", false);
         }
     }
 
@@ -130,7 +151,7 @@ public final class ApiProfilesActivity extends BaseFragment implements Notificat
         if (!sameOwner() || content == null) return;
         final int generation = ++operation;
         busy = true; editing = false; clearEditor(); profiles.clear();
-        content.removeAllViews(); text("正在读取模型配置…", true);
+        resetContent(); doneButton.setVisibility(View.GONE); text("正在读取模型配置…", false);
         Utilities.globalQueue.postRunnable(() -> {
             try {
                 List<AiSummarySettings.Config> values = ApiProfilesStore.list(account, ownerId);
@@ -149,23 +170,31 @@ public final class ApiProfilesActivity extends BaseFragment implements Notificat
     }
 
     private void showList(String error) {
-        content.removeAllViews();
+        resetContent();
+        doneButton.setVisibility(View.GONE);
         actionBar.setTitle("模型 API 配置");
         text("每项配置独立保存地址、模型与密钥。切换只影响下一次任务，正在运行的总结继续使用启动时的配置。", false);
-        if (error != null) { text(error, true); action("重新读取", this::load); return; }
-        if (selectedId.isEmpty()) text("尚未选择 API 配置。请明确选择一项后开始总结，不会自动切换到其他服务。", true);
+        if (error != null) { text(error, false); action("重新读取", this::load); return; }
+        if (selectedId.isEmpty()) text("尚未选择 API 配置。请明确选择一项后开始总结，不会自动切换到其他服务。", false);
         action("新增 API 配置", () -> showEditor(null));
+        spacer();
         for (AiSummarySettings.Config config : profiles) {
-            text(config.profileName + (config.profileId.equals(selectedId) ? " · 当前使用" : ""), true);
-            text((config.serviceType == AiSummarySettings.ServiceType.MNN_LOCAL ? "MNN 本机" : "OpenAI 兼容")
-                    + " · " + (config.model.isEmpty() ? "服务当前模型" : config.model), false);
-            text(config.baseUrl, false);
-            action("使用「" + config.profileName + "」", () -> select(config));
-            LinearLayout row = new LinearLayout(content.getContext());
-            rowAction(row, "编辑", () -> showEditor(config));
-            rowAction(row, "测试连接", () -> test(config));
-            rowAction(row, "删除", () -> confirmDelete(config));
-            content.addView(row, LayoutHelper.createLinear(-1, -2));
+            TextDetailSettingsCell details = new TextDetailSettingsCell(content.getContext());
+            details.setMultilineDetail(true);
+            details.setTextAndValue(config.profileName + (config.profileId.equals(selectedId) ? " · 当前使用" : ""),
+                    (config.serviceType == AiSummarySettings.ServiceType.MNN_LOCAL ? "MNN 本机" : "OpenAI 兼容")
+                            + " · " + (config.model.isEmpty() ? "服务当前模型" : config.model) + "\n" + config.baseUrl, true);
+            bindTheme(() -> {
+                details.setBackgroundColor(getThemedColor(Theme.key_windowBackgroundWhite));
+                details.getTextView().setTextColor(getThemedColor(Theme.key_windowBackgroundWhiteBlackText));
+                details.getValueTextView().setTextColor(getThemedColor(Theme.key_windowBackgroundWhiteGrayText2));
+            });
+            content.addView(details, LayoutHelper.createLinear(-1, -2));
+            action("使用此配置", () -> select(config));
+            action("编辑配置", () -> showEditor(config));
+            action("测试连接", () -> test(config));
+            action("删除配置", () -> confirmDelete(config), Theme.key_text_RedRegular, false);
+            spacer();
         }
         status = text(profiles.size() + " / 20 项 · 仅当前账号本机保存", false);
         cancelTest = action("取消连接测试", () -> stopDiagnostic("测试已停止。"));
@@ -179,53 +208,75 @@ public final class ApiProfilesActivity extends BaseFragment implements Notificat
         clearEditor(); editing = true;
         opening = profile == null ? new AiSummarySettings.Config(AiSummarySettings.DEFAULT_BASE_URL,
                 AiSummarySettings.DEFAULT_MODEL, "") : profile;
-        content.removeAllViews();
+        resetContent();
         actionBar.setTitle(profile == null ? "新增 API 配置" : "编辑 API 配置");
+        doneButton.setVisibility(View.VISIBLE);
+        text("基本信息", true);
         name = edit("配置名称（最多 80 字符）", profile == null ? "" : profile.profileName, InputType.TYPE_CLASS_TEXT);
-        serviceTypes = new RadioGroup(content.getContext());
+        spacer();
+        text("连接设置", true);
+        selectedServiceType = opening.serviceType;
         for (AiSummarySettings.ServiceType type : AiSummarySettings.ServiceType.values()) {
-            RadioButton choice = new RadioButton(content.getContext());
-            choice.setText(type == AiSummarySettings.ServiceType.MNN_LOCAL ? "MNN Chat 本机服务" : "通用 OpenAI 兼容服务");
-            choice.setTextColor(getThemedColor(Theme.key_windowBackgroundWhiteBlackText));
-            choice.setId(View.generateViewId()); choice.setTag(type); serviceTypes.addView(choice); editorFields.add(choice);
-            if (type == opening.serviceType) serviceTypes.check(choice.getId());
+            RadioCell choice = new RadioCell(content.getContext(), getResourceProvider());
+            choice.setText(type == AiSummarySettings.ServiceType.MNN_LOCAL ? "MNN Chat 本机服务" : "通用 OpenAI 兼容服务",
+                    type == opening.serviceType, true);
+            choice.setTag(type); serviceTypes.add(choice); editorFields.add(choice);
+            bindTheme(() -> {
+                choice.setTextColor(getThemedColor(Theme.key_windowBackgroundWhiteBlackText));
+                choice.setBackground(Theme.createSelectorWithBackgroundDrawable(
+                        getThemedColor(Theme.key_windowBackgroundWhite), getThemedColor(Theme.key_listSelector)));
+            });
+            choice.setOnClickListener(view -> {
+                if (!sameOwner() || busy) return;
+                selectedServiceType = type;
+                for (RadioCell cell : serviceTypes) cell.setChecked(cell == choice, true);
+            });
+            content.addView(choice, LayoutHelper.createLinear(-1, -2));
         }
-        content.addView(serviceTypes, LayoutHelper.createLinear(-1, -2));
-        text("服务地址", true);
+        fieldLabel("服务地址");
         address = edit("http://127.0.0.1:8080/v1", opening.baseUrl, InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-        text("模型名称（可留空）", true);
+        fieldLabel("模型名称（可留空）");
         model = edit("留空使用服务当前模型", opening.model, InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
         text("MNN 需先加载模型并开启 API 服务；填写模型名不会切换 MNN 已加载的模型。", false);
-        text("API Key", true);
+        fieldLabel("API Key");
         key = edit("服务未开启鉴权时可留空", opening.apiKey, InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
         key.setTransformationMethod(PasswordTransformationMethod.getInstance()); key.setSaveEnabled(false);
         text("密钥随本项配置独立加密保存。新建配置不会复制其他配置的密钥。", false);
-        text("最大输出 tokens（64–8192；MNN 最高 2048）", true);
+        text("生成设置", true);
+        fieldLabel("最大输出 tokens");
         output = edit("512", Integer.toString(opening.maxOutputTokens), InputType.TYPE_CLASS_NUMBER);
-        text("上下文字符预算（2048–" + AiSummarySettings.MAX_INPUT_CHARACTER_BUDGET + "）", true);
+        text("可填写 64–8192；MNN 本机服务最高 2048。", false);
+        fieldLabel("上下文字符预算");
         budget = edit("6000", Integer.toString(opening.inputCharacterBudget), InputType.TYPE_CLASS_NUMBER);
-        text("字符预算不是模型 token 数；还需为核心要求、输入说明与输出预留空间。", false);
-        stream = new CheckBox(content.getContext());
-        stream.setText("流式显示（服务支持时生效）"); stream.setChecked(opening.stream);
-        stream.setTextColor(getThemedColor(Theme.key_windowBackgroundWhiteBlackText)); editorFields.add(stream);
+        text("可填写 2048–" + AiSummarySettings.MAX_INPUT_CHARACTER_BUDGET
+                + "。字符预算不是模型 token 数；还需为核心要求、输入说明与输出预留空间。", false);
+        stream = new TextCheckCell(content.getContext(), getResourceProvider());
+        stream.setTextAndCheck("流式显示", opening.stream, false);
+        final TextCheckCell streamCell = stream;
+        bindTheme(() -> {
+            streamCell.setBackground(Theme.createSelectorWithBackgroundDrawable(
+                    getThemedColor(Theme.key_windowBackgroundWhite), getThemedColor(Theme.key_listSelector)));
+            streamCell.setColors(Theme.key_windowBackgroundWhiteBlackText, Theme.key_switchTrack,
+                    Theme.key_switchTrackChecked, Theme.key_windowBackgroundWhite, Theme.key_windowBackgroundWhite);
+        });
+        stream.setOnClickListener(view -> { if (sameOwner() && !busy) streamCell.setChecked(!streamCell.isChecked()); });
+        editorFields.add(stream);
         content.addView(stream, LayoutHelper.createLinear(-1, -2));
-        status = text("连接测试只发送固定短消息，不读取群消息，也不会自动保存。", false);
-        action("测试当前填写的配置", () -> { AiSummarySettings.Config config = snapshot(); if (config != null) test(config); });
+        text("服务支持时，生成的内容会逐步显示。", false);
+        action("测试连接", () -> { AiSummarySettings.Config config = snapshot(); if (config != null) test(config); });
         cancelTest = action("取消连接测试", () -> stopDiagnostic("测试已停止；未保存设置。"));
         cancelTest.setVisibility(View.GONE); cancelTest.setOnClickListener(view -> stopDiagnostic("测试已停止；未保存设置。"));
-        action("保存配置", this::save);
-        action("放弃修改并返回列表", this::back);
+        status = text("连接测试只发送固定短消息，不读取群消息，也不会自动保存。填写完成后，点击右上角保存。", false);
     }
 
     private AiSummarySettings.Config snapshot() {
         int tokens, characters;
         try { tokens = Integer.parseInt(output.getText().toString().trim()); characters = Integer.parseInt(budget.getText().toString().trim()); }
-        catch (NumberFormatException ignored) { status.setText("输出上限与字符预算需要填写有效整数。"); return null; }
-        View selected = serviceTypes.findViewById(serviceTypes.getCheckedRadioButtonId());
+        catch (NumberFormatException ignored) { showStatus("输出上限与字符预算需要填写有效整数。"); return null; }
         AiSummarySettings.Config config = opening.withValues(address.getText().toString(), model.getText().toString(),
-                key.getText().toString(), tokens, stream.isChecked(), characters, (AiSummarySettings.ServiceType) selected.getTag());
+                key.getText().toString(), tokens, stream.isChecked(), characters, selectedServiceType);
         String error = AiSummarySettings.validate(config);
-        if (error != null) { status.setText(error); return null; }
+        if (error != null) { showStatus(error); return null; }
         return config;
     }
 
@@ -249,12 +300,14 @@ public final class ApiProfilesActivity extends BaseFragment implements Notificat
     }
 
     private void confirmDelete(AiSummarySettings.Config config) {
-        showDialog(new AlertDialog.Builder(getParentActivity(), getResourceProvider()).setTitle("删除 API 配置")
+        AlertDialog dialog = new AlertDialog.Builder(getParentActivity(), getResourceProvider()).setTitle("删除 API 配置")
                 .setMessage("删除「" + config.profileName + "」及其密钥？"
                         + (config.profileId.equals(selectedId) ? "删除后需明确选择另一项，不会自动回退。" : ""))
-                .setPositiveButton("删除", (dialog, which) -> mutate(() -> ApiProfilesStore.delete(account, ownerId,
+                .setPositiveButton("删除", (ignored, which) -> mutate(() -> ApiProfilesStore.delete(account, ownerId,
                         config.profileId, config.profileRevision), false, "删除失败，配置可能已变化，请刷新后重试。"))
-                .setNegativeButton("取消", null).create());
+                .setNegativeButton("取消", null).create();
+        showDialog(dialog);
+        dialog.redPositive();
     }
 
     private interface Mutation { void run(); }
@@ -277,7 +330,7 @@ public final class ApiProfilesActivity extends BaseFragment implements Notificat
                         ? failure.getMessage() : error;
                 AndroidUtilities.runOnUIThread(() -> {
                     if (!active(generation)) return;
-                    busy = false; setFieldsEnabled(true); status.setText(notice);
+                    busy = false; setFieldsEnabled(true); showStatus(notice);
                 });
             }
         });
@@ -320,32 +373,131 @@ public final class ApiProfilesActivity extends BaseFragment implements Notificat
     private void clearEditor() {
         if (key != null) key.setText("");
         opening = null; name = address = model = key = output = budget = null;
-        serviceTypes = null; stream = null; editorFields.clear();
+        serviceTypes.clear(); selectedServiceType = null; stream = null; editorFields.clear();
     }
-    private void setFieldsEnabled(boolean enabled) { for (View view : editorFields) view.setEnabled(enabled); }
+
+    private void showStatus(String notice) {
+        TextView view = status;
+        if (view == null) return;
+        view.setText(notice);
+        // Saving is available in the action bar, so validation feedback may be below the viewport.
+        view.post(() -> {
+            if (view.isAttachedToWindow()) view.requestRectangleOnScreen(new Rect(0, 0, view.getWidth(), view.getHeight()), true);
+        });
+    }
+
+    private void setFieldsEnabled(boolean enabled) {
+        for (View view : editorFields) {
+            view.setEnabled(enabled);
+            view.setAlpha(enabled ? 1f : 0.5f);
+        }
+        if (doneButton != null) { doneButton.setEnabled(enabled); doneButton.setAlpha(enabled ? 1f : 0.5f); }
+    }
+
+    private void resetContent() {
+        content.removeAllViews();
+        themeBindings.clear();
+    }
+
+    private void bindTheme(Runnable update) {
+        themeBindings.add(update);
+        update.run();
+    }
+
+    private void spacer() {
+        content.addView(new View(content.getContext()), LayoutHelper.createLinear(-1, 12));
+    }
+
     private TextView text(String value, boolean bold) {
-        TextView view = new TextView(content.getContext()); view.setText(value); view.setTextSize(bold ? 16 : 14);
-        view.setTextColor(getThemedColor(bold ? Theme.key_windowBackgroundWhiteBlackText : Theme.key_windowBackgroundWhiteGrayText));
-        if (bold) view.setTypeface(AndroidUtilities.bold());
-        content.addView(view, LayoutHelper.createLinear(-1, -2, 0, 10, 0, 4)); return view;
+        if (bold) return header(value, Theme.key_windowBackgroundWhiteBlueHeader);
+        TextInfoPrivacyCell cell = new TextInfoPrivacyCell(content.getContext(), 24, getResourceProvider());
+        cell.setText(value);
+        bindTheme(() -> {
+            cell.setBackgroundColor(getThemedColor(Theme.key_windowBackgroundGray));
+            cell.getTextView().setTextColor(getThemedColor(Theme.key_windowBackgroundWhiteGrayText4));
+            cell.getTextView().setLinkTextColor(getThemedColor(Theme.key_windowBackgroundWhiteLinkText));
+        });
+        content.addView(cell, LayoutHelper.createLinear(-1, -2));
+        return cell.getTextView();
     }
-    private TextView action(String label, Runnable run) {
-        TextView view = text(label, true); view.setTextColor(getThemedColor(Theme.key_windowBackgroundWhiteBlueText));
-        view.setMinHeight(dp(46)); view.setGravity(Gravity.CENTER_VERTICAL); view.setFocusable(true);
-        view.setOnClickListener(ignored -> { if (sameOwner() && !busy) run.run(); }); return view;
+
+    private void fieldLabel(String value) {
+        header(value, Theme.key_windowBackgroundWhiteBlackText);
     }
-    private void rowAction(LinearLayout row, String label, Runnable run) {
-        TextView view = new TextView(content.getContext()); view.setText(label); view.setTextSize(14);
-        view.setTextColor(getThemedColor(Theme.key_windowBackgroundWhiteBlueText)); view.setMinHeight(dp(44)); view.setGravity(Gravity.CENTER);
-        view.setOnClickListener(ignored -> { if (sameOwner() && !busy) run.run(); });
-        row.addView(view, new LinearLayout.LayoutParams(0, -2, 1));
+
+    private TextView header(String value, int colorKey) {
+        HeaderCell cell = new HeaderCell(content.getContext(), 21, getResourceProvider());
+        cell.setText(value);
+        bindTheme(() -> {
+            cell.setBackgroundColor(getThemedColor(Theme.key_windowBackgroundWhite));
+            cell.getTextView().setTextColor(getThemedColor(colorKey));
+        });
+        content.addView(cell, LayoutHelper.createLinear(-1, -2));
+        return cell.getTextView();
     }
+
+    private TextSettingsCell action(String label, Runnable run) {
+        return action(label, run, Theme.key_windowBackgroundWhiteBlueText, true);
+    }
+
+    private TextSettingsCell action(String label, Runnable run, int colorKey, boolean divider) {
+        TextSettingsCell cell = new TextSettingsCell(content.getContext(), 21, getResourceProvider());
+        cell.setText(label, divider);
+        cell.setFocusable(true);
+        bindTheme(() -> {
+            cell.setTextColor(getThemedColor(colorKey));
+            cell.setBackground(Theme.createSelectorWithBackgroundDrawable(
+                    getThemedColor(Theme.key_windowBackgroundWhite), getThemedColor(Theme.key_listSelector)));
+        });
+        cell.setOnClickListener(ignored -> { if (sameOwner() && !busy) run.run(); });
+        content.addView(cell, LayoutHelper.createLinear(-1, -2));
+        return cell;
+    }
+
     private EditTextBoldCursor edit(String hint, String value, int inputType) {
-        EditTextBoldCursor view = new EditTextBoldCursor(content.getContext()); view.setTextSize(16); view.setInputType(inputType);
+        EditTextBoldCursor view = new EditTextBoldCursor(content.getContext()); view.setInputType(inputType);
         view.setSingleLine(true); view.setHint(hint); view.setText(value); view.setSaveEnabled(false);
-        view.setTextColor(getThemedColor(Theme.key_windowBackgroundWhiteBlackText));
-        view.setHintTextColor(getThemedColor(Theme.key_windowBackgroundWhiteHintText));
-        content.addView(view, LayoutHelper.createLinear(-1, dp(52), 0, 4, 0, 6)); editorFields.add(view); return view;
+        view.setGravity(Gravity.START | Gravity.CENTER_VERTICAL);
+        FrameLayout field = new FrameLayout(content.getContext());
+        field.addView(view, LayoutHelper.createFrame(-1, -2, Gravity.TOP, 21, 0, 21, 8));
+        bindTheme(() -> {
+            field.setBackgroundColor(getThemedColor(Theme.key_windowBackgroundWhite));
+            FeatureUi.styleInput(view, getResourceProvider(), false);
+            view.setMinHeight(dp(52));
+        });
+        content.addView(field, LayoutHelper.createLinear(-1, -2));
+        editorFields.add(view);
+        return view;
     }
+
+    private void refreshTheme() {
+        if (fragmentView != null) fragmentView.setBackgroundColor(getThemedColor(Theme.key_windowBackgroundGray));
+        for (Runnable update : themeBindings) update.run();
+        if (content != null) content.invalidate();
+    }
+
+    @Override public ArrayList<ThemeDescription> getThemeDescriptions() {
+        ArrayList<ThemeDescription> descriptions = new ArrayList<>();
+        descriptions.add(new ThemeDescription(actionBar, ThemeDescription.FLAG_BACKGROUND, null, null, null, null, Theme.key_actionBarDefault));
+        descriptions.add(new ThemeDescription(actionBar, ThemeDescription.FLAG_AB_ITEMSCOLOR, null, null, null, null, Theme.key_actionBarDefaultIcon));
+        descriptions.add(new ThemeDescription(actionBar, ThemeDescription.FLAG_AB_TITLECOLOR, null, null, null, null, Theme.key_actionBarDefaultTitle));
+        descriptions.add(new ThemeDescription(actionBar, ThemeDescription.FLAG_AB_SELECTORCOLOR, null, null, null, null, Theme.key_actionBarDefaultSelector));
+        ThemeDescription.ThemeDescriptionDelegate delegate = this::refreshTheme;
+        for (int color : new int[] { Theme.key_windowBackgroundGray, Theme.key_windowBackgroundWhite,
+                Theme.key_windowBackgroundWhiteBlackText, Theme.key_windowBackgroundWhiteGrayText2,
+                Theme.key_windowBackgroundWhiteGrayText4, Theme.key_windowBackgroundWhiteBlueHeader,
+                Theme.key_windowBackgroundWhiteBlueText, Theme.key_windowBackgroundWhiteLinkText,
+                Theme.key_windowBackgroundWhiteHintText, Theme.key_windowBackgroundWhiteInputField,
+                Theme.key_windowBackgroundWhiteInputFieldActivated, Theme.key_text_RedRegular,
+                Theme.key_listSelector, Theme.key_switchTrack, Theme.key_switchTrackChecked, Theme.key_divider }) {
+            descriptions.add(new ThemeDescription(null, 0, null, null, null, delegate, color));
+        }
+        descriptions.add(new ThemeDescription(content, ThemeDescription.FLAG_CHECKBOX, new Class[] { RadioCell.class },
+                new String[] { "radioButton" }, null, null, null, Theme.key_radioBackground));
+        descriptions.add(new ThemeDescription(content, ThemeDescription.FLAG_CHECKBOXCHECK, new Class[] { RadioCell.class },
+                new String[] { "radioButton" }, null, null, null, Theme.key_radioBackgroundChecked));
+        return descriptions;
+    }
+
     private static int dp(float value) { return AndroidUtilities.dp(value); }
 }

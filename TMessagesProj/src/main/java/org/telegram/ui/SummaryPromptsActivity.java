@@ -2,6 +2,7 @@
 package org.telegram.ui;
 
 import android.content.Context;
+import android.graphics.Rect;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
@@ -21,6 +22,11 @@ import org.telegram.ui.ActionBar.AlertDialog;
 import org.telegram.ui.ActionBar.BackDrawable;
 import org.telegram.ui.ActionBar.BaseFragment;
 import org.telegram.ui.ActionBar.Theme;
+import org.telegram.ui.ActionBar.ThemeDescription;
+import org.telegram.ui.Cells.HeaderCell;
+import org.telegram.ui.Cells.TextCell;
+import org.telegram.ui.Cells.TextInfoPrivacyCell;
+import org.telegram.ui.Components.EditTextBoldCursor;
 import org.telegram.ui.Components.LayoutHelper;
 
 import java.util.ArrayList;
@@ -37,7 +43,10 @@ public final class SummaryPromptsActivity extends BaseFragment implements Notifi
     private LinearLayout content;
     private EditText nameInput;
     private EditText textInput;
-    private TextView editorError;
+    private TextInfoPrivacyCell editorError;
+    private View addButton;
+    private View saveButton;
+    private final ArrayList<ThemeDescription> themeDescriptions = new ArrayList<>();
     private SavedSummaryPrompts.Entry editingEntry;
     private boolean editing;
     private boolean resumed;
@@ -75,15 +84,20 @@ public final class SummaryPromptsActivity extends BaseFragment implements Notifi
             @Override public void onItemClick(int id) {
                 if (id == -1) { if (editing && active()) leaveEditor(); else finishFragment(); }
                 else if (id == 1 && active() && !loading && !editing) showEditor(null);
+                else if (id == 2) save();
             }
         });
-        actionBar.createMenu().addItem(1, R.drawable.msg_add).setContentDescription("新增我的要求");
+        addButton = actionBar.createMenu().addItem(1, R.drawable.msg_add);
+        addButton.setContentDescription("新增我的要求");
+        saveButton = actionBar.createMenu().addItemWithWidth(2, R.drawable.ic_ab_done, dp(56), "保存要求");
+        saveButton.setVisibility(View.GONE);
         ScrollView scroll = new ScrollView(context);
         scroll.setFillViewport(true);
-        scroll.setBackgroundColor(getThemedColor(Theme.key_windowBackgroundWhite));
+        scroll.setBackgroundColor(getThemedColor(Theme.key_windowBackgroundGray));
         content = new LinearLayout(context);
         content.setOrientation(LinearLayout.VERTICAL);
-        content.setPadding(dp(20), dp(8), dp(20), dp(24));
+        content.setPadding(0, dp(12), 0, dp(24));
+        content.setFocusableInTouchMode(true);
         scroll.addView(content, new ScrollView.LayoutParams(-1, -2));
         fragmentView = scroll;
         showList();
@@ -162,28 +176,37 @@ public final class SummaryPromptsActivity extends BaseFragment implements Notifi
     private void showList() {
         if (content == null || destroyed) return;
         content.removeAllViews();
+        themeDescriptions.clear();
         actionBar.setTitle("我的要求");
-        text("只保存你自己编写的要求。点击使用后填入本次任务，不会修改群默认要求或已经生成的总结。", false);
-        if (loading) { text("正在读取…", true); return; }
+        addButton.setVisibility(invalidated ? View.GONE : View.VISIBLE);
+        saveButton.setVisibility(View.GONE);
+        if (loading) { info("正在读取…"); return; }
         if (error != null) {
-            text(error, true);
+            info(error);
             if (!invalidated) action("重试", this::load);
             return;
         }
-        action("新增要求", () -> showEditor(null));
-        if (entries.isEmpty()) text("还没有保存的要求。名称和内容均由你填写。", false);
+        if (entries.isEmpty()) {
+            header("保存常用要求");
+            info("还没有保存的要求。点右上角 ＋，为自己编写的要求添加名称，方便下次使用。");
+        }
         for (SavedSummaryPrompts.Entry entry : entries) {
-            text(entry.name, true);
-            TextView preview = text(entry.text, false);
+            TextView name = body(entry.name, true);
+            name.setPadding(dp(21), dp(16), dp(21), dp(8));
+            TextView preview = body(entry.text, false);
+            preview.setPadding(dp(21), 0, dp(21), dp(12));
             preview.setMaxLines(3);
             preview.setEllipsize(android.text.TextUtils.TruncateAt.END);
-            if (listener != null) action("使用「" + entry.name + "」", () -> select(entry));
+            if (listener != null) action("使用这条要求", () -> select(entry));
             LinearLayout actions = new LinearLayout(content.getContext());
-            addRowAction(actions, "编辑", () -> showEditor(entry));
-            addRowAction(actions, "删除", () -> confirmDelete(entry));
+            addRowAction(actions, "编辑", false, () -> showEditor(entry));
+            addRowAction(actions, "删除", true, () -> confirmDelete(entry));
             content.addView(actions, LayoutHelper.createLinear(-1, -2));
+            View gap = new View(content.getContext());
+            content.addView(gap, LayoutHelper.createLinear(-1, 12));
         }
-        text(entries.size() + " / " + SavedSummaryPrompts.MAX_PROMPTS + " 条 · 仅当前账号可见，本机加密保存", false);
+        info(entries.size() + " / " + SavedSummaryPrompts.MAX_PROMPTS + " 条 · 仅当前账号可见，本机加密保存。"
+                + "\n使用后填入本次任务，不会修改群默认要求或已经生成的总结。");
     }
 
     private void select(SavedSummaryPrompts.Entry entry) {
@@ -219,29 +242,48 @@ public final class SummaryPromptsActivity extends BaseFragment implements Notifi
     private void showEditor(SavedSummaryPrompts.Entry entry) {
         if (!active() || loading) return;
         editing = true; editingEntry = entry; content.removeAllViews();
+        themeDescriptions.clear();
         actionBar.setTitle(entry == null ? "新增要求" : "编辑要求");
-        text("名称", true);
+        addButton.setVisibility(View.GONE);
+        saveButton.setVisibility(View.VISIBLE);
+        saveButton.setEnabled(true);
+        saveButton.setAlpha(1f);
+        header("名称");
         nameInput = input(entry == null ? "" : entry.name, "给这条要求起个名字", false);
-        text("核心总结要求", true);
+        info("最多 " + SavedSummaryPrompts.MAX_NAME_CODE_POINTS + " 个字符。");
+        header("核心总结要求");
         textInput = input(entry == null ? initialText : entry.text, "手动填写希望模型如何总结", true);
-        text("最多 " + SavedSummaryPrompts.MAX_NAME_CODE_POINTS + " 个名称字符、" + SavedSummaryPrompts.MAX_TEXT_CODE_POINTS
-                + " 个要求字符。保存不会自动应用到任何群。", false);
-        editorError = text("", false);
-        action("保存", this::save);
-        action("取消", this::leaveEditor);
+        info("最多 " + SavedSummaryPrompts.MAX_TEXT_CODE_POINTS + " 个字符。保存后可手动选择使用，不会自动应用到任何群。");
+        editorError = info("");
+        editorError.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
     }
 
     private EditText input(String value, String hint, boolean multiline) {
-        EditText input = new EditText(content.getContext());
+        EditTextBoldCursor input = new EditTextBoldCursor(content.getContext()) {
+            @Override protected Theme.ResourcesProvider getResourcesProvider() {
+                return SummaryPromptsActivity.this.getResourceProvider();
+            }
+        };
         input.setTextSize(16); input.setTextColor(getThemedColor(Theme.key_windowBackgroundWhiteBlackText));
-        input.setHintTextColor(getThemedColor(Theme.key_windowBackgroundWhiteGrayText));
+        input.setHintColor(getThemedColor(Theme.key_windowBackgroundWhiteHintText));
+        input.setHintTextColor(getThemedColor(Theme.key_windowBackgroundWhiteHintText));
+        input.setCursorColor(getThemedColor(Theme.key_windowBackgroundWhiteBlackText));
+        input.setCursorSize(dp(20)); input.setCursorWidth(1.5f);
+        input.setBackgroundColor(getThemedColor(Theme.key_windowBackgroundWhite));
         input.setHint(hint); input.setText(value); input.setGravity(Gravity.TOP | Gravity.START);
         input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
                 | (multiline ? InputType.TYPE_TEXT_FLAG_MULTI_LINE : 0));
         input.setSingleLine(!multiline);
         input.setMinHeight(dp(multiline ? 200 : 48));
-        input.setPadding(dp(8), dp(12), dp(8), dp(12));
+        input.setPadding(dp(21), dp(12), dp(21), dp(16));
         content.addView(input, LayoutHelper.createLinear(-1, -2));
+        describe(input, ThemeDescription.FLAG_BACKGROUND, Theme.key_windowBackgroundWhite);
+        describe(input, ThemeDescription.FLAG_TEXTCOLOR, Theme.key_windowBackgroundWhiteBlackText);
+        describe(input, ThemeDescription.FLAG_HINTTEXTCOLOR, Theme.key_windowBackgroundWhiteHintText);
+        themeDescriptions.add(new ThemeDescription(input, 0, null, null, null,
+                () -> input.setHintTextColor(getThemedColor(Theme.key_windowBackgroundWhiteHintText)),
+                Theme.key_windowBackgroundWhiteHintText));
+        describe(input, ThemeDescription.FLAG_CURSORCOLOR, Theme.key_windowBackgroundWhiteBlackText);
         return input;
     }
 
@@ -250,10 +292,11 @@ public final class SummaryPromptsActivity extends BaseFragment implements Notifi
         String name = nameInput.getText().toString();
         String body = textInput.getText().toString();
         try { SavedSummaryPrompts.validate(name, body); }
-        catch (RuntimeException failure) { editorError.setText(SummaryHistoryActivity.failureMessage(failure)); return; }
+        catch (RuntimeException failure) { showSaveError(SummaryHistoryActivity.failureMessage(failure)); return; }
         final SavedSummaryPrompts.Entry existing = editingEntry;
         final int request = ++operation;
         loading = true; saving = true; editorError.setText("正在保存…");
+        saveButton.setEnabled(false); saveButton.setAlpha(.5f);
         Utilities.globalQueue.postRunnable(() -> {
             try {
                 if (existing == null) SavedSummaryPrompts.create(account, ownerId, name, body);
@@ -268,8 +311,19 @@ public final class SummaryPromptsActivity extends BaseFragment implements Notifi
                 AndroidUtilities.runOnUIThread(() -> {
                     if (request != operation || !sameOwner()) return;
                     loading = false; saving = false;
-                    editorError.setText(SummaryHistoryActivity.failureMessage(failure));
+                    saveButton.setEnabled(true); saveButton.setAlpha(1f);
+                    showSaveError(SummaryHistoryActivity.failureMessage(failure));
                 });
+            }
+        });
+    }
+
+    private void showSaveError(String message) {
+        editorError.setText(message);
+        final View errorView = editorError;
+        errorView.post(() -> {
+            if (sameOwner() && editing && editorError == errorView && errorView.getParent() != null) {
+                errorView.requestRectangleOnScreen(new Rect(0, 0, errorView.getWidth(), errorView.getHeight()), false);
             }
         });
     }
@@ -310,27 +364,68 @@ public final class SummaryPromptsActivity extends BaseFragment implements Notifi
                 }).create());
     }
 
-    private TextView text(String value, boolean bold) {
+    private TextView body(String value, boolean bold) {
         TextView view = new TextView(content.getContext());
         view.setText(value); view.setTextSize(bold ? 16 : 14); view.setLineSpacing(dp(3), 1f);
-        view.setTextColor(getThemedColor(bold ? Theme.key_windowBackgroundWhiteBlackText : Theme.key_windowBackgroundWhiteGrayText));
+        int color = bold ? Theme.key_windowBackgroundWhiteBlackText : Theme.key_windowBackgroundWhiteGrayText;
+        view.setTextColor(getThemedColor(color));
+        view.setBackgroundColor(getThemedColor(Theme.key_windowBackgroundWhite));
         if (bold) view.setTypeface(AndroidUtilities.bold());
-        content.addView(view, LayoutHelper.createLinear(-1, -2, 0, 10, 0, 6));
+        content.addView(view, LayoutHelper.createLinear(-1, -2));
+        describe(view, ThemeDescription.FLAG_TEXTCOLOR, color);
+        describe(view, ThemeDescription.FLAG_BACKGROUND, Theme.key_windowBackgroundWhite);
         return view;
     }
+    private void header(String value) {
+        HeaderCell cell = new HeaderCell(content.getContext(), 21, getResourceProvider());
+        cell.setText(value);
+        cell.setBackgroundColor(getThemedColor(Theme.key_windowBackgroundWhite));
+        content.addView(cell, LayoutHelper.createLinear(-1, -2));
+        describe(cell, ThemeDescription.FLAG_BACKGROUND, Theme.key_windowBackgroundWhite);
+        themeDescriptions.add(new ThemeDescription(cell, 0, new Class[]{HeaderCell.class}, new String[]{"textView"},
+                null, null, null, Theme.key_windowBackgroundWhiteBlueHeader));
+    }
+    private TextInfoPrivacyCell info(String value) {
+        TextInfoPrivacyCell cell = new TextInfoPrivacyCell(content.getContext(), getResourceProvider());
+        cell.setText(value);
+        content.addView(cell, LayoutHelper.createLinear(-1, -2));
+        describe(cell.getTextView(), ThemeDescription.FLAG_TEXTCOLOR, Theme.key_windowBackgroundWhiteGrayText4);
+        return cell;
+    }
     private void action(String label, Runnable run) {
-        TextView view = text(label, true);
-        configureAction(view, run);
+        TextCell cell = actionCell(label, false, run);
+        content.addView(cell, LayoutHelper.createLinear(-1, -2));
     }
-    private void addRowAction(LinearLayout row, String label, Runnable run) {
-        TextView view = new TextView(row.getContext()); view.setText(label); view.setTextSize(15);
-        configureAction(view, run); row.addView(view, LayoutHelper.createLinear(0, -2, 1f));
+    private void addRowAction(LinearLayout row, String label, boolean destructive, Runnable run) {
+        row.addView(actionCell(label, destructive, run), LayoutHelper.createLinear(0, -2, 1f));
     }
-    private void configureAction(TextView view, Runnable run) {
-        view.setTextColor(getThemedColor(Theme.key_windowBackgroundWhiteBlueText));
-        view.setGravity(Gravity.CENTER); view.setMinHeight(dp(48)); view.setPadding(dp(8), dp(10), dp(8), dp(10));
-        view.setBackground(Theme.createSimpleSelectorRoundRectDrawable(dp(6), getThemedColor(Theme.key_windowBackgroundGray), getThemedColor(Theme.key_listSelector)));
-        view.setFocusable(true); view.setOnClickListener(v -> { if (active()) run.run(); });
+    private TextCell actionCell(String label, boolean destructive, Runnable run) {
+        TextCell cell = new TextCell(content.getContext(), getResourceProvider());
+        int color = destructive ? Theme.key_text_RedRegular : Theme.key_windowBackgroundWhiteBlueText;
+        cell.setText(label, false);
+        cell.setTextColor(getThemedColor(color));
+        cell.setBackground(Theme.createSelectorWithBackgroundDrawable(getThemedColor(Theme.key_windowBackgroundWhite), getThemedColor(Theme.key_listSelector)));
+        cell.setFocusable(true); cell.setOnClickListener(v -> { if (active()) run.run(); });
+        ThemeDescription.ThemeDescriptionDelegate updateColors = () -> {
+            cell.setTextColor(getThemedColor(color));
+            cell.setBackground(Theme.createSelectorWithBackgroundDrawable(getThemedColor(Theme.key_windowBackgroundWhite), getThemedColor(Theme.key_listSelector)));
+        };
+        for (int key : new int[]{color, Theme.key_windowBackgroundWhite, Theme.key_listSelector}) {
+            themeDescriptions.add(new ThemeDescription(cell, 0, null, null, null, updateColors, key));
+        }
+        return cell;
+    }
+    private void describe(View view, int flag, int color) {
+        themeDescriptions.add(new ThemeDescription(view, flag, null, null, null, null, color));
+    }
+    @Override public ArrayList<ThemeDescription> getThemeDescriptions() {
+        ArrayList<ThemeDescription> result = new ArrayList<>(themeDescriptions);
+        result.add(new ThemeDescription(fragmentView, ThemeDescription.FLAG_BACKGROUND, null, null, null, null, Theme.key_windowBackgroundGray));
+        result.add(new ThemeDescription(actionBar, ThemeDescription.FLAG_BACKGROUND, null, null, null, null, Theme.key_actionBarDefault));
+        result.add(new ThemeDescription(actionBar, ThemeDescription.FLAG_AB_ITEMSCOLOR, null, null, null, null, Theme.key_actionBarDefaultIcon));
+        result.add(new ThemeDescription(actionBar, ThemeDescription.FLAG_AB_TITLECOLOR, null, null, null, null, Theme.key_actionBarDefaultTitle));
+        result.add(new ThemeDescription(actionBar, ThemeDescription.FLAG_AB_SELECTORCOLOR, null, null, null, null, Theme.key_actionBarDefaultSelector));
+        return result;
     }
     private static int dp(float value) { return AndroidUtilities.dp(value); }
 }

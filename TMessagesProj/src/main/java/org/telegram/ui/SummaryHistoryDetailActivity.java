@@ -8,8 +8,8 @@ import android.text.Spanned;
 import android.text.TextPaint;
 import android.text.method.LinkMovementMethod;
 import android.text.style.ClickableSpan;
-import android.view.Gravity;
 import android.view.View;
+import android.view.ViewGroup;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -36,7 +36,9 @@ import org.telegram.ui.ActionBar.AlertDialog;
 import org.telegram.ui.ActionBar.BackDrawable;
 import org.telegram.ui.ActionBar.BaseFragment;
 import org.telegram.ui.ActionBar.Theme;
+import org.telegram.ui.ActionBar.ThemeDescription;
 import org.telegram.ui.Components.LayoutHelper;
+import org.telegram.ui.Components.FeatureUi;
 import org.telegram.ui.Components.SummaryPublishHelper;
 import org.telegram.ui.Components.SummaryPublishStatusText;
 import org.telegram.ui.Components.SummaryTextFormatter;
@@ -111,10 +113,10 @@ public final class SummaryHistoryDetailActivity extends BaseFragment implements 
         actionBar.createMenu().addItem(COPY, R.drawable.msg_copy).setContentDescription("复制总结文本");
         ScrollView scroll = new ScrollView(context);
         scroll.setFillViewport(true);
-        scroll.setBackgroundColor(getThemedColor(Theme.key_windowBackgroundWhite));
+        scroll.setBackgroundColor(getThemedColor(Theme.key_windowBackgroundGray));
         content = new LinearLayout(context);
         content.setOrientation(LinearLayout.VERTICAL);
-        content.setPadding(dp(20), dp(8), dp(20), dp(24));
+        content.setPadding(0, dp(8), 0, dp(24));
         scroll.addView(content, new ScrollView.LayoutParams(-1, -2));
         fragmentView = scroll;
         showStatus("正在读取总结…", false);
@@ -222,58 +224,83 @@ public final class SummaryHistoryDetailActivity extends BaseFragment implements 
     private void showRecord() {
         if (content == null || record == null || !active()) return;
         content.removeAllViews();
-        text(content, SummaryHistoryActivity.chatLabel(record), true);
-        text(content, record.rangeLabel + " · " + record.sources.size() + " 条文字 · 已保存"
+        LinearLayout body = section();
+        TextView title = text(body, SummaryHistoryActivity.chatLabel(record), true);
+        title.setTextSize(18);
+        text(body, record.rangeLabel + " · " + record.sources.size() + " 条文字 · 已保存"
                 + (record.partial ? " · 部分覆盖" : ""), false);
-        if (record.partial && !record.coverageNote.isEmpty()) text(content, record.coverageNote, false);
-        if (transientNotice != null) text(content, transientNotice, true);
-        TextView summary = text(content, linkSources(record), false);
+        text(body, SummaryHistoryActivity.formatTime(record.generatedAtMillis), false);
+        if (record.partial && !record.coverageNote.isEmpty()) text(body, record.coverageNote, false);
+        if (transientNotice != null) text(body, transientNotice, true);
+        TextView summary = text(body, linkSources(record), false);
         summary.setTextSize(17);
+        summary.setTag(Theme.key_windowBackgroundWhiteBlackText);
         summary.setTextColor(getThemedColor(Theme.key_windowBackgroundWhiteBlackText));
+        summary.setLineSpacing(dp(4), 1f);
         summary.setTextIsSelectable(true);
         if (record.sourceLinks) summary.setMovementMethod(LinkMovementMethod.getInstance());
         summary.setLinksClickable(record.sourceLinks);
         boolean hasPublishedAttempt = !publishAttempts.isEmpty();
-        action(content, hasPublishedAttempt ? "再次编辑并发回" : "编辑并发回本群", () -> {
+        LinearLayout actions = section();
+        TextView send = action(actions, hasPublishedAttempt ? "再次编辑并发回" : "编辑并发回本群", () -> {
             if (record != null) SummaryPublishHelper.open(this, account, ownerId, record);
         });
-        if (publishNotice != null) text(content, publishNotice, false);
+        send.setTag("primary");
+        FeatureUi.stylePrimaryAction(send, getResourceProvider());
+        if (publishNotice != null) text(actions, publishNotice, false);
         else if (hasPublishedAttempt) {
             SummaryPublishStore.Attempt latest = publishAttempts.get(0);
-            text(content, SummaryPublishStatusText.label(latest), false);
+            text(actions, SummaryPublishStatusText.label(latest), false);
             if (latest.status == SummaryPublishStore.Status.FAILED || latest.status == SummaryPublishStore.Status.PARTIAL) {
-                text(content, "请在原群或原话题中重试失败的那条消息；再次编辑发送会创建新消息，已经成功的内容也可能重复。", false);
+                text(actions, "请在原群或原话题中重试失败的那条消息；再次编辑发送会创建新消息，已经成功的内容也可能重复。", false);
             } else {
-                text(content, "再次编辑发送会创建新消息，不会修改或重试已有消息。", false);
+                text(actions, "再次编辑发送会创建新消息，不会修改或重试已有消息。", false);
             }
         }
-        action(content, "复制总结", () -> {
+        action(actions, "复制总结", () -> {
             transientNotice = AndroidUtilities.addToClipboard(record.summary) ? "总结文本已复制。" : "复制失败，请重试。";
             showRecord();
         });
-        action(content, detailsExpanded ? "收起范围和生成详情 ▴" : "查看范围和生成详情 ▾", () -> {
+        TextView detailsAction = action(actions, detailsExpanded ? "收起范围和生成详情" : "查看范围和生成详情", () -> {
             detailsExpanded = !detailsExpanded;
             showRecord();
         });
+        detailsAction.setSelected(detailsExpanded);
         if (detailsExpanded) {
-            text(content, "生成于 " + SummaryHistoryActivity.formatTime(record.generatedAtMillis), false);
-            text(content, "这是生成当时保存的结果，不代表当前最新消息或模型。原消息可能已修改或删除。"
+            LinearLayout details = section();
+            text(details, "范围和生成详情", true);
+            text(details, "生成于 " + SummaryHistoryActivity.formatTime(record.generatedAtMillis), false);
+            text(details, "这是生成当时保存的结果，不代表当前最新消息或模型。原消息可能已修改或删除。"
                     + (record.sourceLinks ? "点击旧记录中的引用后才联网核验。" : ""), false);
-            if (!record.coverageNote.isEmpty()) text(content, record.coverageNote, false);
-            if (!record.templateLabel.isEmpty()) text(content, "生成时的要求来源：" + record.templateLabel, false);
-            if (!record.customInstructions.isEmpty()) text(content, "生成时填写的要求：\n" + record.customInstructions, false);
-            text(content, "请求模型：" + (record.model.isEmpty() ? "服务当前模型（未指定名称）" : record.model)
+            if (!record.coverageNote.isEmpty()) text(details, record.coverageNote, false);
+            if (!record.templateLabel.isEmpty()) text(details, "生成时的要求来源：" + record.templateLabel, false);
+            if (!record.customInstructions.isEmpty()) text(details, "生成时填写的要求：\n" + record.customInstructions, false);
+            text(details, "请求模型：" + (record.model.isEmpty() ? "服务当前模型（未指定名称）" : record.model)
                     + "。此名称不是实际模型版本的核验证明。", false);
-            text(content, "本机只保存总结与来源校验信息，没有保存原消息正文或完整请求输入。", false);
+            text(details, "本机只保存总结与来源校验信息，没有保存原消息正文或完整请求输入。", false);
             if (!publishAttempts.isEmpty()) {
-                text(content, "发送记录", true);
-                text(content, "这里保留提交给原生发送队列时的文字，后续在聊天中编辑或删除消息不修改这份记录。失败请通过聊天中的原消息重试。", false);
+                LinearLayout publications = section();
+                text(publications, "发送记录", true);
+                text(publications, "这里保留提交给原生发送队列时的文字，后续在聊天中编辑或删除消息不修改这份记录。失败请通过聊天中的原消息重试。", false);
                 for (SummaryPublishStore.Attempt attempt : publishAttempts) {
-                    text(content, SummaryHistoryActivity.formatTime(attempt.createdAtMillis) + " · " + SummaryPublishStatusText.label(attempt), false);
-                    text(content, "当时的发送稿：\n" + attempt.editedSummary, false).setTextIsSelectable(true);
+                    text(publications, SummaryHistoryActivity.formatTime(attempt.createdAtMillis) + " · " + SummaryPublishStatusText.label(attempt), false);
+                    TextView sentText = text(publications, "当时的发送稿：\n" + attempt.editedSummary, false);
+                    sentText.setTextIsSelectable(true);
+                    sentText.setTag(Theme.key_windowBackgroundWhiteBlackText);
+                    sentText.setTextColor(getThemedColor(Theme.key_windowBackgroundWhiteBlackText));
                 }
             }
         }
+    }
+
+    private LinearLayout section() {
+        LinearLayout section = new LinearLayout(content.getContext());
+        section.setOrientation(LinearLayout.VERTICAL);
+        section.setPadding(dp(21), dp(4), dp(21), dp(12));
+        section.setTag("surface");
+        section.setBackgroundColor(getThemedColor(Theme.key_windowBackgroundWhite));
+        content.addView(section, LayoutHelper.createLinear(-1, -2, 0, 0, 0, 8));
+        return section;
     }
 
     private CharSequence linkSources(SummaryHistoryStore.Record snapshot) {
@@ -379,6 +406,7 @@ public final class SummaryHistoryDetailActivity extends BaseFragment implements 
                         .format(new Date(current.date * 1000L)), false);
                 TextView original = text(sourceContent, current.text, false);
                 original.setTextSize(16);
+                original.setTag(Theme.key_dialogTextBlack);
                 original.setTextColor(getThemedColor(Theme.key_dialogTextBlack));
                 original.setTextIsSelectable(true);
                 action(sourceContent, "跳回原消息", () -> verify(reference, current, request, sourceRequest));
@@ -467,33 +495,69 @@ public final class SummaryHistoryDetailActivity extends BaseFragment implements 
     private void showStatus(String message, boolean retry) {
         if (content == null || destroyed) return;
         content.removeAllViews();
-        text(content, message, true);
-        if (retry) action(content, "重新读取", this::loadRecord);
+        LinearLayout status = section();
+        text(status, message, true);
+        if (retry) action(status, "重新读取", this::loadRecord);
     }
 
     private TextView text(LinearLayout parent, CharSequence value, boolean bold) {
         TextView view = new TextView(parent.getContext());
         view.setText(value);
         view.setTextSize(bold ? 16 : 14);
-        view.setTextColor(getThemedColor(bold ? Theme.key_windowBackgroundWhiteBlackText : Theme.key_windowBackgroundWhiteGrayText));
+        int key = parent == sourceContent ? (bold ? Theme.key_dialogTextBlack : Theme.key_dialogTextGray)
+                : bold ? Theme.key_windowBackgroundWhiteBlackText : Theme.key_windowBackgroundWhiteGrayText;
+        view.setTag(key);
+        view.setTextColor(getThemedColor(key));
         view.setLineSpacing(dp(3), 1f);
         if (bold) view.setTypeface(AndroidUtilities.bold());
         parent.addView(view, LayoutHelper.createLinear(-1, -2, 0, bold ? 12 : 6, 0, 6));
         return view;
     }
 
-    private void action(LinearLayout parent, String label, Runnable action) {
-        TextView button = text(parent, label, true);
-        button.setTextColor(getThemedColor(Theme.key_windowBackgroundWhiteBlueText));
-        button.setGravity(Gravity.CENTER);
-        button.setMinHeight(dp(48));
-        button.setPadding(dp(8), dp(10), dp(8), dp(10));
-        button.setBackground(Theme.createSimpleSelectorRoundRectDrawable(dp(6),
-                getThemedColor(Theme.key_windowBackgroundGray), getThemedColor(Theme.key_listSelector)));
-        button.setFocusable(true);
+    private TextView action(LinearLayout parent, String label, Runnable action) {
+        TextView button = new TextView(parent.getContext());
+        button.setText(label);
+        button.setTag("action");
+        FeatureUi.styleAction(button, getResourceProvider());
+        button.setPadding(0, dp(12), 0, dp(12));
         button.setOnClickListener(view -> {
             if (active()) action.run();
         });
+        parent.addView(button, LayoutHelper.createLinear(-1, -2, 0, 4, 0, 0));
+        return button;
+    }
+
+    private void updateColors(View view) {
+        if (view == null) return;
+        Object tag = view.getTag();
+        if ("surface".equals(tag)) view.setBackgroundColor(getThemedColor(Theme.key_windowBackgroundWhite));
+        if (view instanceof TextView && tag instanceof Integer) ((TextView) view).setTextColor(getThemedColor((Integer) tag));
+        if (view instanceof TextView && "action".equals(tag)) {
+            FeatureUi.styleAction((TextView) view, getResourceProvider());
+            view.setPadding(0, dp(12), 0, dp(12));
+        }
+        if (view instanceof TextView && "primary".equals(tag)) FeatureUi.stylePrimaryAction((TextView) view, getResourceProvider());
+        if (view instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) view;
+            for (int i = 0; i < group.getChildCount(); i++) updateColors(group.getChildAt(i));
+        }
+    }
+
+    @Override public ArrayList<ThemeDescription> getThemeDescriptions() {
+        ArrayList<ThemeDescription> descriptions = new ArrayList<>();
+        descriptions.add(new ThemeDescription(fragmentView, ThemeDescription.FLAG_BACKGROUND, null, null, null, null, Theme.key_windowBackgroundGray));
+        descriptions.add(new ThemeDescription(actionBar, ThemeDescription.FLAG_BACKGROUND, null, null, null, null, Theme.key_actionBarDefault));
+        descriptions.add(new ThemeDescription(actionBar, ThemeDescription.FLAG_AB_ITEMSCOLOR, null, null, null, null, Theme.key_actionBarDefaultIcon));
+        descriptions.add(new ThemeDescription(actionBar, ThemeDescription.FLAG_AB_TITLECOLOR, null, null, null, null, Theme.key_actionBarDefaultTitle));
+        descriptions.add(new ThemeDescription(actionBar, ThemeDescription.FLAG_AB_SELECTORCOLOR, null, null, null, null, Theme.key_actionBarDefaultSelector));
+        ThemeDescription.ThemeDescriptionDelegate refresh = () -> { updateColors(content); updateColors(sourceContent); };
+        int[] keys = { Theme.key_windowBackgroundWhite, Theme.key_windowBackgroundWhiteBlackText,
+                Theme.key_windowBackgroundWhiteGrayText, Theme.key_windowBackgroundWhiteBlueText,
+                Theme.key_windowBackgroundWhiteLinkText, Theme.key_listSelector, Theme.key_dialogTextBlack,
+                Theme.key_dialogTextGray, Theme.key_featuredStickers_addButton, Theme.key_featuredStickers_buttonText,
+                Theme.key_featuredStickers_addButtonPressed };
+        for (int key : keys) descriptions.add(new ThemeDescription(null, 0, null, null, null, refresh, key));
+        return descriptions;
     }
 
     private static int dp(float value) {

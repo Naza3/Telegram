@@ -32,8 +32,10 @@ import org.telegram.ui.ActionBar.Theme;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -59,6 +61,8 @@ public final class SummaryQuestionSheet {
     private final LinearLayout content;
     private final AlertDialog dialog;
     private final ArrayList<SummaryQuestionPrompt.Turn> history = new ArrayList<>();
+    private final LinkedHashMap<TextView, Integer> textColorKeys = new LinkedHashMap<>();
+    private final ArrayList<Runnable> themeUpdates = new ArrayList<>();
     private List<SummaryMessage> sources;
     private AiSummaryClient client;
     private EditTextBoldCursor questionInput;
@@ -131,6 +135,7 @@ public final class SummaryQuestionSheet {
         content.setOrientation(LinearLayout.VERTICAL);
         content.setFocusableInTouchMode(true);
         content.setPadding(dp(24), 0, dp(24), dp(8));
+        FeatureUi.bindThemeUpdates(content, this::updateColors);
         // AlertDialog supplies a scroll container for its custom view.
         dialog = new AlertDialog.Builder(context, resourcesProvider)
                 .setTitle("追问本次消息")
@@ -181,6 +186,8 @@ public final class SummaryQuestionSheet {
         draft = requestQuestion = streamingDraft = lastError = null;
         questionInput = null;
         progressView = partialView = null;
+        textColorKeys.clear();
+        themeUpdates.clear();
         content.removeAllViews();
     }
 
@@ -217,6 +224,8 @@ public final class SummaryQuestionSheet {
             dismiss();
             return;
         }
+        textColorKeys.clear();
+        themeUpdates.clear();
         content.removeAllViews();
         questionInput = null;
         progressView = partialView = null;
@@ -227,8 +236,7 @@ public final class SummaryQuestionSheet {
         for (int i = 0; i < history.size(); i++) {
             SummaryQuestionPrompt.Turn turn = history.get(i);
             addText("问题 " + (i + 1) + "：" + turn.question, true);
-            TextView answer = addText(linkSources(turn.answer), false);
-            answer.setTextColor(color(Theme.key_dialogTextBlack));
+            TextView answer = addBodyText(linkSources(turn.answer));
             answer.setMovementMethod(LinkMovementMethod.getInstance());
             answer.setLinksClickable(true);
         }
@@ -239,8 +247,8 @@ public final class SummaryQuestionSheet {
             progressView = addText("", false);
             updateProgress();
             addText("回答生成中，以下内容尚未完成，引用暂不可点击。", false);
-            partialView = addText(streamingDraft == null || streamingDraft.isEmpty()
-                    ? "等待模型回复…" : streamingDraft, false);
+            partialView = addBodyText(streamingDraft == null || streamingDraft.isEmpty()
+                    ? "等待模型回复…" : streamingDraft);
             partialView.setLinksClickable(false);
             addAction("取消本轮", () -> {
                 cancelRequest();
@@ -251,10 +259,10 @@ public final class SummaryQuestionSheet {
             return;
         }
         if (lastError != null) {
-            addText(lastError, false);
+            setTextColor(addText(lastError, false), Theme.key_text_RedRegular);
             if (streamingDraft != null && !streamingDraft.isEmpty()) {
                 addText("未完成内容，尚未通过引用校验", true);
-                TextView unfinished = addText(streamingDraft, false);
+                TextView unfinished = addBodyText(streamingDraft);
                 unfinished.setLinksClickable(false);
             }
         }
@@ -263,11 +271,9 @@ public final class SummaryQuestionSheet {
             return;
         }
         questionInput = new EditTextBoldCursor(context);
-        questionInput.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 16);
-        questionInput.setTextColor(color(Theme.key_dialogTextBlack));
-        questionInput.setHintTextColor(color(Theme.key_dialogTextGray));
-        questionInput.setCursorColor(color(Theme.key_dialogTextLink));
-        questionInput.setCursorWidth(1.5f);
+        FeatureUi.styleInput(questionInput, resourcesProvider, true);
+        EditTextBoldCursor input = questionInput;
+        themeUpdates.add(() -> FeatureUi.styleInput(input, resourcesProvider, true));
         questionInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE
                 | InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);
         questionInput.setSingleLine(false);
@@ -279,6 +285,7 @@ public final class SummaryQuestionSheet {
         questionInput.setText(draft);
         content.addView(questionInput, LayoutHelper.createLinear(-1, -2, 0, 8, 0, 4));
         TextView counter = addText("", false);
+        counter.setGravity(Gravity.END);
         updateCount(counter, draft);
         questionInput.addTextChangedListener(new TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
@@ -291,7 +298,7 @@ public final class SummaryQuestionSheet {
         addAction("为什么这样决定", () -> fillQuestion("为什么这样决定？请指出决定和理由的原文依据。"));
         addAction("还有哪些分歧", () -> fillQuestion("本次消息中还有哪些分歧或尚未解决的问题？"));
         addAction("谁负责跟进", () -> fillQuestion("谁负责跟进，明确约定的待办和时间分别是什么？"));
-        addAction(lastError == null ? "提问" : "重试本轮", () -> ask(config));
+        addAction(lastError == null ? "提问" : "重试本轮", () -> ask(config), true);
         if (lastError != null && config.stream) {
             addAction("使用普通模式重试", () -> ask(config.withValues(config.baseUrl,
                     config.model, config.apiKey, config.maxOutputTokens, false, config.inputCharacterBudget, config.serviceType)));
@@ -401,6 +408,8 @@ public final class SummaryQuestionSheet {
         int count = value == null ? 0 : value.codePointCount(0, value.length());
         view.setText(count + "/" + SummaryQuestionPrompt.MAX_QUESTION_CODE_POINTS
                 + (count > SummaryQuestionPrompt.MAX_QUESTION_CODE_POINTS ? " 字符，需缩短后提问" : " 字符"));
+        setTextColor(view, count > SummaryQuestionPrompt.MAX_QUESTION_CODE_POINTS
+                ? Theme.key_text_RedRegular : Theme.key_dialogTextGray);
     }
 
     private CharSequence linkSources(String answer) {
@@ -432,31 +441,60 @@ public final class SummaryQuestionSheet {
     private TextView addText(CharSequence text, boolean title) {
         TextView view = new TextView(context);
         view.setText(text);
-        view.setTextSize(TypedValue.COMPLEX_UNIT_DIP, title ? 16 : 14);
-        view.setTextColor(color(title ? Theme.key_dialogTextBlack : Theme.key_dialogTextGray));
+        view.setTextSize(TypedValue.COMPLEX_UNIT_SP, title ? 16 : 14);
+        setTextColor(view, title ? Theme.key_dialogTextBlack : Theme.key_dialogTextGray);
         view.setLineSpacing(dp(3), 1f);
         if (title) view.setTypeface(AndroidUtilities.bold());
         content.addView(view, LayoutHelper.createLinear(-1, -2, 0, title ? 12 : 6, 0, 6));
         return view;
     }
 
+    private TextView addBodyText(CharSequence text) {
+        TextView view = addText(text, false);
+        view.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
+        setTextColor(view, Theme.key_dialogTextBlack);
+        view.setLinkTextColor(color(Theme.key_dialogTextLink));
+        themeUpdates.add(() -> view.setLinkTextColor(color(Theme.key_dialogTextLink)));
+        return view;
+    }
+
     private void addAction(String label, Runnable action) {
+        addAction(label, action, false);
+    }
+
+    private void addAction(String label, Runnable action, boolean primary) {
         TextView view = new TextView(context);
         view.setText(label);
-        view.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 16);
-        view.setTypeface(AndroidUtilities.bold());
-        view.setTextColor(color(Theme.key_dialogTextLink));
-        view.setGravity(Gravity.CENTER);
-        view.setMinHeight(dp(48));
-        view.setPadding(dp(8), dp(10), dp(8), dp(10));
-        view.setBackground(Theme.createSimpleSelectorRoundRectDrawable(dp(6),
-                color(Theme.key_dialogBackgroundGray), color(Theme.key_listSelector)));
-        view.setFocusable(true);
+        applyActionStyle(view, primary);
+        themeUpdates.add(() -> applyActionStyle(view, primary));
         view.setOnClickListener(ignored -> {
             if (ownerActive()) action.run();
             else dismiss();
         });
-        content.addView(view, LayoutHelper.createLinear(-1, -2, 0, 8, 0, 0));
+        content.addView(view, LayoutHelper.createLinear(-1, -2, 0, primary ? 12 : 0, 0, primary ? 8 : 0));
+    }
+
+    private void applyActionStyle(TextView view, boolean primary) {
+        if (primary) {
+            FeatureUi.stylePrimaryAction(view, resourcesProvider);
+        } else {
+            FeatureUi.styleAction(view, resourcesProvider);
+            view.setTextColor(color(Theme.key_dialogTextLink));
+            view.setPaddingRelative(0, dp(12), 0, dp(12));
+        }
+    }
+
+    private void setTextColor(TextView view, int key) {
+        textColorKeys.put(view, key);
+        view.setTextColor(color(key));
+    }
+
+    private void updateColors() {
+        if (closed) return;
+        for (Map.Entry<TextView, Integer> entry : textColorKeys.entrySet()) {
+            entry.getKey().setTextColor(color(entry.getValue()));
+        }
+        for (Runnable update : themeUpdates) update.run();
     }
 
     private int color(int key) {

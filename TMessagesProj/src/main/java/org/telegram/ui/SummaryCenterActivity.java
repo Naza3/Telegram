@@ -5,8 +5,8 @@ import android.app.Dialog;
 import android.content.Context;
 import android.content.Intent;
 import android.os.Bundle;
-import android.view.Gravity;
 import android.view.View;
+import android.view.ViewGroup;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -30,9 +30,13 @@ import org.telegram.ui.ActionBar.AlertDialog;
 import org.telegram.ui.ActionBar.BackDrawable;
 import org.telegram.ui.ActionBar.BaseFragment;
 import org.telegram.ui.ActionBar.Theme;
+import org.telegram.ui.ActionBar.ThemeDescription;
 import org.telegram.ui.Components.GroupSummarySheet;
+import org.telegram.ui.Components.FeatureUi;
 import org.telegram.ui.Components.LayoutHelper;
 import org.telegram.ui.Components.SummaryTaskController;
+import org.telegram.ui.Components.ScrollSlidingTextTabStrip;
+import org.telegram.ui.Cells.TextDetailSettingsCell;
 
 /** Two-tab account-scoped workspace. Navigation never opens or marks the source chat read. */
 public final class SummaryCenterActivity extends BaseFragment implements NotificationCenter.NotificationCenterDelegate {
@@ -47,7 +51,8 @@ public final class SummaryCenterActivity extends BaseFragment implements Notific
     private boolean resumed, destroyed, invalidated, historyVisible;
     private LinearLayout root, newPage, sourceHeader;
     private FrameLayout pageHost;
-    private TextView newTab, historyTab, taskCard, checkpointCard;
+    private ScrollSlidingTextTabStrip tabs;
+    private TextDetailSettingsCell taskCard, checkpointCard;
     private ScrollView newScroll;
     private View historyView;
     private SummaryHistoryPanel historyPanel;
@@ -108,18 +113,26 @@ public final class SummaryCenterActivity extends BaseFragment implements Notific
         actionBar.createMenu().addItem(SETTINGS, R.drawable.msg_settings).setContentDescription("模型 API 配置");
         root = new LinearLayout(context);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(getThemedColor(Theme.key_windowBackgroundWhite));
-        LinearLayout tabs = new LinearLayout(context);
-        newTab = button(context, "新建", () -> showTab(false));
-        historyTab = button(context, "历史", () -> showTab(true));
-        tabs.addView(newTab, new LinearLayout.LayoutParams(0, dp(48), 1));
-        tabs.addView(historyTab, new LinearLayout.LayoutParams(0, dp(48), 1));
-        root.addView(tabs, LayoutHelper.createLinear(-1, -2));
-        taskCard = button(context, "", this::openCurrentTask);
-        root.addView(taskCard, LayoutHelper.createLinear(-1, -2, 12, 4, 12, 4));
-        checkpointCard = button(context, "", this::showInterruptedTask);
+        root.setBackgroundColor(getThemedColor(Theme.key_windowBackgroundGray));
+        tabs = new ScrollSlidingTextTabStrip(context, getResourceProvider());
+        tabs.setUseSameWidth(true);
+        tabs.setColors(Theme.key_windowBackgroundWhiteBlueText, Theme.key_windowBackgroundWhiteBlueText,
+                Theme.key_windowBackgroundWhiteGrayText, Theme.key_listSelector);
+        tabs.setBackgroundColor(getThemedColor(Theme.key_windowBackgroundWhite));
+        tabs.addTextTab(0, "新建总结");
+        tabs.addTextTab(1, "总结历史");
+        tabs.finishAddingTabs();
+        tabs.setInitialTabId(historyVisible ? 1 : 0);
+        tabs.setDelegate(new ScrollSlidingTextTabStrip.ScrollSlidingTabStripDelegate() {
+            @Override public void onPageSelected(int id, boolean forward) { showTab(id == 1); }
+            @Override public void onPageScrolled(float progress) { }
+        });
+        root.addView(tabs, LayoutHelper.createLinear(-1, 48));
+        taskCard = sourceCell(context, "", "", false, this::openCurrentTask);
+        root.addView(taskCard, LayoutHelper.createLinear(-1, -2, 0, 8, 0, 0));
+        checkpointCard = sourceCell(context, "上次任务未确认结束", "查看历史或重新选择范围", false, this::showInterruptedTask);
         checkpointCard.setVisibility(View.GONE);
-        root.addView(checkpointCard, LayoutHelper.createLinear(-1, -2, 12, 4, 12, 4));
+        root.addView(checkpointCard, LayoutHelper.createLinear(-1, -2, 0, 8, 0, 0));
         pageHost = new FrameLayout(context);
         root.addView(pageHost, new LinearLayout.LayoutParams(-1, 0, 1));
         newScroll = new ScrollView(context);
@@ -195,8 +208,7 @@ public final class SummaryCenterActivity extends BaseFragment implements Notific
         historyVisible = history;
         newScroll.setVisibility(history ? View.GONE : View.VISIBLE);
         historyView.setVisibility(history ? View.VISIBLE : View.GONE);
-        newTab.setAlpha(history ? 0.55f : 1);
-        historyTab.setAlpha(history ? 1 : 0.55f);
+        tabs.selectTabWithId(history ? 1 : 0, 1f);
         if (workbench != null) workbench.setAttached(!history && resumed);
         if (historyPanel != null) {
             if (history && resumed) historyPanel.onResume(); else historyPanel.onPause();
@@ -209,23 +221,33 @@ public final class SummaryCenterActivity extends BaseFragment implements Notific
         newPage.removeAllViews();
         sourceHeader = new LinearLayout(newPage.getContext());
         sourceHeader.setOrientation(LinearLayout.VERTICAL);
-        sourceHeader.setPadding(dp(16), dp(8), dp(16), dp(8));
-        newPage.addView(sourceHeader, LayoutHelper.createLinear(-1, -2));
+        sourceHeader.setBackgroundColor(getThemedColor(Theme.key_windowBackgroundWhite));
+        newPage.addView(sourceHeader, LayoutHelper.createLinear(-1, -2, 0, 8, 0, 8));
         TLRPC.Chat chat = dialogId == 0 ? null : getMessagesController().getChat(-dialogId);
-        sourceHeader.addView(button(newPage.getContext(), chat == null ? "选择来源群／频道" : "来源：" + chat.title + " · 更换",
+        sourceHeader.addView(sourceCell(newPage.getContext(), chat == null ? "选择来源群／频道" : chat.title,
+                chat == null ? "选择要总结的聊天" : "总结来源 · 点击更换", chat != null && ChatObject.isForum(chat),
                 this::chooseSource), LayoutHelper.createLinear(-1, -2));
         if (chat == null) {
             TextView guide = label(newPage.getContext(), "先选择来源，再设置消息范围与手动核心总结要求。选择聊天不会打开聊天页或标记已读。");
-            sourceHeader.addView(guide, LayoutHelper.createLinear(-1, -2, 0, 12, 0, 8));
+            guide.setTag(Theme.key_windowBackgroundWhiteGrayText);
+            guide.setTextColor(getThemedColor(Theme.key_windowBackgroundWhiteGrayText));
+            guide.setTextSize(14);
+            sourceHeader.addView(guide, LayoutHelper.createLinear(-1, -2, 21, 0, 21, 16));
             return;
         }
         if (ChatObject.isForum(chat)) {
             TLRPC.TL_forumTopic topic = topicId == 0 ? null : getMessagesController().getTopicsController().findTopic(chat.id, topicId);
-            sourceHeader.addView(button(newPage.getContext(), topicId == 0 ? "全部话题 · 选择具体话题"
-                    : "话题：" + (topic == null ? topicId : topic.title) + " · 更换", this::chooseTopic), LayoutHelper.createLinear(-1, -2));
+            sourceHeader.addView(sourceCell(newPage.getContext(), topicId == 0 ? "全部话题"
+                    : topic == null ? "话题 " + topicId : topic.title, "话题范围 · 点击更换", false, this::chooseTopic),
+                    LayoutHelper.createLinear(-1, -2));
         }
-        if (selectedSnapshot != null) sourceHeader.addView(label(newPage.getContext(),
-                "本次仅总结手动选择的文字；更换来源会放弃当前选择。"), LayoutHelper.createLinear(-1, -2));
+        if (selectedSnapshot != null) {
+            TextView selectedNote = label(newPage.getContext(), "本次仅总结手动选择的文字；更换来源会放弃当前选择。");
+            selectedNote.setTextSize(14);
+            selectedNote.setTag(Theme.key_windowBackgroundWhiteGrayText);
+            selectedNote.setTextColor(getThemedColor(Theme.key_windowBackgroundWhiteGrayText));
+            sourceHeader.addView(selectedNote, LayoutHelper.createLinear(-1, -2, 21, 0, 21, 12));
+        }
         workbench = GroupSummarySheet.createEmbedded(this, account, dialogId, topicId, unreadLower, unreadUpper,
                 entryUnreadSnapshot, (sourceDialog, messageId) -> {
                     if (!sameOwner() || sourceDialog != dialogId) return;
@@ -326,7 +348,7 @@ public final class SummaryCenterActivity extends BaseFragment implements Notific
         if (taskCard == null || !sameOwner()) return;
         SummaryTaskController.Session task = controller.current();
         taskCard.setVisibility(task == null ? View.GONE : View.VISIBLE);
-        if (task != null) taskCard.setText(task.title() + " · " + task.stage + "\n点击查看任务");
+        if (task != null) taskCard.setTextAndValue(task.title(), task.stage + " · 点击查看任务", false);
     }
 
     private void openCurrentTask() {
@@ -352,7 +374,7 @@ public final class SummaryCenterActivity extends BaseFragment implements Notific
             AndroidUtilities.runOnUIThread(() -> {
                 if (!sameOwner() || controller.current() != null || loaded == null || checkpointCard == null) return;
                 checkpoint = loaded;
-                checkpointCard.setText("上次任务未确认结束 · 查看历史或重新选择范围");
+                checkpointCard.setTextAndValue("上次任务未确认结束", "查看历史或重新选择范围", false);
                 checkpointCard.setVisibility(View.VISIBLE);
             });
         });
@@ -447,20 +469,81 @@ public final class SummaryCenterActivity extends BaseFragment implements Notific
         selectedSnapshot = null;
     }
 
+    private TextDetailSettingsCell sourceCell(Context context, String title, String detail, boolean divider, Runnable action) {
+        TextDetailSettingsCell cell = new TextDetailSettingsCell(context);
+        cell.getTextView().setTextColor(getThemedColor(Theme.key_windowBackgroundWhiteBlackText));
+        cell.getValueTextView().setTextColor(getThemedColor(Theme.key_windowBackgroundWhiteGrayText));
+        cell.setTextAndValue(title, detail, divider);
+        cell.setBackground(Theme.getSelectorDrawable(true, getResourceProvider()));
+        cell.setFocusable(true);
+        cell.setOnClickListener(view -> { if (sameOwner()) action.run(); });
+        return cell;
+    }
+
     private TextView button(Context context, String value, Runnable action) {
         TextView view = label(context, value);
-        view.setTextColor(getThemedColor(Theme.key_windowBackgroundWhiteBlueText));
-        view.setTypeface(AndroidUtilities.bold()); view.setGravity(Gravity.CENTER);
-        view.setMinHeight(dp(48)); view.setPadding(dp(12), dp(10), dp(12), dp(10));
-        view.setBackground(Theme.createSimpleSelectorRoundRectDrawable(dp(8),
-                getThemedColor(Theme.key_windowBackgroundGray), getThemedColor(Theme.key_listSelector)));
-        view.setFocusable(true); view.setOnClickListener(ignored -> { if (sameOwner()) action.run(); });
+        view.setTag("action");
+        FeatureUi.styleAction(view, getResourceProvider());
+        view.setOnClickListener(ignored -> { if (sameOwner()) action.run(); });
         return view;
     }
     private TextView label(Context context, String value) {
         TextView view = new TextView(context); view.setText(value); view.setTextSize(16);
+        view.setTag(Theme.key_windowBackgroundWhiteBlackText);
         view.setTextColor(getThemedColor(Theme.key_windowBackgroundWhiteBlackText));
         return view;
     }
-    private static int dp(float value) { return AndroidUtilities.dp(value); }
+    private void updateSourceColors(View view) {
+        if (view == null) return;
+        if (view instanceof TextDetailSettingsCell) {
+            TextDetailSettingsCell cell = (TextDetailSettingsCell) view;
+            cell.getTextView().setTextColor(getThemedColor(Theme.key_windowBackgroundWhiteBlackText));
+            cell.getValueTextView().setTextColor(getThemedColor(Theme.key_windowBackgroundWhiteGrayText));
+            cell.setBackground(Theme.getSelectorDrawable(true, getResourceProvider()));
+        }
+        if (view instanceof TextView && view.getTag() instanceof Integer) {
+            ((TextView) view).setTextColor(getThemedColor((Integer) view.getTag()));
+        }
+        if (view instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) view;
+            for (int i = 0; i < group.getChildCount(); i++) updateSourceColors(group.getChildAt(i));
+        }
+    }
+
+    @Override public ArrayList<ThemeDescription> getThemeDescriptions() {
+        ArrayList<ThemeDescription> descriptions = new ArrayList<>();
+        descriptions.add(new ThemeDescription(root, ThemeDescription.FLAG_BACKGROUND, null, null, null, null, Theme.key_windowBackgroundGray));
+        descriptions.add(new ThemeDescription(actionBar, ThemeDescription.FLAG_BACKGROUND, null, null, null, null, Theme.key_actionBarDefault));
+        descriptions.add(new ThemeDescription(actionBar, ThemeDescription.FLAG_AB_ITEMSCOLOR, null, null, null, null, Theme.key_actionBarDefaultIcon));
+        descriptions.add(new ThemeDescription(actionBar, ThemeDescription.FLAG_AB_TITLECOLOR, null, null, null, null, Theme.key_actionBarDefaultTitle));
+        descriptions.add(new ThemeDescription(actionBar, ThemeDescription.FLAG_AB_SELECTORCOLOR, null, null, null, null, Theme.key_actionBarDefaultSelector));
+        ThemeDescription.ThemeDescriptionDelegate refresh = () -> {
+            if (tabs != null) {
+                tabs.setBackgroundColor(getThemedColor(Theme.key_windowBackgroundWhite));
+                tabs.updateColors();
+            }
+            if (sourceHeader != null) sourceHeader.setBackgroundColor(getThemedColor(Theme.key_windowBackgroundWhite));
+            updateSourceColors(sourceHeader);
+            updateSourceColors(taskCard);
+            updateSourceColors(checkpointCard);
+            if (historyPanel != null) historyPanel.updateColors();
+            if (workbench != null) workbench.updateColors();
+        };
+        for (int key : SummaryHistoryPanel.THEME_KEYS) {
+            descriptions.add(new ThemeDescription(null, 0, null, null, null, refresh, key));
+        }
+        // Additional colors used by the embedded workbench and its dialogs. Shared action and
+        // input colors, including the primary button, are already registered by THEME_KEYS above.
+        int[] workbenchKeys = { Theme.key_windowBackgroundWhiteGrayText4,
+                Theme.key_radioBackground, Theme.key_radioBackgroundChecked,
+                Theme.key_switchTrack, Theme.key_switchTrackChecked,
+                Theme.key_dialogBackground, Theme.key_dialogRadioBackground, Theme.key_dialogRadioBackgroundChecked,
+                Theme.key_dialogTextBlack, Theme.key_dialogTextGray, Theme.key_dialogTextLink, Theme.key_dialogTextHint,
+                Theme.key_dialogInputField, Theme.key_dialogInputFieldActivated };
+        for (int key : workbenchKeys) {
+            descriptions.add(new ThemeDescription(null, 0, null, null, null, refresh, key));
+        }
+        return descriptions;
+    }
+
 }

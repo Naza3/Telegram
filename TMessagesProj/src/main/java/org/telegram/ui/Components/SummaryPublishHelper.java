@@ -1,8 +1,10 @@
 /* Telegram for Android; GPL version 2 or later. */
 package org.telegram.ui.Components;
 
+import android.graphics.Typeface;
 import android.os.Bundle;
 import android.text.TextUtils;
+import android.util.TypedValue;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
@@ -23,7 +25,9 @@ import org.telegram.ui.TopicsFragment;
 
 import java.lang.ref.WeakReference;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.WeakHashMap;
 
 /** Explicit, owner-bound handoff to Telegram's editor. This class never sends messages. */
@@ -206,6 +210,13 @@ public final class SummaryPublishHelper {
         LinearLayout body = new LinearLayout(fragment.getParentActivity());
         body.setOrientation(LinearLayout.VERTICAL);
         body.setPadding(AndroidUtilities.dp(24), 0, AndroidUtilities.dp(24), AndroidUtilities.dp(8));
+        Theme.ResourcesProvider resourcesProvider = fragment.getResourceProvider();
+        LinkedHashMap<TextView, Integer> textColorKeys = new LinkedHashMap<>();
+        FeatureUi.bindThemeUpdates(body, () -> {
+            for (Map.Entry<TextView, Integer> entry : textColorKeys.entrySet()) {
+                entry.getKey().setTextColor(Theme.getColor(entry.getValue(), resourcesProvider));
+            }
+        });
         TLRPC.Chat chat = MessagesController.getInstance(draft.account).getChat(-draft.record.dialogId);
         String destination = chat == null ? "来源群" : chat.title;
         if (draft.topicId > 0) {
@@ -213,13 +224,14 @@ public final class SummaryPublishHelper {
                     .findTopic(-draft.record.dialogId, draft.topicId);
             if (topic != null) destination += " · " + topic.title;
         }
-        addPreviewText(body, "发送到：" + destination + "\n共 " + parts.size()
-                + " 条，将按下列顺序发送。取消会保留编辑器正文。", true);
+        addPreviewNote(body, "发送到：" + destination + "\n共 " + parts.size()
+                + " 条，将按下列顺序发送。取消会保留编辑器正文。", resourcesProvider, textColorKeys);
         for (int i = 0; i < parts.size(); i++) {
-            addPreviewText(body, "第 " + (i + 1) + " / " + parts.size() + " 条", true);
-            addPreviewText(body, parts.get(i), false);
+            addPreviewText(body, "第 " + (i + 1) + " / " + parts.size() + " 条", true, resourcesProvider, textColorKeys);
+            addPreviewText(body, parts.get(i), false, resourcesProvider, textColorKeys);
         }
-        addPreviewText(body, "如部分消息失败，请在聊天中重试失败的原消息，避免整批重复发送。", true);
+        addPreviewNote(body, "如部分消息失败，请在聊天中重试失败的原消息，避免整批重复发送。",
+                resourcesProvider, textColorKeys);
         boolean[] confirmed = {false};
         AlertDialog dialog = new AlertDialog.Builder(fragment.getParentActivity(), fragment.getResourceProvider())
                 .setTitle("确认发送总结")
@@ -233,14 +245,28 @@ public final class SummaryPublishHelper {
         return fragment.showDialog(dialog, false, ignored -> { if (!confirmed[0]) cancel.run(); }) == null ? null : dialog;
     }
 
-    private static void addPreviewText(LinearLayout body, String value, boolean label) {
+    private static TextView addPreviewText(LinearLayout body, String value, boolean label,
+                                           Theme.ResourcesProvider resourcesProvider,
+                                           Map<TextView, Integer> textColorKeys) {
         TextView text = new TextView(body.getContext());
         text.setText(value);
-        text.setTextSize(label ? 14 : 16);
-        text.setTextColor(Theme.getColor(Theme.key_dialogTextBlack));
+        text.setTextSize(TypedValue.COMPLEX_UNIT_SP, label ? 14 : 16);
+        int colorKey = label ? Theme.key_dialogTextLink : Theme.key_dialogTextBlack;
+        textColorKeys.put(text, colorKey);
+        text.setTextColor(Theme.getColor(colorKey, resourcesProvider));
+        text.setLineSpacing(AndroidUtilities.dp(3), 1f);
         text.setTextIsSelectable(!label);
         if (label) text.setTypeface(AndroidUtilities.bold());
         body.addView(text, LayoutHelper.createLinear(-1, -2, 0, label ? 16 : 8, 0, 8));
+        return text;
+    }
+
+    private static void addPreviewNote(LinearLayout body, String value, Theme.ResourcesProvider resourcesProvider,
+                                       Map<TextView, Integer> textColorKeys) {
+        TextView text = addPreviewText(body, value, true, resourcesProvider, textColorKeys);
+        text.setTypeface(Typeface.DEFAULT);
+        textColorKeys.put(text, Theme.key_dialogTextGray);
+        text.setTextColor(Theme.getColor(Theme.key_dialogTextGray, resourcesProvider));
     }
 
     /** Called by logout after the original owner has been captured. No native draft is sent here. */

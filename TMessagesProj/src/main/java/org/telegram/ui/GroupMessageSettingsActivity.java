@@ -9,7 +9,6 @@ import android.view.View;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
-import android.widget.TextView;
 
 import org.telegram.messenger.AndroidUtilities;
 import org.telegram.messenger.ChatObject;
@@ -24,8 +23,15 @@ import org.telegram.ui.ActionBar.AlertDialog;
 import org.telegram.ui.ActionBar.BackDrawable;
 import org.telegram.ui.ActionBar.BaseFragment;
 import org.telegram.ui.ActionBar.Theme;
+import org.telegram.ui.ActionBar.ThemeDescription;
+import org.telegram.ui.Cells.HeaderCell;
+import org.telegram.ui.Cells.TextInfoPrivacyCell;
+import org.telegram.ui.Cells.TextSettingsCell;
 import org.telegram.ui.Cells.TextCheckCell;
 import org.telegram.ui.Components.LayoutHelper;
+import org.telegram.ui.Components.EditTextBoldCursor;
+
+import java.util.ArrayList;
 
 /** One group, two optional features; no permissions, account-wide rules or AI settings. */
 public final class GroupMessageSettingsActivity extends BaseFragment implements NotificationCenter.NotificationCenterDelegate {
@@ -33,7 +39,9 @@ public final class GroupMessageSettingsActivity extends BaseFragment implements 
     private final long ownerId, dialogId;
     private Runnable onSaved;
     private EditText uidInput, keywordInput;
-    private TextView groupTitle, modeButton, status, saveButton, historyButton, clearButton;
+    private TextInfoPrivacyCell groupTitle, status;
+    private TextSettingsCell modeButton, saveButton, historyButton, clearButton;
+    private final ArrayList<ThemeDescription> themeDescriptions = new ArrayList<>();
     private TextCheckCell retainCell;
     private GroupMessageSettings.Rule snapshot;
     private int mode;
@@ -74,52 +82,63 @@ public final class GroupMessageSettingsActivity extends BaseFragment implements 
         actionBar.setActionBarMenuOnItemClick(new ActionBar.ActionBarMenuOnItemClick() {
             @Override public void onItemClick(int id) { if (id == -1) leave(); }
         });
+        themeDescriptions.clear();
         ScrollView scroll = new ScrollView(context);
         scroll.setFillViewport(true);
-        scroll.setBackgroundColor(getThemedColor(Theme.key_windowBackgroundWhite));
+        scroll.setBackgroundColor(getThemedColor(Theme.key_windowBackgroundGray));
+        AndroidUtilities.setScrollViewEdgeEffectColor(scroll, getThemedColor(Theme.key_actionBarDefault));
         LinearLayout content = new LinearLayout(context);
         content.setOrientation(LinearLayout.VERTICAL);
-        content.setPadding(dp(20), dp(8), dp(20), dp(24));
+        content.setPadding(0, 0, 0, dp(16));
         scroll.addView(content, new ScrollView.LayoutParams(-1, -2));
         TLRPC.Chat chat = sameOwner() ? getMessagesController().getChat(-dialogId) : null;
-        groupTitle = text(content, chat == null ? "本群设置" : chat.title, false);
-        text(content, "屏蔽与折叠", true).setTextColor(getThemedColor(Theme.key_windowBackgroundWhiteBlackText));
-        modeButton = text(content, "屏蔽方式：关闭", true);
+        groupTitle = info(content, chat == null ? "本群设置" : chat.title);
+        header(content, "屏蔽与折叠");
+        modeButton = row(content, "屏蔽方式", Theme.key_windowBackgroundWhiteBlackText, false);
+        modeButton.setTextAndValue("屏蔽方式", modeName(mode), false);
         modeButton.setOnClickListener(view -> chooseMode());
-        text(content, "本群全部话题共用规则。匹配任一 UID 或关键词即可生效，仅改变主聊天列表显示。关键词匹配文字和媒体说明，相册整组处理；通知、搜索和 AI 总结排除名单保持各自设置。", false);
-        text(content, "保留本人发言和系统消息。按实际发言者 UID 匹配，不按昵称或转发原作者判断。", false);
-        text(content, "隐藏后可在群菜单点“临时显示全部消息”恢复查看。", false);
-        text(content, "用户 UID", false);
-        uidInput = input(content, "每行一个 UID，例如 123456789", 120);
-        text(content, "从用户主页复制 Telegram UID。最多 1000 个，可用换行、空格或逗号分隔；匿名管理员或频道身份发言无法对应到个人 UID。", false);
-        text(content, "关键词", false);
-        keywordInput = input(content, "每行一个关键词", 120);
-        text(content, "最多 100 条，每条最多 100 个字符。按原文字面包含匹配，忽略大小写，不支持正则表达式。关闭屏蔽会恢复正常显示并保留规则。", false);
+        info(content, "本群全部话题共用规则，匹配任一 UID 或关键词即可生效。仅改变主聊天列表显示，保留本人发言和系统消息；通知、搜索和 AI 总结排除名单保持各自设置。隐藏后可在群菜单点“临时显示全部消息”查看。");
+        header(content, "用户 UID");
+        uidInput = input(content, "每行一个 UID，例如 123456789", 88);
+        info(content, "从用户主页复制 Telegram UID，按实际发言者匹配，不按昵称或转发原作者判断。最多 1000 个，可用换行、空格或逗号分隔；匿名管理员或频道身份发言无法对应到个人 UID。");
+        header(content, "关键词");
+        keywordInput = input(content, "每行一个关键词", 88);
+        info(content, "最多 100 条，每条最多 100 个字符。匹配文字和媒体说明，忽略大小写，不支持正则表达式；相册整组处理。关闭屏蔽会恢复正常显示并保留规则。");
+        header(content, "撤回记录");
         retainCell = new TextCheckCell(context, getResourceProvider());
-        retainCell.setTextAndCheck("保留撤回文字", false, false);
-        retainCell.setBackground(Theme.createSelectorDrawable(getThemedColor(Theme.key_listSelector), 2));
+        retainCell.setTextAndCheck("保留撤回文字", false, true);
+        selectable(retainCell);
         content.addView(retainCell, LayoutHelper.createLinear(-1, -2));
+        themeDescriptions.add(new ThemeDescription(retainCell, 0, new Class[]{TextCheckCell.class}, new String[]{"textView"}, null, null, null, Theme.key_windowBackgroundWhiteBlackText));
+        for (int key : new int[]{Theme.key_switchTrack, Theme.key_switchTrackChecked, Theme.key_windowBackgroundWhite}) {
+            themeDescriptions.add(new ThemeDescription(retainCell, 0, new Class[]{TextCheckCell.class}, new String[]{"checkBox"}, null, null, null, key));
+        }
         retainCell.setOnClickListener(view -> {
             if (!editable() || Build.VERSION.SDK_INT < 23) return;
             retain = !retain; retainCell.setChecked(retain);
         });
-        if (Build.VERSION.SDK_INT < 23) text(content, "保留撤回文字需要 Android 6.0 或更新版本；当前设备不支持。", false);
-        text(content, "保存后生效。仅在本机保留已缓存、随后被撤回的普通群文字，在下方记录页查看；聊天中仍按 Telegram 的撤回结果更新。无法恢复未收到的内容，不保存秘密聊天、自毁或阅后即焚消息。", false);
-        text(content, "关闭后停止新增记录。每个账号最多保留 2000 条或 8 MiB，超出时清理最旧记录；也可手动清理，退出账号时清除。规则和记录仅保存在本机。", false);
-        status = text(content, sameOwner() ? "正在读取…" : "账号已切换或退出，请重新打开消息管理。", false);
-        status.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
-        saveButton = text(content, "保存本群设置", true);
-        saveButton.setOnClickListener(view -> save());
-        historyButton = text(content, "查看本群撤回记录", true);
+        historyButton = row(content, "查看本群撤回记录", Theme.key_windowBackgroundWhiteBlackText, true);
         historyButton.setOnClickListener(view -> {
             if (active() && !saving && !clearing) presentFragment(new DeletedMessageHistoryActivity(account, ownerId, dialogId));
         });
-        clearButton = text(content, "清理本群撤回记录", true);
-        clearButton.setTextColor(getThemedColor(Theme.key_text_RedRegular));
+        clearButton = row(content, "清理本群撤回记录", Theme.key_text_RedRegular, false);
         clearButton.setOnClickListener(view -> confirmClear());
+        if (Build.VERSION.SDK_INT < 23) info(content, "保留撤回文字需要 Android 6.0 或更新版本；当前设备不支持。");
+        info(content, "保存后生效。仅在本机保留已缓存、随后被撤回的普通群文字，在记录页查看；聊天中仍按 Telegram 的撤回结果更新。无法恢复未收到的内容，不保存秘密聊天、自毁或阅后即焚消息。\n\n关闭后停止新增记录。每个账号最多保留 2000 条或 8 MiB，超出时清理最旧记录；也可手动清理，退出账号时清除。规则和记录仅保存在本机。");
+        saveButton = row(content, "保存本群设置", Theme.key_windowBackgroundWhiteBlueText, false);
+        saveButton.setOnClickListener(view -> save());
+        status = info(content, sameOwner() ? "正在读取…" : "账号已切换或退出，请重新打开消息管理。");
+        status.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+        themeDescriptions.add(new ThemeDescription(scroll, ThemeDescription.FLAG_BACKGROUND, null, null, null, null, Theme.key_windowBackgroundGray));
+        themeDescriptions.add(new ThemeDescription(scroll, ThemeDescription.FLAG_LISTGLOWCOLOR, null, null, null, null, Theme.key_actionBarDefault));
+        themeDescriptions.add(new ThemeDescription(actionBar, ThemeDescription.FLAG_BACKGROUND, null, null, null, null, Theme.key_actionBarDefault));
+        themeDescriptions.add(new ThemeDescription(actionBar, ThemeDescription.FLAG_AB_ITEMSCOLOR, null, null, null, null, Theme.key_actionBarDefaultIcon));
+        themeDescriptions.add(new ThemeDescription(actionBar, ThemeDescription.FLAG_AB_TITLECOLOR, null, null, null, null, Theme.key_actionBarDefaultTitle));
+        themeDescriptions.add(new ThemeDescription(actionBar, ThemeDescription.FLAG_AB_SELECTORCOLOR, null, null, null, null, Theme.key_actionBarDefaultSelector));
+        themeDescriptions.add(new ThemeDescription(content, 0, new Class[]{TextSettingsCell.class, TextCheckCell.class}, Theme.dividerPaint, null, null, Theme.key_divider));
         if (loaded && snapshot != null) {
             uidInput.setText(draftUids); keywordInput.setText(draftKeywords);
-            modeButton.setText("屏蔽方式：" + modeName(mode)); retainCell.setChecked(retain);
+            modeButton.setTextAndValue("屏蔽方式", modeName(mode), false); retainCell.setChecked(retain);
             if (previousStatus != null) status.setText(previousStatus);
         }
         setEditable(loaded && !saving && !clearing && !loading && !invalidated);
@@ -179,14 +198,14 @@ public final class GroupMessageSettingsActivity extends BaseFragment implements 
         initialUids = GroupMessageSettings.formatUids(value.uids);
         initialKeywords = GroupMessageSettings.formatKeywords(value.keywords);
         uidInput.setText(initialUids); keywordInput.setText(initialKeywords);
-        modeButton.setText("屏蔽方式：" + modeName(mode)); retainCell.setChecked(retain);
+        modeButton.setTextAndValue("屏蔽方式", modeName(mode), false); retainCell.setChecked(retain);
     }
     private void chooseMode() {
         if (!editable()) return;
         showDialog(new AlertDialog.Builder(getParentActivity(), getResourceProvider()).setTitle("屏蔽方式")
                 .setItems(new CharSequence[]{"关闭", "折叠（可点按展开）", "隐藏"}, (dialog, which) -> {
                     if (!editable()) return;
-                    mode = which; modeButton.setText("屏蔽方式：" + modeName(mode));
+                    mode = which; modeButton.setTextAndValue("屏蔽方式", modeName(mode), false);
                 }).create());
     }
     private void save() {
@@ -274,25 +293,61 @@ public final class GroupMessageSettingsActivity extends BaseFragment implements 
         if (clearButton != null) clearButton.setEnabled(!saving && !clearing && !invalidated && Build.VERSION.SDK_INT >= 23);
     }
     private EditText input(LinearLayout parent, String hint, int height) {
-        EditText view = new EditText(parent.getContext());
+        LinearLayout container = new LinearLayout(parent.getContext());
+        container.setPadding(dp(21), 0, dp(21), dp(12));
+        container.setBackgroundColor(getThemedColor(Theme.key_windowBackgroundWhite));
+        parent.addView(container, LayoutHelper.createLinear(-1, -2));
+        themeDescriptions.add(new ThemeDescription(container, ThemeDescription.FLAG_BACKGROUND, null, null, null, null, Theme.key_windowBackgroundWhite));
+        EditTextBoldCursor view = new EditTextBoldCursor(parent.getContext());
         view.setTextSize(16); view.setTextColor(getThemedColor(Theme.key_windowBackgroundWhiteBlackText));
-        view.setHintTextColor(getThemedColor(Theme.key_windowBackgroundWhiteGrayText));
+        view.setHintTextColor(getThemedColor(Theme.key_windowBackgroundWhiteHintText));
+        view.setCursorColor(getThemedColor(Theme.key_windowBackgroundWhiteBlackText));
         view.setHint(hint); view.setGravity(Gravity.TOP | Gravity.START);
         view.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
-        view.setMinHeight(dp(height)); view.setPadding(dp(8), dp(8), dp(8), dp(8));
-        view.setBackground(Theme.createEditTextDrawable(parent.getContext(), false));
-        parent.addView(view, LayoutHelper.createLinear(-1, -2));
+        view.setMinHeight(dp(height)); view.setPadding(0, dp(8), 0, dp(8));
+        Runnable updateBackground = () -> view.setBackground(Theme.createEditTextDrawable(parent.getContext(),
+                getThemedColor(Theme.key_windowBackgroundWhiteInputField), getThemedColor(Theme.key_windowBackgroundWhiteInputFieldActivated)));
+        updateBackground.run();
+        container.addView(view, LayoutHelper.createLinear(-1, -2));
+        themeDescriptions.add(new ThemeDescription(view, ThemeDescription.FLAG_TEXTCOLOR, null, null, null, null, Theme.key_windowBackgroundWhiteBlackText));
+        themeDescriptions.add(new ThemeDescription(view, ThemeDescription.FLAG_HINTTEXTCOLOR, null, null, null,
+                () -> view.setHintTextColor(getThemedColor(Theme.key_windowBackgroundWhiteHintText)), Theme.key_windowBackgroundWhiteHintText));
+        themeDescriptions.add(new ThemeDescription(view, ThemeDescription.FLAG_CURSORCOLOR, null, null, null, null, Theme.key_windowBackgroundWhiteBlackText));
+        themeDescriptions.add(new ThemeDescription(null, 0, null, null, null, updateBackground::run, Theme.key_windowBackgroundWhiteInputField));
+        themeDescriptions.add(new ThemeDescription(null, 0, null, null, null, updateBackground::run, Theme.key_windowBackgroundWhiteInputFieldActivated));
         return view;
     }
-    private TextView text(LinearLayout parent, String value, boolean action) {
-        TextView view = new TextView(parent.getContext());
-        view.setText(value); view.setTextSize(action ? 16 : 14);
-        view.setTextColor(getThemedColor(action ? Theme.key_windowBackgroundWhiteBlueText : Theme.key_windowBackgroundWhiteGrayText));
-        view.setGravity(Gravity.START | Gravity.CENTER_VERTICAL); view.setPadding(0, dp(10), 0, dp(10));
-        if (action) { view.setMinHeight(dp(48)); view.setBackground(Theme.createSelectorDrawable(getThemedColor(Theme.key_listSelector), 2)); }
+    private void header(LinearLayout parent, String value) {
+        HeaderCell view = new HeaderCell(parent.getContext(), 21, getResourceProvider());
+        view.setText(value);
+        view.setBackgroundColor(getThemedColor(Theme.key_windowBackgroundWhite));
         parent.addView(view, LayoutHelper.createLinear(-1, -2));
+        themeDescriptions.add(new ThemeDescription(view, ThemeDescription.FLAG_BACKGROUND, null, null, null, null, Theme.key_windowBackgroundWhite));
+        themeDescriptions.add(new ThemeDescription(view, 0, new Class[]{HeaderCell.class}, new String[]{"textView"}, null, null, null, Theme.key_windowBackgroundWhiteBlueHeader));
+    }
+    private TextInfoPrivacyCell info(LinearLayout parent, String value) {
+        TextInfoPrivacyCell view = new TextInfoPrivacyCell(parent.getContext(), getResourceProvider());
+        view.setText(value);
+        parent.addView(view, LayoutHelper.createLinear(-1, -2));
+        themeDescriptions.add(new ThemeDescription(view, 0, new Class[]{TextInfoPrivacyCell.class}, new String[]{"textView"}, null, null, null, Theme.key_windowBackgroundWhiteGrayText4));
         return view;
     }
+    private TextSettingsCell row(LinearLayout parent, String value, int colorKey, boolean divider) {
+        TextSettingsCell view = new TextSettingsCell(parent.getContext(), getResourceProvider());
+        view.setText(value, divider);
+        view.setTextColor(getThemedColor(colorKey));
+        selectable(view);
+        parent.addView(view, LayoutHelper.createLinear(-1, -2));
+        themeDescriptions.add(new ThemeDescription(view, 0, new Class[]{TextSettingsCell.class}, new String[]{"textView"}, null, null, null, colorKey));
+        themeDescriptions.add(new ThemeDescription(view, 0, new Class[]{TextSettingsCell.class}, new String[]{"valueTextView"}, null, null, null, Theme.key_windowBackgroundWhiteValueText));
+        return view;
+    }
+    private void selectable(View view) {
+        view.setBackground(Theme.createSelectorWithBackgroundDrawable(getThemedColor(Theme.key_windowBackgroundWhite), getThemedColor(Theme.key_listSelector)));
+        themeDescriptions.add(new ThemeDescription(view, ThemeDescription.FLAG_SELECTORWHITE, null, null, null, null, Theme.key_windowBackgroundWhite));
+        themeDescriptions.add(new ThemeDescription(view, ThemeDescription.FLAG_SELECTORWHITE, null, null, null, null, Theme.key_listSelector));
+    }
+    @Override public ArrayList<ThemeDescription> getThemeDescriptions() { return themeDescriptions; }
     private static String modeName(int value) { return value == GroupMessageSettings.FOLD ? "折叠" : value == GroupMessageSettings.HIDE ? "隐藏" : "关闭"; }
     private static int dp(float value) { return AndroidUtilities.dp(value); }
 }

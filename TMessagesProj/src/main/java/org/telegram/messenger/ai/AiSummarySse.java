@@ -188,15 +188,15 @@ final class AiSummarySse {
                 receivedCharacters += content.length() + reasoningCharacters;
                 listener.onContent(receivedCharacters, reasoningObserved);
             }
-            if (outputLimit) {
-                throw new Failure("模型输出达到长度上限，结果不完整。", null, true, reasoningObserved);
-            }
             if (!content.isEmpty()) {
                 String visible = text.intermediate();
                 if (!visible.isEmpty() && !visible.equals(lastVisible)) {
                     lastVisible = visible;
                     listener.onText(visible);
                 }
+            }
+            if (outputLimit) {
+                throw new Failure("模型输出达到长度上限，结果不完整。", null, true, reasoningObserved);
             }
             if ("stop".equals(finish)) finished = true;
             return false;

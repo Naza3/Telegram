@@ -59,8 +59,10 @@ The tests cover:
   completion markers, request/response budgets, same-endpoint concurrency,
   per-stage references, and cancellation before or after queued callbacks.
   Request telemetry covers safe character counts, actual response transport,
-  observed thinking, empty SSE events, and intermediate streaming without
-  exposing intermediate summary text. Output-limit failures remain failures.
+  observed thinking, empty SSE events, and filtered current-request drafts for
+  streamed source and merge requests. Drafts reset between requests and do not
+  represent validated results; local verification is recorded below.
+  Output-limit failures remain failures.
   Diagnostic failures cover selected JSON/plain-text explanations, credential
   redaction, HTML/payload suppression, and isolation from summary/question
   errors. Connection probes use the configured output budget; a length-limited
@@ -112,6 +114,47 @@ judges factual quality. See [fixture instructions](fixtures/README.md) for
 creating an unrun manual evaluation record, and
 [device validation](../../docs/mnn-device-validation.zh-CN.md) for the remaining
 phone/MNN checks.
+
+## Direct-summary drafts and input inspection (local regression passed)
+
+When streaming is enabled, each source and merge request exposes its own
+filtered answer text as an unfinished draft. Starting the next request clears
+the previous draft; labels identify the source segment or merge round and
+segment. Recognized thinking remains hidden, draft references are not clickable,
+and `length`, cancellation or a broken stream cannot publish success, save
+summary history or commit the summary cursor. Ordinary JSON response mode does
+not gain intermediate drafts and still waits for the complete response.
+
+Both modes also gain per-request input inspection on progress, success and error
+screens: choose a source or merge request to view its exact system/user text and
+Java character counts. The list remains in the current task's memory, excludes
+the authentication API key, and is not written to logs or persistent summary
+history. A new task, retry, leaving the panel or changing accounts clears it;
+late callbacks must not restore old contents. Full local regression passed:
+15 JVM classes, 62 HTTP cases and 1,308 other core assertions, plus 7 build-config
+checks and all 24 synthetic fixtures. Final Android Java compilation passed in
+59.7 seconds; hashes of all 2,834 tracked Java/XML source files were unchanged
+before and after compilation. New APK/CI is pending; phone checks S03–S04 and
+D03–D05 remain unrun.
+Earlier APK results below do not validate this revision.
+
+Direct summaries send source JSONL, not the readable Markdown export. Each
+source record includes `ref`, `part`, full time, sender name and `text`, with
+known `sender_id`, reply relations and other relevant metadata. Ordinary
+summaries contain no follow-up question history; merges use summaries produced
+within the current task.
+
+A synthetic input audit in `/workspace/build-logs/mnn-prompt-input-audit/`
+used 100 messages of 20 characters each without replies. It measured **13,627
+Java UTF-16 code units**: 2,000 original-text characters, 10,792 JSONL metadata
+and record-syntax characters, 259 system-rule characters and 576 user-rule/stage
+characters. These are text-length measurements, not bytes, model tokens or a
+fixed ratio for real conversations. The HTTP JSON wrapper is not included.
+The `2,000 × 4 = 8,000` output reserve is local budget bookkeeping, not extra
+text sent to the model or counted in the input display. MNN's current API accepts
+1–2,048 output tokens; Telegram's 64–8,192 settings range also serves other
+compatible providers and does not raise MNN's limit. A larger output limit does
+not guarantee that `length` failures disappear.
 
 ## Chat-style Markdown revision (APK build passed)
 

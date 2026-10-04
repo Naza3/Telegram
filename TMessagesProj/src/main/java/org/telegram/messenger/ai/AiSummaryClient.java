@@ -27,7 +27,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 
-/** Cancellable OpenAI-compatible completions with optional streaming of the final answer. */
+/** Cancellable OpenAI-compatible completions with optional per-request summary draft streaming. */
 public final class AiSummaryClient {
     public interface Callback {
         void onSuccess(String summary);
@@ -39,9 +39,24 @@ public final class AiSummaryClient {
         }
         /** Safe transport progress; contains no prompt, answer, reasoning text or credentials. */
         default void onRequestStatus(RequestStatus status) { }
+        /** Sensitive exact request text for this task's UI only; never log or persist it. */
+        default void onRequestInput(RequestInput input) { }
     }
 
     public enum RequestPhase { SENDING, RESPONSE, CONTENT }
+
+    /** Exact model input, without HTTP headers, credentials or transport options. */
+    public static final class RequestInput {
+        public final String systemText, userText;
+        /** Java character count, not a token count. */
+        public final int inputCharacters;
+
+        RequestInput(String systemText, String userText) {
+            this.systemText = systemText;
+            this.userText = userText;
+            this.inputCharacters = systemText.length() + userText.length();
+        }
+    }
 
     public static final class RequestStatus {
         public final RequestPhase phase;
@@ -243,7 +258,7 @@ public final class AiSummaryClient {
                             : AiSummaryPrompt.sourcePrompt(chunk, i + 1, chunks.size(), direction,
                                     config.inputCharacterBudget, config.maxOutputTokens);
                     String summary = complete(config, systemPrompt, prompt, request,
-                            chunks.size() == 1, callback);
+                            !questionTask || chunks.size() == 1, callback);
                     if (questionTask) SummaryQuestionPrompt.validateAnswer(summary, AiSummaryPrompt.sourceReferences(chunk));
                     else AiSummaryPrompt.validateReferences(summary, AiSummaryPrompt.sourceReferences(chunk));
                     summaries.add(summary);
@@ -271,7 +286,7 @@ public final class AiSummaryClient {
                                 : AiSummaryPrompt.mergePrompt(chunk, direction,
                                         config.inputCharacterBudget, config.maxOutputTokens);
                         String summary = complete(config, systemPrompt, prompt, request,
-                                mergeChunks.size() == 1, callback);
+                                !questionTask || mergeChunks.size() == 1, callback);
                         // The chunk contains only summaries validated against their own inputs.
                         if (questionTask) SummaryQuestionPrompt.validateAnswer(summary, SummaryQuestionPrompt.mergeReferences(chunk));
                         else AiSummaryPrompt.validateReferences(summary, AiSummaryPrompt.references(chunk));
@@ -384,11 +399,11 @@ public final class AiSummaryClient {
         });
     }
 
-    private String complete(AiSummarySettings.Config config, String systemPrompt, String prompt, int request, boolean finalRequest,
+    private String complete(AiSummarySettings.Config config, String systemPrompt, String prompt, int request, boolean showPartial,
                             Callback callback)
             throws IOException, JSONException, SummaryException, CancelledException {
         return complete(config, systemPrompt, prompt, config.maxOutputTokens,
-                readTimeoutMs, request, config.stream, callback, finalRequest).text;
+                readTimeoutMs, request, config.stream, callback, showPartial).text;
     }
 
     private Completion complete(AiSummarySettings.Config config, String systemPrompt, String prompt,
@@ -435,6 +450,10 @@ public final class AiSummaryClient {
             }
             current.setFixedLengthStreamingMode(encoded.length);
             monitor.phase(RequestPhase.SENDING);
+            if (callback != null) {
+                RequestInput input = new RequestInput(systemPrompt, prompt);
+                deliver(request, () -> callback.onRequestInput(input));
+            }
             try (OutputStream output = current.getOutputStream()) {
                 checkActive(request);
                 output.write(encoded);
@@ -456,6 +475,7 @@ public final class AiSummaryClient {
             if (stream && contentType != null && contentType.toLowerCase(Locale.US).startsWith("text/event-stream")) {
                 AiSummarySse.Result result;
                 final long[] lastPartial = {0};
+                final String[] latestPartial = {""}, deliveredPartial = {""};
                 try {
                     result = AiSummarySse.read(current.getInputStream(), MAX_RESPONSE_BYTES, () -> {
                         try {
@@ -465,9 +485,11 @@ public final class AiSummaryClient {
                         }
                     }, new AiSummarySse.Listener() {
                         @Override public void onText(String text) {
+                            latestPartial[0] = text; // Already filtered by the SSE reader; never use raw content here.
                             long now = System.nanoTime();
-                            if (showPartial && callback != null && now - lastPartial[0] >= 75_000_000L) {
+                            if (showPartial && callback != null && (lastPartial[0] == 0 || now - lastPartial[0] >= 75_000_000L)) {
                                 lastPartial[0] = now;
+                                deliveredPartial[0] = text;
                                 deliver(request, () -> callback.onPartial(text));
                             }
                         }
@@ -481,6 +503,13 @@ public final class AiSummaryClient {
                             : serverError(status, failure.serverDetail));
                 } catch (JSONException error) {
                     throw new SummaryException("流式响应格式不兼容。请关闭流式模式后重试。");
+                } finally {
+                    // Flush a throttled tail before success/error or the next request's SENDING.
+                    // Cancellation still suppresses delivery through the generation check.
+                    String tail = latestPartial[0];
+                    if (showPartial && callback != null && !tail.isEmpty() && !tail.equals(deliveredPartial[0])) {
+                        deliver(request, () -> callback.onPartial(tail));
+                    }
                 }
                 checkActive(request);
                 if (result.text.regionMatches(true, 0, "Error:", 0, 6)) {

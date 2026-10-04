@@ -156,6 +156,16 @@ public final class GroupSummarySheet {
         }
     }
 
+    private static final class RequestInputEntry {
+        final String stage;
+        final AiSummaryClient.RequestInput input;
+
+        RequestInputEntry(String stage, AiSummaryClient.RequestInput input) {
+            this.stage = stage;
+            this.input = input;
+        }
+    }
+
     private static final class ExportTask {
         final RangeRequest range;
         final SummaryChatExport.Format format;
@@ -214,6 +224,15 @@ public final class GroupSummarySheet {
     private TextView progressElapsed;
     private TextView requestStatus;
     private AiSummaryClient.RequestStatus latestRequestStatus;
+    private AiSummaryClient.Progress latestSummaryProgress;
+    private String streamingRequestStage;
+    private int streamingRequestGeneration;
+    private final ArrayList<RequestInputEntry> requestInputs = new ArrayList<>();
+    private TextView requestInputsButton;
+    private AlertDialog requestInputsDialog;
+    private LinearLayout requestInputsContent;
+    private int requestInputsViewerGeneration;
+    private boolean requestInputsListVisible;
     private long modelRequestStartedAt;
     private TextView partialAnswer;
     private TextView partialLabel;
@@ -345,7 +364,14 @@ public final class GroupSummarySheet {
     }
 
     private void cancelWork() {
+        cancelWork(false);
+    }
+
+    private void cancelWork(boolean keepRequestInputs) {
         operation++;
+        closeRequestInputs();
+        requestInputsButton = null;
+        if (!keepRequestInputs) requestInputs.clear();
         exportDocumentPending = false;
         exportDocumentTask = null;
         if (exportTask != null) {
@@ -380,6 +406,131 @@ public final class GroupSummarySheet {
         SummaryQuestionSheet previous = questionSheet;
         questionSheet = null;
         if (previous != null) previous.dismiss();
+    }
+
+    private void closeRequestInputs() {
+        AlertDialog previous = requestInputsDialog;
+        requestInputsDialog = null;
+        requestInputsListVisible = false;
+        if (requestInputsContent != null) requestInputsContent.removeAllViews();
+        requestInputsContent = null;
+        if (previous != null) previous.dismiss();
+    }
+
+    private void recordRequestInput(AiSummaryClient.RequestInput input) {
+        if (input == null) return;
+        RequestInputEntry entry = new RequestInputEntry(streamingRequestStage == null
+                ? currentRequestStage() : streamingRequestStage, input);
+        requestInputs.add(entry);
+        updateRequestInputsButton();
+        if (requestInputsDialog != null && requestInputsListVisible && requestInputsViewerActive()) {
+            addRequestInputRow(requestInputs.size() - 1);
+        }
+    }
+
+    private void addRequestInputsAction() {
+        requestInputsButton = addAction("", this::showRequestInputs);
+        updateRequestInputsButton();
+    }
+
+    private void updateRequestInputsButton() {
+        if (requestInputsButton == null) return;
+        requestInputsButton.setText("查看模型输入（" + requestInputs.size() + " 次请求）");
+        requestInputsButton.setEnabled(!requestInputs.isEmpty());
+        requestInputsButton.setAlpha(requestInputs.isEmpty() ? 0.5f : 1f);
+    }
+
+    private boolean requestInputsViewerActive() {
+        return requestInputsDialog != null && requestInputsDialog.isShowing()
+                && active(requestInputsViewerGeneration);
+    }
+
+    private void showRequestInputs() {
+        if (!active(operation) || requestInputs.isEmpty()) return;
+        if (isSummaryAccessRevoked()) { onAccessRevoked(); return; }
+        closeRequestInputs();
+        requestInputsViewerGeneration = operation;
+        requestInputsContent = new LinearLayout(context);
+        requestInputsContent.setOrientation(LinearLayout.VERTICAL);
+        requestInputsContent.setPadding(dp(24), 0, dp(24), dp(8));
+        AlertDialog viewer = new AlertDialog.Builder(context, resourcesProvider)
+                .setTitle("查看请求输入")
+                .setView(requestInputsContent)
+                .setNegativeButton("关闭", (ignored, which) -> closeRequestInputs())
+                .create();
+        requestInputsDialog = viewer;
+        viewer.setOnDismissListener(ignored -> {
+            if (requestInputsDialog == viewer) closeRequestInputs();
+        });
+        renderRequestInputList();
+        try {
+            // Keep the active summary dialog and network request alive underneath this viewer.
+            viewer.show();
+        } catch (RuntimeException unavailableWindow) {
+            closeRequestInputs();
+        }
+    }
+
+    private void renderRequestInputList() {
+        if (requestInputsContent == null) return;
+        requestInputsListVisible = true;
+        requestInputsContent.removeAllViews();
+        addText(requestInputsContent, "仅保留本次任务的请求输入。重新总结、重试或关闭面板后清除，不写入总结历史。", false);
+        addText(requestInputsContent, "以下是请求 messages 中的 system 和 user 原文；字符数不是 token 数，输出预留不属于输入文本。", false);
+        for (int i = 0; i < requestInputs.size(); i++) addRequestInputRow(i);
+        scrollRequestInputsToTop();
+    }
+
+    private void addRequestInputRow(int index) {
+        RequestInputEntry entry = requestInputs.get(index);
+        addAction(requestInputsContent, "第 " + (index + 1) + " 次 · " + entry.stage + " · "
+                + entry.input.inputCharacters + " 字符", () -> showRequestInput(index));
+    }
+
+    private void showRequestInput(int index) {
+        if (!requestInputsViewerActive() || index < 0 || index >= requestInputs.size()) return;
+        RequestInputEntry entry = requestInputs.get(index);
+        requestInputsListVisible = false;
+        requestInputsContent.removeAllViews();
+        addAction(requestInputsContent, "返回请求列表", () -> {
+            if (requestInputsViewerActive()) renderRequestInputList();
+        });
+        addText(requestInputsContent, "第 " + (index + 1) + " 次请求 · " + entry.stage, true);
+        addText(requestInputsContent, "请求原文完整显示，长按可选择复制。", false);
+        addText(requestInputsContent, "system · 系统规则（" + entry.input.systemText.length() + " 字符）", true);
+        addRequestInputText(entry.input.systemText);
+        addText(requestInputsContent, "user · 方向及消息／合并内容（" + entry.input.userText.length() + " 字符）", true);
+        addRequestInputText(entry.input.userText);
+        addAction(requestInputsContent, "返回请求列表", () -> {
+            if (requestInputsViewerActive()) renderRequestInputList();
+        });
+        scrollRequestInputsToTop();
+    }
+
+    private void scrollRequestInputsToTop() {
+        final LinearLayout body = requestInputsContent;
+        if (body == null) return;
+        body.post(() -> {
+            if (requestInputsContent != body || !requestInputsViewerActive()) return;
+            ViewParent parent = body.getParent();
+            while (parent instanceof View) {
+                if (parent instanceof ScrollView) {
+                    ((ScrollView) parent).scrollTo(0, 0);
+                    break;
+                }
+                parent = parent.getParent();
+            }
+        });
+    }
+
+    private void addRequestInputText(String text) {
+        TextView view = addText(requestInputsContent, text, false);
+        view.setTextColor(color(Theme.key_dialogTextBlack));
+        view.setTypeface(Typeface.MONOSPACE);
+        view.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 13);
+        view.setTextIsSelectable(true);
+        view.setLinksClickable(false);
+        view.setSaveEnabled(false);
     }
 
     private boolean isSummaryAccessRevoked() {
@@ -629,6 +780,7 @@ public final class GroupSummarySheet {
     }
 
     private void stopProgressUpdates() {
+        streamingRequestGeneration++;
         if (progressTicker != null) {
             AndroidUtilities.cancelRunOnUIThread(progressTicker);
             progressTicker = null;
@@ -641,6 +793,8 @@ public final class GroupSummarySheet {
         progressElapsed = null;
         requestStatus = null;
         latestRequestStatus = null;
+        latestSummaryProgress = null;
+        streamingRequestStage = null;
         partialAnswer = null;
         partialLabel = null;
     }
@@ -662,6 +816,7 @@ public final class GroupSummarySheet {
     }
 
     private void updateSummaryProgress(AiSummaryClient.Progress progress) {
+        latestSummaryProgress = progress;
         if (progressStatus == null) return;
         switch (progress.stage) {
             case SOURCE:
@@ -676,6 +831,39 @@ public final class GroupSummarySheet {
             case VALIDATING:
                 progressStatus.setText("正在校验原文引用…");
                 break;
+        }
+    }
+
+    private String currentRequestStage() {
+        AiSummaryClient.Progress progress = latestSummaryProgress;
+        if (progress == null) return "当前模型请求";
+        int total = Math.max(1, progress.total);
+        int current = Math.max(1, Math.min(total, progress.completed + 1));
+        if (progress.stage == AiSummaryClient.Stage.SOURCE) {
+            return "总结第 " + current + " / " + total + " 段";
+        }
+        if (progress.stage == AiSummaryClient.Stage.MERGE) {
+            return "第 " + progress.mergeRound + " 轮合并 · 第 " + current + " / " + total + " 段";
+        }
+        return "最终引用校验阶段";
+    }
+
+    private void beginStreamingRequest() {
+        streamingRequestGeneration++;
+        streamingRequestStage = currentRequestStage();
+        streamingDraft = null;
+        if (partialUpdate != null) {
+            AndroidUtilities.cancelRunOnUIThread(partialUpdate);
+            partialUpdate = null;
+        }
+        lastPartialUpdateAt = 0;
+        if (partialAnswer != null) {
+            partialAnswer.setText("");
+            partialAnswer.setVisibility(View.GONE);
+        }
+        if (partialLabel != null) {
+            partialLabel.setText(streamingRequestStage + " · 生成中，尚未完成或校验");
+            partialLabel.setVisibility(View.GONE);
         }
     }
 
@@ -695,14 +883,22 @@ public final class GroupSummarySheet {
     private void updatePartialAnswer(String text, int generation) {
         streamingDraft = text;
         if (partialUpdate != null) return;
-        partialUpdate = () -> {
-            partialUpdate = null;
-            if (!active(generation) || partialAnswer == null) return;
-            lastPartialUpdateAt = SystemClock.elapsedRealtime();
-            partialLabel.setVisibility(View.VISIBLE);
-            partialAnswer.setVisibility(View.VISIBLE);
-            // A partial response has no spans, links or source navigation until final validation.
-            partialAnswer.setText(streamingDraft);
+        final int requestGeneration = streamingRequestGeneration;
+        partialUpdate = new Runnable() {
+            @Override public void run() {
+                // A cancelled update must neither render nor detach a newer request's update.
+                if (partialUpdate != this) return;
+                partialUpdate = null;
+                if (requestGeneration != streamingRequestGeneration || !active(generation)
+                        || partialAnswer == null || partialLabel == null) return;
+                lastPartialUpdateAt = SystemClock.elapsedRealtime();
+                boolean hasText = streamingDraft != null && !streamingDraft.isEmpty();
+                partialLabel.setVisibility(hasText ? View.VISIBLE : View.GONE);
+                partialAnswer.setVisibility(hasText ? View.VISIBLE : View.GONE);
+                // Every request replaces its own accumulated plain text; intermediate references
+                // remain non-interactive until the complete summary passes final validation.
+                partialAnswer.setText(streamingDraft == null ? "" : streamingDraft);
+            }
         };
         AndroidUtilities.runOnUIThread(partialUpdate,
                 Math.max(0L, 150 - (SystemClock.elapsedRealtime() - lastPartialUpdateAt)));
@@ -732,6 +928,7 @@ public final class GroupSummarySheet {
     }
 
     private void clearContent() {
+        requestInputsButton = null;
         historySaveStatus = null;
         historySaveRetry = null;
         requestStatus = null;
@@ -1868,6 +2065,7 @@ public final class GroupSummarySheet {
         addText("已读取 " + sourceMessages.size() + " 条文字消息。", false);
         addText(coverageNote, false);
         requestStatus = addText("等待模型接口响应…", false);
+        addRequestInputsAction();
         addText("手机上的本地模型可能需要一些时间。保持 MNN Chat API 服务运行。", false);
         addText("请保持 Telegram 在前台；关闭面板或离开页面会取消总结。", false);
         partialLabel = addText("生成中，尚未完成或校验", true);
@@ -1886,8 +2084,12 @@ public final class GroupSummarySheet {
             @Override public void onPartial(String text) {
                 if (active(generation)) updatePartialAnswer(text, generation);
             }
+            @Override public void onRequestInput(AiSummaryClient.RequestInput input) {
+                if (active(generation)) recordRequestInput(input);
+            }
             @Override public void onRequestStatus(AiSummaryClient.RequestStatus status) {
                 if (active(generation)) {
+                    if (status.phase == AiSummaryClient.RequestPhase.SENDING) beginStreamingRequest();
                     latestRequestStatus = status;
                     modelRequestStartedAt = SystemClock.elapsedRealtime() - status.elapsedMs;
                     updateRequestStatusText();
@@ -1937,6 +2139,7 @@ public final class GroupSummarySheet {
         addText(advance ? "完整结果和覆盖记录确认后才更新增量进度。摘要正文及原文不会写入该进度记录。"
                 : "只保存本批完成范围，通用增量进度保持不变。摘要正文及原文不会写入该进度记录。", false);
         addText("返回时会重新读取进度；如果记录已经提交，返回不会撤销该进度。", false);
+        if (!requestInputs.isEmpty()) addRequestInputsAction();
         addAction("返回范围选择", this::showSelection);
         Utilities.globalQueue.postRunnable(() -> {
             if (!sameAccountOwner()) {
@@ -2068,6 +2271,7 @@ public final class GroupSummarySheet {
 
     private void showError(String message) {
         final String unfinished = streamingDraft;
+        final String unfinishedStage = streamingRequestStage;
         final boolean allowPlainRetry = summaryInferenceStarted && summaryConfig != null && summaryConfig.stream;
         final AiSummarySettings.Config failedConfig = summaryConfig;
         final PromptOptions failedPrompt = summaryPrompt;
@@ -2078,7 +2282,7 @@ public final class GroupSummarySheet {
                     originalRange.replayMessages == null ? summaryHistory.messages : originalRange.replayMessages,
                     originalRange.filters)
                 : originalRange;
-        cancelWork();
+        cancelWork(true);
         clearContent();
         addText("暂时无法完成总结", true);
         addText(message, false);
@@ -2086,10 +2290,12 @@ public final class GroupSummarySheet {
             addText(coverageNote, false);
         }
         if (unfinished != null && !unfinished.isEmpty()) {
-            addText("以下内容未完成，尚未通过引用校验", true);
+            addText((unfinishedStage == null ? "当前模型请求" : unfinishedStage)
+                    + " · 以下内容未完成，尚未通过最终引用校验", true);
             TextView partial = addText(unfinished, false);
             partial.setLinksClickable(false);
         }
+        if (!requestInputs.isEmpty()) addRequestInputsAction();
         addAction("重试", () -> {
             if (failedRange == null) startSummary();
             else startSummary(failedRange);
@@ -2112,6 +2318,7 @@ public final class GroupSummarySheet {
         addText((viewingCachedResult ? "历史结果" : summaryHistory != null && !summaryHistory.complete ? "部分覆盖" : "已生成") + " · 生成耗时 " + Math.max(0L,
                 (SystemClock.elapsedRealtime() - summaryStartedAt) / 1000) + " 秒", false);
         if (completionNotice != null) addText(completionNotice, true);
+        if (!requestInputs.isEmpty()) addRequestInputsAction();
         if (!viewingCachedResult && historySaveNotice != null) {
             historySaveStatus = addText(historySaveNotice, false);
             historySaveRetry = addAction("重试保存到总结历史", () -> {

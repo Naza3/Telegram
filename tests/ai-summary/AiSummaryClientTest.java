@@ -57,11 +57,14 @@ public final class AiSummaryClientTest {
         final List<AiSummaryClient.Progress> progress = new CopyOnWriteArrayList<>();
         final List<String> partials = new CopyOnWriteArrayList<>();
         final List<AiSummaryClient.RequestStatus> statuses = new CopyOnWriteArrayList<>();
-        public void onSuccess(String value) { summary = value; calls++; }
-        public void onError(String value) { error = value; calls++; }
+        final List<AiSummaryClient.RequestInput> inputs = new CopyOnWriteArrayList<>();
+        final List<String> events = new CopyOnWriteArrayList<>();
+        public void onSuccess(String value) { events.add("SUCCESS"); summary = value; calls++; }
+        public void onError(String value) { events.add("ERROR"); error = value; calls++; }
         public void onProgress(AiSummaryClient.Progress value) { progress.add(value); }
-        public void onPartial(String value) { partials.add(value); }
-        public void onRequestStatus(AiSummaryClient.RequestStatus value) { statuses.add(value); }
+        public void onPartial(String value) { events.add("PARTIAL:" + value); partials.add(value); }
+        public void onRequestStatus(AiSummaryClient.RequestStatus value) { events.add(value.phase.name()); statuses.add(value); }
+        public void onRequestInput(AiSummaryClient.RequestInput value) { events.add("INPUT"); inputs.add(value); }
     }
     private static final class Diagnostic implements AiSummaryClient.DiagnosticCallback {
         volatile AiSummaryClient.DiagnosticResult result;
@@ -202,10 +205,11 @@ public final class AiSummaryClientTest {
             test("merge citations cannot reintroduce references absent from partials", AiSummaryClientTest::mergeReferenceMembership);
             test("caller list mutation cannot alter an in-flight source snapshot", AiSummaryClientTest::immutableSourceSnapshot);
             test("SSE decodes fragmented UTF-8 and hides split thinking blocks", AiSummaryClientTest::streamThinking);
-            test("every request streams for observability but only the final merge displays text", AiSummaryClientTest::streamFinalOnly);
+            test("every source and merge request displays its own safe draft and exact input", AiSummaryClientTest::streamEveryStage);
             test("ordinary request reports sending, response and safe content counters", AiSummaryClientTest::ordinaryRequestStatus);
             test("streaming status distinguishes headers and hidden reasoning from an answer", AiSummaryClientTest::streamRequestStatus);
             test("ordinary and streaming length errors report the actual cap and observed reasoning", AiSummaryClientTest::observedOutputLimits);
+            test("stream errors preserve the final safe draft before failing without retry", AiSummaryClientTest::streamFailureTails);
             test("streaming failures never produce final success", AiSummaryClientTest::streamFailures);
             test("ordinary mode remains available when service ignores stream", () -> {
                 nextReply.set(new Reply(200, completion("【话题】结果 [m1]")));
@@ -219,6 +223,7 @@ public final class AiSummaryClientTest {
                 check(result.result != null && !lastBody.get().getBoolean("stream"), "diagnostic should not depend on streaming");
             });
             test("cancelling a live SSE suppresses later partials and final callback", AiSummaryClientTest::cancelLiveStream);
+            test("cancellation suppresses a queued sensitive request input", AiSummaryClientTest::cancelQueuedRequestInput);
             test("configured budget reaches every source and merge request", AiSummaryClientTest::configuredBudget);
             test("impossible input/output budget fails before sending messages", () -> {
                 requestHistory.clear();
@@ -235,6 +240,7 @@ public final class AiSummaryClientTest {
             test("only the exact insufficient-evidence sentinel may omit citations", AiSummaryClientTest::questionInsufficientEvidence);
             test("question limits fail before HTTP without dropping history", AiSummaryClientTest::questionLimits);
             test("questions stream final answers and still hide reasoning", AiSummaryClientTest::questionStreaming);
+            test("questions keep intermediate extraction drafts hidden", AiSummaryClientTest::questionIntermediateDrafts);
             test("cancelled questions do not add turns or deliver stale answers", AiSummaryClientTest::cancelQuestion);
             System.out.println("AiSummaryClientTest: " + passed + " passed");
         } catch (Throwable error) {
@@ -693,6 +699,7 @@ public final class AiSummaryClientTest {
         client.summarize(streamConfig(), MESSAGES, result); await(result); client.cancel();
         check("【话题】中文😀 [m1]".equals(result.summary), "split UTF-8/thinking corrupt final response: " + result.error);
         check(!result.partials.isEmpty(), "no partial text was delivered");
+        check(result.summary.equals(result.partials.get(result.partials.size() - 1)), "throttled final text was lost");
         for (String partial : result.partials) {
             check(!partial.contains("NEVER_SHOW") && !partial.contains("<th") && !partial.contains("</th"), "reasoning fragment leaked");
         }
@@ -718,6 +725,10 @@ public final class AiSummaryClientTest {
             check(result.statuses.get(1).phase == AiSummaryClient.RequestPhase.RESPONSE
                     && result.statuses.get(2).phase == AiSummaryClient.RequestPhase.CONTENT, "ordinary status order changed");
             JSONObject body = lastBody.get();
+            assertRequestInputs(result, List.of(body));
+            check(!result.inputs.get(0).systemText.contains("STATUS_CREDENTIAL_SECRET")
+                    && !result.inputs.get(0).userText.contains("STATUS_CREDENTIAL_SECRET"), "input callback included credentials");
+            check(result.partials.isEmpty(), "ordinary mode unexpectedly produced a draft");
             int input = body.getJSONArray("messages").getJSONObject(0).getString("content").length()
                     + body.getJSONArray("messages").getJSONObject(1).getString("content").length();
             long elapsed = -1;
@@ -810,23 +821,55 @@ public final class AiSummaryClientTest {
         }
     }
 
-    private static void streamFinalOnly() throws Exception {
-        List<SummaryMessage> messages = List.of(new SummaryMessage(-100, 1, 1_700_000_000, "甲", "x".repeat(5000)));
+    private static void streamEveryStage() throws Exception {
+        List<SummaryMessage> messages = new ArrayList<>();
+        for (int i = 1; i <= 10; i++) {
+            messages.add(new SummaryMessage(-100, i, 1_700_000_000 + i, "甲", "项目进展".repeat(800)));
+        }
+        List<String> answers = new CopyOnWriteArrayList<>();
+        AtomicInteger sources = new AtomicInteger(), secondMergeRound = new AtomicInteger();
         requestHistory.clear();
-        replyGenerator.set(body -> sse(delta(body.getJSONArray("messages").getJSONObject(1).getString("content")
-                .contains("摘要数据（JSONL）：") ? "【话题】最终合并 [m1]" : "【话题】中间摘要不可显示 [m1]")
-                + finish("stop") + "data: [DONE]\n\n"));
+        replyGenerator.set(body -> {
+            String prompt = body.getJSONArray("messages").getJSONObject(1).getString("content");
+            boolean source = prompt.contains("消息数据（JSONL）：\n");
+            String data = dataPart(prompt, source);
+            if (source) sources.incrementAndGet();
+            else if (data.contains("MERGED_STAGE")) secondMergeRound.incrementAndGet();
+            int ref = (source ? AiSummaryPrompt.sourceReferences(data) : AiSummaryPrompt.references(data)).iterator().next();
+            String start = "【话题】" + (source ? "SOURCE_STAGE_" : "MERGED_STAGE_") + (answers.size() + 1);
+            String tail = "进展".repeat(450) + " [m" + ref + "]";
+            answers.add(start + tail);
+            return new Reply(200, delta("<think>STAGE_THOUGHT_SECRET</think>" + start) + delta(tail)
+                    + finish("stop") + "data: [DONE]\n\n", false, "text/event-stream", 0);
+        });
         AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
         try {
             client.summarize(streamConfig(), messages, result); await(result);
             check(result.summary != null, "final streaming merge failed: " + result.error);
-            check(requestHistory.size() > 2, "fixture needs multiple source requests");
+            check(sources.get() >= 8 && secondMergeRound.get() >= 1, "fixture must include multiple source and merge rounds");
+            check(result.calls == 1 && answers.get(answers.size() - 1).equals(result.summary), "draft became a final result");
+            assertRequestInputs(result, requestHistory);
             for (int i = 0; i < requestHistory.size(); i++) {
                 check(requestHistory.get(i).getBoolean("stream"), "intermediate request lost streaming observability");
+                String user = result.inputs.get(i).userText;
+                if (i < sources.get()) check(!user.contains("SOURCE_STAGE_"), "previous draft was added to source input");
+                else check(!user.contains("项目进展"), "merge input unexpectedly repeated source history");
             }
-            for (String partial : result.partials) check(!partial.contains("中间摘要"), "intermediate draft displayed as final answer");
-            check(result.statuses.stream().filter(status -> status.phase == AiSummaryClient.RequestPhase.SENDING).count()
-                    == requestHistory.size(), "request status missing for an intermediate stage");
+            int requestIndex = -1;
+            String lastPartial = null;
+            for (String event : result.events) {
+                if (event.equals("SENDING")) {
+                    if (requestIndex >= 0) check(answers.get(requestIndex).equals(lastPartial), "request boundary lost a draft tail");
+                    requestIndex++;
+                    lastPartial = null;
+                } else if (event.startsWith("PARTIAL:")) {
+                    lastPartial = event.substring("PARTIAL:".length());
+                    check(requestIndex >= 0 && answers.get(requestIndex).startsWith(lastPartial),
+                            "partial crossed a request boundary or exposed thinking");
+                }
+            }
+            check(requestIndex == answers.size() - 1 && answers.get(requestIndex).equals(lastPartial),
+                    "final request's throttled tail was not displayed");
             boolean source = false, merge = false, validating = false;
             for (AiSummaryClient.Progress progress : result.progress) {
                 check(progress.completed >= 0 && progress.completed <= progress.total && progress.elapsedMs >= 0, "invalid progress counts");
@@ -839,6 +882,67 @@ public final class AiSummaryClientTest {
             check(source && merge && validating, "stage progress missing");
         } finally {
             client.cancel(); replyGenerator.set(null);
+        }
+    }
+
+    private static void assertRequestInputs(Result result, List<JSONObject> requests) {
+        check(result.inputs.size() == requests.size(), "request input callback missing or duplicated");
+        int sending = 0;
+        for (int i = 0; i < result.events.size(); i++) {
+            if (result.events.get(i).equals("SENDING")) {
+                sending++;
+                check(i + 1 < result.events.size() && result.events.get(i + 1).equals("INPUT"),
+                        "exact input did not immediately follow the new request boundary");
+            }
+        }
+        check(sending == requests.size(), "request must have exactly one SENDING before its input and drafts");
+        List<AiSummaryClient.RequestStatus> sent = new ArrayList<>();
+        for (AiSummaryClient.RequestStatus status : result.statuses) {
+            if (status.phase == AiSummaryClient.RequestPhase.SENDING) sent.add(status);
+        }
+        for (int i = 0; i < requests.size(); i++) {
+            org.json.JSONArray messages = requests.get(i).getJSONArray("messages");
+            AiSummaryClient.RequestInput input = result.inputs.get(i);
+            check(messages.length() == 2 && "system".equals(messages.getJSONObject(0).getString("role"))
+                    && "user".equals(messages.getJSONObject(1).getString("role")), "unexpected extra request history");
+            check(input.systemText.equals(messages.getJSONObject(0).getString("content"))
+                    && input.userText.equals(messages.getJSONObject(1).getString("content")),
+                    "displayed input differs from the exact transmitted messages");
+            check(input.inputCharacters == input.systemText.length() + input.userText.length()
+                    && input.inputCharacters == sent.get(i).inputCharacters, "displayed input count differs from transport");
+        }
+    }
+
+    private static void streamFailureTails() throws Exception {
+        String safe = "【话题】公开正文和末尾 [m1]";
+        String secret = "TAIL_THOUGHT_SECRET";
+        String sameEvent = "data: " + new JSONObject().put("choices", new org.json.JSONArray().put(
+                new JSONObject().put("delta", new JSONObject().put("content", "和末尾 [m1]"))
+                        .put("finish_reason", "length"))) + "\n\n";
+        String[] streams = {
+                delta("<think>" + secret + "</think>【话题】公开正文") + sameEvent,
+                delta("【话题】公开正文") + delta("和末尾 [m1]") + finish("length"),
+                delta("【话题】公开正文") + delta("和末尾 [m1]"), // EOF before a completion marker.
+                delta("<think mode=analysis>" + secret) + finish("length"),
+                delta("unmarked " + secret + " [m1]") + finish("length")
+        };
+        for (int i = 0; i < streams.length; i++) {
+            requestHistory.clear();
+            nextReply.set(new Reply(200, streams[i], false, "text/event-stream", 0));
+            AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
+            try {
+                client.summarize(streamConfig(), MESSAGES, result); await(result);
+                check(result.summary == null && result.error != null && result.calls == 1 && requestHistory.size() == 1,
+                        "incomplete stream succeeded or retried automatically");
+                check(result.events.get(result.events.size() - 1).equals("ERROR"), "draft arrived after the terminal error");
+                if (i < 3) {
+                    check(!result.partials.isEmpty() && safe.equals(result.partials.get(result.partials.size() - 1)),
+                            "safe final delta was swallowed by length handling or throttling");
+                } else check(result.partials.isEmpty(), "reasoning or unmarked preamble became a visible draft");
+                if (i != 2) check(result.error.contains("512 tokens"), "length failure lost the configured cap");
+                for (String partial : result.partials) check(!partial.contains(secret), "thinking leaked on stream failure");
+                check(!result.error.contains(secret), "thinking leaked into the error");
+            } finally { client.cancel(); }
         }
     }
 
@@ -898,14 +1002,34 @@ public final class AiSummaryClientTest {
                     "cancel blocked the caller while the server kept streaming open");
             releaseStream.countDown();
             int partialCount = stale.partials.size(), progressCount = stale.progress.size(), statusCount = stale.statuses.size();
+            int inputCount = stale.inputs.size();
             nextReply.set(new Reply(200, completion("新的普通请求 [m1]")));
             Result fresh = afterCancellation(client);
             check(stale.calls == 0 && stale.partials.size() == partialCount && stale.progress.size() == progressCount
-                    && stale.statuses.size() == statusCount,
+                    && stale.statuses.size() == statusCount && stale.inputs.size() == inputCount,
                     "cancelled stream delivered a later callback");
             check(fresh.summary != null, "client did not recover after stream cancellation");
         } finally {
             client.cancel(); releaseStream.countDown(); server.removeContext(path);
+        }
+    }
+
+    private static void cancelQueuedRequestInput() throws Exception {
+        requestStarted = new CountDownLatch(1); releaseRequest = new CountDownLatch(1);
+        nextReply.set(new Reply(200, completion("取消的请求 [m1]"), true));
+        AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
+        try {
+            client.summarize(config("local", ""), MESSAGES, result);
+            check(requestStarted.await(5, TimeUnit.SECONDS), "request never reached the server");
+            // Both SENDING and the sensitive input are queued, but the UI has not consumed them.
+            client.cancel();
+            releaseRequest.countDown(); AndroidUtilities.drain();
+            nextReply.set(new Reply(200, completion("取消之后的新请求 [m1]")));
+            check(afterCancellation(client).summary != null, "cancelled worker did not release its endpoint");
+            check(result.inputs.isEmpty() && result.statuses.isEmpty() && result.partials.isEmpty() && result.calls == 0,
+                    "cancelled request exposed a queued input or result");
+        } finally {
+            client.cancel(); releaseRequest.countDown(); requestStarted = null; releaseRequest = null;
         }
     }
 
@@ -1095,6 +1219,26 @@ public final class AiSummaryClientTest {
         client.ask(streamConfig(), MESSAGES, PromptOptions.DEFAULT, "几点？", List.of(), result); await(result); client.cancel();
         check("【回答】明天十点 [m1]".equals(result.summary) && !result.partials.isEmpty(), "question streaming failed");
         for (String partial : result.partials) check(!partial.contains("HIDDEN_QUESTION"), "question thinking leaked");
+    }
+
+    private static void questionIntermediateDrafts() throws Exception {
+        List<SummaryMessage> messages = List.of(new SummaryMessage(-100, 1, 1_700_000_000, "甲", "x".repeat(5000)));
+        requestHistory.clear();
+        replyGenerator.set(body -> {
+            String prompt = body.getJSONArray("messages").getJSONObject(1).getString("content");
+            String answer = prompt.contains("原始消息（JSONL 数据）：\n")
+                    ? "【回答】QUESTION_INTERMEDIATE [m1]" : "【回答】QUESTION_FINAL [m1]";
+            return new Reply(200, delta(answer) + finish("stop") + "data: [DONE]\n\n", false, "text/event-stream", 0);
+        });
+        AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
+        try {
+            client.ask(streamConfig(), messages, PromptOptions.DEFAULT, "结论是什么？", List.of(), result); await(result);
+            check("【回答】QUESTION_FINAL [m1]".equals(result.summary) && requestHistory.size() > 2,
+                    "question fixture did not reach its final merge");
+            check(!result.partials.isEmpty(), "final question did not stream");
+            for (String partial : result.partials) check(!partial.contains("QUESTION_INTERMEDIATE"), "question extraction draft leaked");
+            assertRequestInputs(result, requestHistory);
+        } finally { client.cancel(); replyGenerator.set(null); }
     }
 
     private static void cancelQuestion() throws Exception {

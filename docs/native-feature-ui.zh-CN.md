@@ -21,6 +21,14 @@
 
 ## 验证与手机验收
 
-本地 Android Java 编译通过（69.55 秒），2783 份 Java／XML 源文件在编译前后哈希一致。既有 AI 核心、控制器（36 项／332 断言）、前台服务（23 项／237 断言）、构建配置与 24 份合成夹具检查通过。群消息匹配 24、设置 66、真实 TL 资格 48、异步边界 22 断言，以及存储 24 项／245 断言通过。编译与回归通过不等于完成真机视觉验收；GitHub Actions 构建结果待交付后补充。
+本地 Android Java 编译通过（69.55 秒），2783 份 Java／XML 源文件在编译前后哈希一致。既有 AI 核心、控制器（36 项／332 断言）、前台服务（23 项／237 断言）、构建配置与 24 份合成夹具检查通过。群消息匹配 24、设置 66、真实 TL 资格 48、异步边界 22 断言，以及存储 24 项／245 断言通过。编译与回归通过不等于完成真机视觉验收。
 
 手机重点检查：浅色、深色与自定义主题；较大字体与长群名；输入时弹出键盘；长提示词或 UID 名单保存失败后的提示位置；主题切换时输入内容与流式正文保留；后台任务恢复；发送仍需编辑确认；折叠消息的展开及隐藏恢复。
+
+## APK 交付
+
+- 源码 [`326265e`](https://github.com/Naza3/Telegram/commit/326265ecbbab4e61b49f57b2ea64cae7b66b7592) 已推送至 `feature/mnn-group-summary`。
+- [第 20 次 Actions 构建](https://github.com/Naza3/Telegram/actions/runs/37207894491) 成功，Gradle 构建耗时 9 分 14 秒。云端回归、原生 TL 发布实体、ARM64 架构、16 KB 对齐及签名校验均通过。
+- [下载 APK 与校验文件](https://github.com/Naza3/Telegram/actions/runs/37207894491/artifacts/11305701950)：产物 `Telegram-MNN-arm64-debug-20`，ZIP 62765646 字节，2026-10-18 14:16:18 UTC 到期。登录 GitHub 下载 ZIP，解压后安装 APK。
+- 签名与第 19 次 Actions 包一致，证书 SHA-256 为 `c8715ba0c50510b9c1cc4d52b0fd2b0aed82dd55675f89c4f48d68978b7df313`。仍使用仓库 Actions Secrets 中的 Telegram API 配置。
+- 未连接真机进行视觉或触摸验收；上述手机检查项待安装后确认。

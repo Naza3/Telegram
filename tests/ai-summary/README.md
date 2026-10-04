@@ -113,7 +113,50 @@ creating an unrun manual evaluation record, and
 [device validation](../../docs/mnn-device-validation.zh-CN.md) for the remaining
 phone/MNN checks.
 
-## Current revision evidence and limits
+## Export revision: regression and APK build passed
+
+The new chat-text export is implemented; its local regression and final
+frozen-source Android compilation passed. The full APK/CI also passed;
+real-device testing has not run. Its scope is the existing RECENT/TODAY/SINCE/UNREAD loading
+and filtering flow, with no model calls, read-marker updates, summary archive
+writes, or summary cursor commits. Markdown is the first format offered; users
+explicitly choose it or the full structured JSON format. Both include the current
+prompt direction separately from original messages.
+
+The export checks cover compound dialog/message identities, reply targets
+inside versus outside the final filtered set, per-message topic identity,
+Telegram-sourced quote excerpts, Unicode/escaping, coverage notes, cancellation,
+and the 8 MiB UTF-8 byte limit without truncation. Missing reply targets must not
+trigger extra history requests or invented explanations. The existing 45-second
+history page timeout remains; no new file-write timeout is promised.
+
+`SummaryChatExport` is a pure formatter with no network or Android dependencies;
+`SummaryChatExportTest` passed 97 assertions in this revision. JSON schema version 1
+uses string IDs, `dialog_id:message_id` compound keys, `reply_to.in_export`, and
+per-message `topic_id`/`quote_text`. Unknown reply-dialog IDs must not resolve to
+same-numbered messages in the current chat; quote excerpts are not recovered
+parent-message bodies. The formatter also rejects more than 10,000 messages;
+this bound does not expand the history loader's existing per-range limits.
+
+The integrated local run on 2026-10-04 passed 15 JVM classes: 59 HTTP cases and
+1,237 other core assertions, including the 97 export assertions,
+`SummaryHistoryRangeTest` with 17 groups/125 assertions, and
+`SummaryHistoryLoaderTest` with 14 groups/92 assertions. All 24 synthetic fixtures
+and 7 build-configuration checks passed. Final Android Java compilation passed
+in 1 minute, with all 2,747 Java/XML files unchanged before and after compilation.
+Source [c78b111242985bddf2551e2f1fd9ec42588837e0](https://github.com/Naza3/Telegram/commit/c78b111242985bddf2551e2f1fd9ec42588837e0)
+has been pushed; [APK CI 37163785988](https://github.com/Naza3/Telegram/actions/runs/37163785988)
+passed in 13 minutes 44 seconds, including signature, 16 KB alignment, ARM64 ABI
+and artifact upload checks. [Download APK and checksum](https://github.com/Naza3/Telegram/actions/runs/37163785988/artifacts/11288507718).
+The artifact expires at 2026-10-18 00:17:57 UTC. No device-test success is claimed.
+
+Android SAF save results, FileProvider grants and cache cleanup, external file
+providers, share-sheet return paths, account changes and dismissed windows need
+the new X01–X14 cases in the [device checklist](../../docs/mnn-device-validation.zh-CN.md).
+The JVM harness does not establish those Android behaviors. Export does not
+require MNN to run, but still reads the authorized range through Telegram.
+
+## Validated persistent-history baseline and limits
 
 The persistent-history and request-progress revision passed 14 JVM test classes:
 59 HTTP cases and 1,116 other core assertions. Archive storage passed 12 groups /
@@ -130,8 +173,12 @@ For the user's 32,000-character / 2,000-output-token settings, short ten-message
 inputs already fit one model request. Compact metadata and concise output guidance
 reduce input and requested verbosity; they do not prove the cause of a 200-second
 length-limited generation. MNN's independent API session does not inherit the
-chat UI's thinking preference. The prepared MNN patch is separate and has not
-been applied, built, or tested with a real model.
+chat UI's thinking preference. The separate MNN patch has now been applied and
+published as [commit 35affe5](https://github.com/Naza3/MNN/commit/35affe5d9d94e7e843bac4daecee1d2ddf60123f).
+[MNN build 37133978173](https://github.com/Naza3/MNN/actions/runs/37133978173)
+passed its native/App build, tests, lint and APK audit/signature checks. That
+independent MNN APK is not part of the Telegram APK; the user's actual phone,
+model template behavior and performance remain untested.
 
 ### Previous APK baseline
 

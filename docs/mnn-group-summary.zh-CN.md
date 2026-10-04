@@ -4,6 +4,8 @@
 
 功能的阶段状态、验收证据和待测项目见 [实施计划](mnn-group-summary-roadmap.zh-CN.md)。已完成代码验证的功能仍需 [真机验收](mnn-device-validation.zh-CN.md)，不能以模拟测试代替实际 MNN 模型效果。
 
+本轮已实现 **导出待总结群聊文字**，供用户把选定原文和回复关系交给其他工具处理。本地回归和最终 Android 编译已通过；源码 `c78b111` 已推送，[APK CI 37163785988](https://github.com/Naza3/Telegram/actions/runs/37163785988) 已通过（13 分 44 秒），[下载包含导出功能的新 APK](https://github.com/Naza3/Telegram/actions/runs/37163785988/artifacts/11288507718)。真机保存与分享交互仍待验证。
+
 ## 使用方式
 
 1. 在同一手机的 MNN Chat 中打开已下载的文本模型，进入聊天页。
@@ -59,7 +61,7 @@ API Key 在 Android 6.0+ 使用 AndroidKeyStore 加密保存；旧版本或加�
 
 MNN 配套改动已应用并推送至[提交 `35affe5d9d94e7e843bac4daecee1d2ddf60123f`](https://github.com/Naza3/MNN/commit/35affe5d9d94e7e843bac4daecee1d2ddf60123f)：在原生模型加载成功后，为 API 会话临时设置 `jinja.context.enable_thinking=false`，避免加载中的 `context.json` 再次覆盖；不调用会写聊天配置的 `updateThinking`。现有高级设置保存的仍是 `custom_config`，不能当作已修改 API 的基础配置。[MNN CI 37133978173](https://github.com/Naza3/MNN/actions/runs/37133978173) 已成功：原生编译、API／完整 App 测试、release lint、APK 审计及签名检查全部通过。未真机验证用户模型对该开关的支持和性能变化。这是独立 MNN 应用的改动，下面提供的 Telegram APK 不包含它。
 
-**配套 MNN 下载：[0.8.3-localapi.4（834）未签名 ARM64 APK](https://github.com/Naza3/MNN/actions/runs/37133978173/artifacts/11278242921)**。登录 GitHub 下载 ZIP，解压 `app-standard-release-unsigned.apk`；此前自行签名安装的用户需用原密钥签名后覆盖更新，不要卸载旧版绕过签名不匹配。停止旧 API，完成更新后重新启动 API，再用相同两条短消息复测；Telegram 保持 `2000`／`32000`、通用模板、空补充要求与流式开启。
+**配套 MNN 下载：[0.8.3-localapi.4（834）Actions 已签名 ARM64 APK](https://github.com/Naza3/MNN/actions/runs/37133978173/artifacts/11278482493)**。登录 GitHub 下载 ZIP，解压 `MNN-Chat-API-arm64-ci-test.apk`。用户后来已澄清旧包来自 GitHub Actions 签名；本次沿用该 MNN CI 签名方案，但手机已安装包的证书未独立核验。确实使用自己私钥签名的用户，才需要下载[未签名产物](https://github.com/Naza3/MNN/actions/runs/37133978173/artifacts/11278242921)并用原密钥签名；不要通过卸载旧版绕过签名不匹配。停止旧 API，完成更新后重新启动 API，再用相同两条短消息复测；Telegram 保持 `2000`／`32000`、通用模板、空补充要求与流式开启。
 
 本次 MNN 云端报告确认：51 项构建辅助测试、85 项 API 专项测试及 531 项完整 App 测试（含专项），均无失败、错误或跳过。未签名 APK 为 32,547,449 字节，SHA-256 为 `ee492c538460b1a6796adf7e91e6eeb7c0f9670f534f741a47e3564fb8bb00ba`；重签名后哈希会改变。产物于 2026-10-17 16:03 UTC 左右到期。[审计报告与源码／许可说明包](https://github.com/Naza3/MNN/actions/runs/37133978173/artifacts/11278497383)请与再分发的 APK 一起保留。
 
@@ -113,9 +115,40 @@ MNN 配套改动已应用并推送至[提交 `35affe5d9d94e7e843bac4daecee1d2ddf
 - 当日最多纳入 2000 条有效文字，最多扫描 100 页/10000 条历史。达到限制或游标无法继续时显示“部分结果”和实际覆盖范围，不宣称已总结全部。
 - 当前版不拼接超级群迁移前的旧群历史，结果范围说明会标明。后续页加载失败时直接报错，不把失败伪装为完整结果。
 - 范围说明显示首尾消息 ID，便于与实际来源及固定快照核对。ID 只在所属聊天／Topic 范围内解释；两端之间可能有媒体、删除或筛选产生的空位，不能把 ID 差值当作纳入条数。
-- 历史请求不修改已读状态。消息内容只发送到设置中的模型接口；结果在本机总结面板和已保存历史中查看，不自动发回群。
+- 历史请求不修改已读状态。开始总结时，消息内容发送到设置中的模型接口；结果在本机总结面板和已保存历史中查看，不自动发回群。下面的原文导出是用户单独选择的文件操作。
 
 长内容按有界字符预算分块，再合并摘要，引用始终使用原始消息编号。超出总输入预算或无法完整合并会明确失败，不静默截断。模型引用只允许映射到本次消息集合；无有效引用或越界引用会报错，避免错误跳转。引用存在并不保证模型的结论正确，仍应以原文为准。
+
+## 导出待总结群聊文字
+
+导出直接使用当前账号可读取的文字消息，不需要启动 MNN，也不会调用 Chat Completions、生成摘要或推进增量游标。它复用“最近 N 条”“当日”“上次总结之后”“进入聊天时的未读”的范围读取规则和覆盖说明；未知的未读边界仍不可用，论坛整群视图不伪造未读范围。导出一次“上次总结之后”后再次导出，不能因为上次文件已保存而跳过那些消息。
+
+在总结面板选择范围、筛选条件及总结方向后，点击 **导出待总结消息**，再明确选择格式。首选项 **Markdown（便于阅读和交给模型）** 适合直接阅读或提供给其他 AI；**JSON（保留结构化字段）** 保留完整结构。当前模板及自定义 Prompt 自动附带，明确区分用户处理要求与聊天原文。成员、关键词及与我相关的实际筛选遵循现有规则，并在文件中说明匹配范围和附加上下文；“突出与我相关”只是处理方向，不因此删除消息。首版不提供 REPLAY 导出，需重新选择上述四种范围之一。
+
+文件保留有序原文、发送者、时间、所属聊天及逐条话题信息，同时保留读取范围、筛选、时区和完整性说明。回复关系使用“聊天 ID + 消息 ID”的复合标识，不能仅凭消息数字在不同群之间关联。每条回复明确标出目标是否在这份导出的最终消息集合内；被筛选排除的目标也属于“不在导出中”。消息元数据的 `topicId`、`quoteText` 对应导出字段 `topic_id`、`quote_text`：前者来自真实话题归属，不能用回复目标 ID 代替；后者只表示 Telegram 提供的引用片段，不是重新获取的父消息全文，也不是模型概括。`topic_id="0"` 表示非论坛或未知，`"1"` 表示 General，其他值为实际话题根消息 ID。
+
+JSON 当前结构版本为 `schema_version: 1`，聊天、消息、发送者及话题 ID 均用字符串保存，避免外部工具把大整数读成近似值。主要字段如下；Markdown 也保留这些元数据，但将原文放入单独的数据代码块。
+
+| 字段 | 含义 |
+| --- | --- |
+| `chat`、`topic`、`exported_at` | 聊天身份、导出的是整群还是具体话题、导出时刻及时区 |
+| `selection`、`direction` | 范围、筛选、覆盖／分页说明，以及模板与自定义要求 |
+| `messages[].ref`、`key` | `[mN]` 只是本份文件的索引；`key` 使用 `dialog_id:message_id` 标识实际消息 |
+| `messages[].reply_to` | 目标复合键和 `in_export`；无已知回复目标时为 `null`，目标会话 ID 为 `"0"` 表示未确定，不能自动关联本群同号消息 |
+| `messages[].topic_id`、`quote_text`、`text` | 逐条话题、引用片段及完整原文；时间、发送者和身份／提及信息也随每条消息保留 |
+| `missing_reply_target_count` | 回复目标未纳入文件的回复消息数量，不是去重后的缺失父消息数量 |
+
+不会为补全回复链额外读取范围外历史。目标不在集合时，只能说明本次未包含，不能据此猜测它已删除、私密、不可访问或没有正文；缺失的话题／引用元数据同样不补造。全话题导出按每条实际元数据保留话题归属，不把全部消息归到当前页面显示的某一个 Topic。
+
+文件准备完成后，先核对范围、实际文字条数、回复目标未包含的数量及文件大小，再明确选择 **保存到文件** 或 **分享导出文件**：保存使用 Android 系统文件选择器（SAF）选择位置，分享使用 FileProvider 的临时只读 URI 授权和系统分享面板。不会自动选择接收应用、上传服务或群聊，不额外申请广泛存储权限。SINCE／UNREAD 完整分批后可选择 **读取并导出下一批**，批次位置只在本次导出会话中继续，仍不写总结游标。导出包含原文，外部文件不属于加密的“总结历史”，也不会作为一条成功摘要写入历史。
+
+每份导出上限为 **8 MiB**，按 UTF-8 实际编码字节计算，不是字符数。超限明确失败，不截断消息后宣称成功；历史读取沿用每页 45 秒超时，未增加独立的文件写入超时。取消系统保存选择器时不开始写入；写到一半遇到文件提供方错误，目标文档可能不完整，界面提示重试，不自动删除用户选择的文档。
+
+分享文件暂存于应用缓存的 `ai-chat-exports` 子目录，本轮仅为这个窄目录新增 FileProvider 路径，具体文件按临时只读 URI 授权分享。未分享的临时文件取消时清理；已经交给系统分享的文件保留约 24 小时，退出账号也不立即删除已交付的文件，应用运行时定时清理，进程退出后在后续导出时清理过期文件，不保证进程被杀后准点清除。已另存或交给接收应用的外部副本不属于这份缓存。
+
+上述文件交付、取消、账号切换及面板关闭行为仍需真机验证；本次 APK 构建通过不代替这些交互的真机验收。验收项目见 [X01–X14 导出用例](mnn-device-validation.zh-CN.md)。
+
+本轮本地回归（2026-10-04）已通过：15 个 JVM 测试类，HTTP 59 项，其余核心 1237 项断言，包括导出格式 97 断言、增量范围 17 组／125 断言及历史加载 14 组／92 断言；24 组合成样例结构与 7 项构建配置检查通过。最终冻结源码的 Android Java 编译通过，耗时 1 分钟。功能源码 [`c78b111242985bddf2551e2f1fd9ec42588837e0`](https://github.com/Naza3/Telegram/commit/c78b111242985bddf2551e2f1fd9ec42588837e0) 已推送，[完整 APK／CI](https://github.com/Naza3/Telegram/actions/runs/37163785988) 已通过，产物为 [`Telegram-MNN-arm64-debug-10`](https://github.com/Naza3/Telegram/actions/runs/37163785988/artifacts/11288507718)；这些检查不包含手机 SAF、分享接收方或真实群聊验证。
 
 ## 预算、缓存和来源有效性
 
@@ -153,6 +186,7 @@ MNN 配套改动已应用并推送至[提交 `35affe5d9d94e7e843bac4daecee1d2ddf
 | `ui/Components/GroupSummarySheet.java` | 范围、设置、加载、错误和结果交互 |
 | `messenger/ai/SummaryHistoryLoader.java` | 独立 GUID 的 MTProto 历史分页、范围/账号/Topic 检查 |
 | `messenger/ai/SummaryMessage.java` | 原消息位置与正文 |
+| `messenger/ai/SummaryChatExport.java` | 有界 Markdown／JSON 原文导出、复合回复关系及元数据；本地格式回归已通过 |
 | `messenger/ai/AiSummaryPrompt.java` | JSONL 输入、分块、合并与引用校验 |
 | `messenger/ai/AiSummaryClient.java`、`AiSummarySse.java` | 普通／流式请求、诊断、端点并发限制、取消及问答 |
 | `messenger/ai/PromptOptions.java`、`PromptPreferences.java` | 不可变方向配置、按身份和范围保存偏好 |
@@ -231,9 +265,19 @@ unset TELEGRAM_API_ID TELEGRAM_API_HASH
 
 CI 使用 Ubuntu 24.04、JDK 21 和与本地相同的 SDK/NDK/CMake 版本，递归检出子模块，执行完整 Gradle 构建、签名与 16 KB 对齐校验。APK 上传前计算 SHA-256。Actions 构建不连接 Telegram 账号或 MNN 服务，仍需真机验收。
 
-CI 独立生成调试签名，并通过 Actions 缓存在后续构建间复用；不上传 keystore 到产物。缓存失效或被清理后会生成新的调试签名。CI 签名与之前的本地 APK 不同；如果手机安装提示签名冲突，需要先卸载旧的 Telegram Beta（卸载会清除该应用的本地数据）。正式分发应另行配置持久的私有签名密钥。
+CI 独立生成调试签名，并通过 Actions 缓存在后续构建间复用；不上传 keystore 到产物。缓存失效或被清理后会生成新的调试签名。CI 签名与之前的本地 APK 不同；如果手机安装提示签名冲突，应先核对已安装包与新包的证书并找回原签名，不通过卸载来绕过冲突。正式分发应另行配置持久的私有签名密钥。
 
-## 最新构建：持久总结历史与请求进度（2026-10-03）
+## 最新构建：导出待总结群聊文字（2026-10-04）
+
+源码提交：`c78b111242985bddf2551e2f1fd9ec42588837e0`。新增 Markdown／JSON 原文导出、回复关系与 Topic／引用元数据、系统保存及分享，保留此前权限、截图、历史和总结功能。
+
+- **[下载新版 APK 与 SHA-256 校验文件](https://github.com/Naza3/Telegram/actions/runs/37163785988/artifacts/11288507718)**：`Telegram-MNN-arm64-debug-10`，ZIP 为 62,531,165 字节。需登录 GitHub 下载并解压，安装 `Telegram-MNN-arm64-debug.apk`；到期时间为 2026-10-18 00:17:57 UTC。
+- [GitHub Actions 运行记录](https://github.com/Naza3/Telegram/actions/runs/37163785988)：**成功**，任务耗时 13 分 44 秒。15 类 JVM 回归、24 组样例结构、7 项构建配置、完整 ARM64 构建、签名、16 KB 对齐、架构检查和上传全部通过。
+- 签名验证通过（v1／v2），证书 SHA-256 为 `c8715ba0c50510b9c1cc4d52b0fd2b0aed82dd55675f89c4f48d68978b7df313`，与上一轮 Telegram CI `37130095722` 一致；缓存命中 `mnn-debug-keystore-1402824680-v1`，没有生成新签名。此处是 Telegram 的 CI 签名，与 MNN 应用签名分别管理。
+- GitHub 记录的 ZIP 产物摘要为 `sha256:21b15754cffbbb4a5ca718a3b86989f21ce9e1d53269f60d8bafd5a66e37f5ec`；它不是 APK 本身的哈希。APK 请使用压缩包内配套 `.sha256` 核对。
+- 本次导出不要求 MNN 启动；手机上的保存、分享及真实群聊回复元数据仍按 [X01–X14](mnn-device-validation.zh-CN.md) 验证，不能由构建成功代替。
+
+## 此前构建：持久总结历史与请求进度（2026-10-03）
 
 源码提交：`4655df1a8f582f76a3041877698fc40ff0f71e3b`。包含本机加密历史列表／详情、自动保存、来源指纹核验、精简 Prompt 与每次模型请求的进度，保留此前范围、入口、权限与截图修改。
 

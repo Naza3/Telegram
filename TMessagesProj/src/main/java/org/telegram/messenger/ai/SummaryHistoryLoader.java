@@ -542,11 +542,19 @@ public final class SummaryHistoryLoader {
     private SummaryMessage toSummaryMessage(Run run, TLRPC.Message message) {
         int replyToId = 0;
         long replyToDialogId = 0;
+        String quoteText = "";
         if (message.reply_to != null && !message.reply_to.reply_to_scheduled
-                && !message.reply_to.reply_to_ephemeral && message.reply_to.reply_to_msg_id > 0) {
-            replyToId = message.reply_to.reply_to_msg_id;
-            replyToDialogId = message.reply_to.reply_to_peer_id == null ? dialogId
-                    : DialogObject.getPeerDialogId(message.reply_to.reply_to_peer_id);
+                && !message.reply_to.reply_to_ephemeral) {
+            if (message.reply_to.reply_to_msg_id > 0) {
+                replyToId = message.reply_to.reply_to_msg_id;
+                replyToDialogId = message.reply_to.reply_to_peer_id == null ? dialogId
+                        : DialogObject.getPeerDialogId(message.reply_to.reply_to_peer_id);
+            }
+            // quote_text is optional independently of reply_to_msg_id. Preserve only the
+            // excerpt returned in this history response, even if its target is unavailable.
+            if ((message.reply_to.flags & (1 << 6)) != 0 && message.reply_to.quote_text != null) {
+                quoteText = message.reply_to.quote_text;
+            }
         }
         boolean mentionedSelf = false;
         for (TLRPC.MessageEntity entity : message.entities) {
@@ -565,7 +573,8 @@ public final class SummaryHistoryLoader {
         }
         return new SummaryMessage(dialogId, message.id, message.date, senderName(run, message),
                 message.message, DialogObject.getPeerDialogId(message.from_id), replyToId,
-                replyToDialogId, mentionedSelf, message.out, message.edit_date, false, false);
+                replyToDialogId, mentionedSelf, message.out, message.edit_date, false, false,
+                MessageObject.getTopicId(account, message, run.forum), quoteText);
     }
 
     private void resolveReplySenders(Run run) {
@@ -579,7 +588,8 @@ public final class SummaryHistoryLoader {
                 run.messages.set(i, new SummaryMessage(message.dialogId, message.id, message.date,
                         message.sender, message.text, message.senderId, message.replyToId,
                         message.replyToDialogId, message.mentionedSelf, message.outgoing,
-                        message.editDate, true, senderId == run.clientUserId));
+                        message.editDate, true, senderId == run.clientUserId,
+                        message.topicId, message.quoteText));
             }
         }
     }

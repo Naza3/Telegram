@@ -109,6 +109,9 @@ public final class SummaryHistoryLoaderTest {
         int now = now();
         TLRPC.Message link = topicMessage(300, now, "Read https://example.invalid/source");
         link.media = new TLRPC.TL_messageMediaWebPage();
+        link.reply_to.reply_to_msg_id = 298;
+        link.reply_to.flags = 1 << 6;
+        link.reply_to.quote_text = "earlier source";
         TLRPC.Message root = new TLRPC.TL_messageService();
         root.id = 42; root.date = now - 10000; root.peer_id = peer();
         root.action = new TLRPC.TL_messageActionTopicCreate();
@@ -121,6 +124,12 @@ public final class SummaryHistoryLoaderTest {
         check(result.loaded.messages.get(1).text.equals(link.message), "original link text was lost or replaced by webpage content");
         check(result.loaded.messages.get(0).id == 298 && result.loaded.messages.get(1).id == 300,
                 "topic source references point to wrong messages");
+        SummaryMessage quoted = result.loaded.messages.get(1);
+        check(quoted.topicId == 42 && result.loaded.messages.get(0).topicId == 42
+                && quoted.replyToId == 298 && quoted.replyToDialogId == DIALOG,
+                "specific-topic history lost per-message topic or reply identity");
+        check(quoted.replyToSelfKnown && quoted.quoteText.equals("earlier source"),
+                "recent pagination or reply resolution dropped server quote metadata");
         check(result.loaded.coverageNote.contains("Topic #42"), "coverage missing topic scope");
     }
 

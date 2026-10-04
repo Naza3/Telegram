@@ -14143,6 +14143,9 @@ public class ChatActivity extends BaseFragment implements
 
     @Override
     public boolean dismissDialogOnPause(Dialog dialog) {
+        if (groupSummarySheet != null && groupSummarySheet.keepExportDialogOnPause(dialog)) {
+            return false;
+        }
         return dialog != chatAttachAlert && dialog != chatThemeBottomSheet && !(dialog instanceof BotWebViewSheet) && super.dismissDialogOnPause(dialog);
     }
 
@@ -20385,6 +20388,9 @@ public class ChatActivity extends BaseFragment implements
 
     @Override
     public void onActivityResultFragment(int requestCode, int resultCode, Intent data) {
+        if (groupSummarySheet != null && groupSummarySheet.onExportActivityResult(requestCode, resultCode, data)) {
+            return;
+        }
         if (resultCode == Activity.RESULT_OK) {
             if (requestCode == 0 || requestCode == 2) {
                 createChatAttachView();

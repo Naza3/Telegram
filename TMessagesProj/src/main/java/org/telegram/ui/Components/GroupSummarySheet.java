@@ -6,8 +6,12 @@
 
 package org.telegram.ui.Components;
 
+import android.app.Activity;
+import android.app.Dialog;
 import android.content.Context;
+import android.content.Intent;
 import android.graphics.Typeface;
+import android.net.Uri;
 import android.os.SystemClock;
 import android.text.Editable;
 import android.text.InputType;
@@ -50,6 +54,7 @@ import org.telegram.messenger.ai.SummaryStateStore;
 import org.telegram.messenger.ai.SummarySourceVerifier;
 import org.telegram.messenger.ai.SummaryResultCache;
 import org.telegram.messenger.ai.SummaryFilter;
+import org.telegram.messenger.ai.SummaryChatExport;
 import org.telegram.ui.ActionBar.AlertDialog;
 import org.telegram.ui.ActionBar.BaseFragment;
 import org.telegram.ui.ActionBar.Theme;
@@ -65,6 +70,8 @@ import java.security.MessageDigest;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.UUID;
+import java.util.TimeZone;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /** An account-scoped, explicit user action. Source snapshots stay in this dialog. */
 public final class GroupSummarySheet {
@@ -149,6 +156,31 @@ public final class GroupSummarySheet {
         }
     }
 
+    private static final class ExportTask {
+        final RangeRequest range;
+        final SummaryChatExport.Format format;
+        final PromptOptions prompt;
+        final String timeZoneId;
+        volatile boolean cancelled;
+        SummaryHistoryLoader.Result history;
+        ArrayList<SummaryMessage> rawSources;
+        ArrayList<SummaryMessage> sources;
+        String coverage;
+        int missingReplies;
+        SummaryExportFileHelper.PreparedFile file;
+
+        ExportTask(RangeRequest range, SummaryChatExport.Format format, PromptOptions prompt) {
+            this.range = range;
+            this.format = format;
+            this.prompt = prompt;
+            timeZoneId = TimeZone.getDefault().getID();
+        }
+    }
+
+    // Activity results are dispatched to the top fragment in each pane. Never reuse a code
+    // within this process, so a late result cannot attach to another panel or export task.
+    private static final AtomicInteger NEXT_EXPORT_DOCUMENT_REQUEST = new AtomicInteger(0x5000);
+
     private static final Pattern REFERENCE = Pattern.compile("\\[m([0-9]+)\\]");
     private static final Pattern HEADING = Pattern.compile("(?m)^(?:#{1,6}\\s*)?(?:\\*\\*)?【?(话题|结论|待办)】?(?:\\*\\*)?[：:]?\\s*$");
 
@@ -218,6 +250,11 @@ public final class GroupSummarySheet {
     private SummaryFilter.Options filterOptions = SummaryFilter.Options.DEFAULT;
     private boolean summaryFiltered;
     private SummaryQuestionSheet questionSheet;
+    private ExportTask exportTask;
+    private boolean exportDocumentPending;
+    private int exportDocumentRequest = -1;
+    private ExportTask exportDocumentTask;
+    private int exportDocumentGeneration;
     private boolean closed;
     private int operation;
 
@@ -309,6 +346,13 @@ public final class GroupSummarySheet {
 
     private void cancelWork() {
         operation++;
+        exportDocumentPending = false;
+        exportDocumentTask = null;
+        if (exportTask != null) {
+            exportTask.cancelled = true;
+            if (exportTask.file != null) exportTask.file.release();
+            exportTask = null;
+        }
         closeQuestions();
         closeSourcePreview();
         pendingSourceUpdates.clear();
@@ -364,6 +408,10 @@ public final class GroupSummarySheet {
         if (closed) return;
         if (!checkAccountOwner()) return;
         SourceUpdate update = new SourceUpdate(null, 0, false);
+        if (exportTask != null && sourceChanged(exportTask.rawSources, messageId, update)) {
+            invalidateExportSources("导出范围内的原消息已删除，请重新读取后导出。");
+            return;
+        }
         invalidateCachedSource(messageId, update);
         if (historyLoader != null) pendingSourceUpdates.put(messageId, update);
         if (sourceChanged(sourceMessages, messageId, update)
@@ -379,6 +427,10 @@ public final class GroupSummarySheet {
         if (closed) return;
         if (!checkAccountOwner()) return;
         SourceUpdate update = new SourceUpdate(text, editDate, usable);
+        if (exportTask != null && sourceChanged(exportTask.rawSources, messageId, update)) {
+            invalidateExportSources("导出范围内的原消息已修改或不可用，请重新读取后导出。");
+            return;
+        }
         invalidateCachedSource(messageId, update);
         if (historyLoader != null) pendingSourceUpdates.put(messageId, update);
         if (sourceChanged(sourceMessages, messageId, update)
@@ -770,7 +822,7 @@ public final class GroupSummarySheet {
         if (!hasUnreadSnapshot()) {
             addText("本次未取得可靠的进入聊天前未读边界，因此未读范围不可用；可重新进入聊天后再试。", false);
         }
-        addText("选中的文字将发送到你设置的 MNN Chat API 服务。已完成的摘要自动加密保存在本机总结历史，关闭后或重启后仍可查看和删除；点击引用可返回原消息。", false);
+        addText("点击“开始总结”才会将文字发送到 MNN Chat API。也可独立导出待总结消息，不需要配置或启动模型。已完成的摘要自动加密保存在本机总结历史。", false);
 
         PromptOptions direction = effectivePrompt();
         addText("总结方向：" + PromptOptions.templateLabel(direction.templateId) + " · "
@@ -801,20 +853,10 @@ public final class GroupSummarySheet {
             showSettings();
         });
         addAction("开始总结", () -> {
-            recentCountText = count.getText().toString().trim();
-            if (rangeMode != RangeMode.TODAY) {
-                try {
-                    recentCount = Integer.parseInt(recentCountText);
-                } catch (NumberFormatException ignored) {
-                    recentCount = 0;
-                }
-                if (recentCount < 1 || recentCount > SummaryHistoryLoader.MAX_RECENT_COUNT) {
-                    count.setError("请输入 1–" + SummaryHistoryLoader.MAX_RECENT_COUNT + " 之间的条数");
-                    count.requestFocus();
-                    return;
-                }
-            }
-            startSummary();
+            if (readSelectedCount(count)) startSummary();
+        });
+        addAction("导出待总结消息", () -> {
+            if (readSelectedCount(count)) showExportFormats(selectedRangeRequest());
         });
         if (lastSuccessfulHistory != null && lastSuccessfulSources != null) {
             addAction("用当前方向重做上次成功范围", () -> {
@@ -839,6 +881,295 @@ public final class GroupSummarySheet {
 
     private boolean hasUnreadSnapshot() {
         return unreadLower >= 0 && unreadUpper >= unreadLower;
+    }
+
+    private boolean readSelectedCount(EditTextBoldCursor count) {
+        recentCountText = count.getText().toString().trim();
+        if (rangeMode == RangeMode.TODAY) return true;
+        try {
+            recentCount = Integer.parseInt(recentCountText);
+        } catch (NumberFormatException ignored) {
+            recentCount = 0;
+        }
+        if (recentCount < 1 || recentCount > SummaryHistoryLoader.MAX_RECENT_COUNT) {
+            count.setError("请输入 1–" + SummaryHistoryLoader.MAX_RECENT_COUNT + " 之间的条数");
+            count.requestFocus();
+            return false;
+        }
+        return true;
+    }
+
+    private RangeRequest selectedRangeRequest() {
+        return new RangeRequest(rangeMode, recentCount, summaryState.cursor,
+                rangeMode == RangeMode.UNREAD ? unreadLower : summaryState.cursor,
+                rangeMode == RangeMode.UNREAD ? unreadUpper : -1,
+                rangeMode == RangeMode.SINCE && summaryState.cursor == 0, null, null, filterOptions);
+    }
+
+    private String exportRangeLabel(RangeRequest request) {
+        if (request.mode == RangeMode.TODAY) return "当日文字消息（手机时区，今天 00:00 起）";
+        if (request.mode == RangeMode.RECENT) return "最近 " + request.count + " 条有效文字消息（不含其他类型）";
+        if (request.mode == RangeMode.SINCE && request.initialize) {
+            return "尚无总结起点：仅导出最近 " + request.count + " 条有效文字，不建立增量起点";
+        }
+        return (request.mode == RangeMode.UNREAD ? "进入聊天时的固定未读范围" : "上次总结之后")
+                + "：本批最多 " + request.count + " 条历史消息，只导出其中匹配的文字";
+    }
+
+    private void showExportFormats(RangeRequest request) {
+        if (closed || !checkAccountOwner()) return;
+        cancelWork();
+        final PromptOptions prompt = effectivePrompt().withFocusSelf(request.filters.mode == SummaryFilter.Mode.FOCUS_SELF);
+        clearContent();
+        addText("导出待总结消息", true);
+        addText(exportRangeLabel(request), false);
+        addText("消息选择：" + filterLabel(request.filters), false);
+        addText("文件包含消息原文、发言者、时间、回复关系及当前总结方向。导出不会调用模型，也不会保存摘要历史或更新总结进度。", false);
+        addText("先读取并核对范围，再由你选择保存位置或分享应用；不会自动上传。", false);
+        addAction("Markdown（便于阅读和交给模型）", () -> startExport(request, SummaryChatExport.Format.MARKDOWN, prompt));
+        addAction("JSON（保留结构化字段）", () -> startExport(request, SummaryChatExport.Format.JSON, prompt));
+        addAction("返回范围选择", this::showSelection);
+    }
+
+    private void startExport(RangeRequest request, SummaryChatExport.Format format, PromptOptions prompt) {
+        if (closed || !checkAccountOwner()) return;
+        if (isSummaryAccessRevoked()) {
+            onAccessRevoked();
+            return;
+        }
+        cancelWork();
+        ExportTask task = new ExportTask(request, format, prompt);
+        exportTask = task;
+        final int generation = operation;
+        clearContent();
+        TextView status = addText("正在读取导出范围…", true);
+        addText(exportRangeLabel(request), false);
+        addText("不连接 MNN，不改变总结进度。", false);
+        addAction("取消导出", this::showSelection);
+        historyLoader = new SummaryHistoryLoader(account, dialogId, topicId);
+        SummaryHistoryLoader.Callback callback = new SummaryHistoryLoader.Callback() {
+            @Override public void onLoaded(SummaryHistoryLoader.Result result) {
+                if (!exportActive(task, generation)) return;
+                historyLoader = null;
+                prepareExport(task, result, generation);
+            }
+            @Override public void onProgress(int scanned, int textCount) {
+                if (exportActive(task, generation)) status.setText("正在读取：已扫描 " + scanned + " 条，收集 " + textCount + " 条文字");
+            }
+            @Override public void onError(String error) {
+                if (exportActive(task, generation)) showExportError(task, error);
+            }
+        };
+        loadRange(historyLoader, request, callback);
+    }
+
+    private boolean exportActive(ExportTask task, int generation) {
+        return exportTask == task && !task.cancelled && active(generation);
+    }
+
+    private void prepareExport(ExportTask task, SummaryHistoryLoader.Result history, int generation) {
+        task.history = history;
+        task.rawSources = new ArrayList<>(history.messages);
+        for (SummaryMessage source : task.rawSources) {
+            SourceUpdate update = pendingSourceUpdates.get(source.id);
+            if (update != null && update.changed(source)) {
+                showExportError(task, "读取期间原消息已变化，请重新读取后导出。");
+                return;
+            }
+        }
+        pendingSourceUpdates.clear();
+        if (isSummaryAccessRevoked()) {
+            onAccessRevoked();
+            return;
+        }
+        SummaryFilter.Result filtered = SummaryFilter.apply(task.rawSources, ownerId, task.range.filters);
+        task.sources = new ArrayList<>(filtered.messages);
+        task.coverage = history.coverageNote + "\n" + filtered.coverageNote.replace("实际发送", "实际导出");
+        if (task.sources.isEmpty()) {
+            showExportPreview(task, "当前范围没有匹配的文字消息，未生成文件。");
+            return;
+        }
+        org.telegram.tgnet.TLRPC.Chat chat = MessagesController.getInstance(account).getChat(-dialogId);
+        String title = chat == null || chat.title == null ? "聊天 " + (-dialogId) : chat.title;
+        org.telegram.tgnet.TLRPC.TL_forumTopic topic = topicId == 0 ? null
+                : MessagesController.getInstance(account).getTopicsController().findTopic(-dialogId, topicId);
+        SummaryChatExport.Metadata metadata = new SummaryChatExport.Metadata(dialogId, title, topicId,
+                topic == null || topic.title == null ? "" : topic.title, System.currentTimeMillis(), task.timeZoneId,
+                exportRangeLabel(task.range), filterLabel(task.range.filters), task.coverage,
+                !history.complete || history.truncated, history.hasMore, history.scannedMessageCount);
+        clearContent();
+        addText("正在生成 " + task.format.name() + " 文件…", true);
+        addText("本次匹配 " + task.sources.size() + " 条文字；仅写入应用私有临时目录。", false);
+        addAction("取消导出", this::showSelection);
+        SummaryExportFileHelper.post(() -> {
+            SummaryExportFileHelper.PreparedFile prepared = null;
+            try {
+                if (task.cancelled) return;
+                if (!sameAccountOwner()) {
+                    AndroidUtilities.runOnUIThread(this::dismiss);
+                    return;
+                }
+                int missing = SummaryChatExport.missingReplyTargetCount(task.sources);
+                byte[] bytes = SummaryChatExport.render(task.format, metadata, task.sources, task.prompt);
+                prepared = SummaryExportFileHelper.prepare(context.getApplicationContext(), bytes,
+                        task.format.extension, task.format.mimeType, () -> task.cancelled || !sameAccountOwner());
+                final SummaryExportFileHelper.PreparedFile result = prepared;
+                AndroidUtilities.runOnUIThread(() -> {
+                    if (!exportActive(task, generation)) {
+                        result.release();
+                        return;
+                    }
+                    task.file = result;
+                    task.missingReplies = missing;
+                    showExportPreview(task, null);
+                });
+            } catch (Exception error) {
+                if (prepared != null) prepared.release();
+                final String reason = error instanceof IllegalArgumentException ? error.getMessage()
+                        : "无法生成导出文件，请检查设备可用空间后重试。";
+                AndroidUtilities.runOnUIThread(() -> {
+                    if (exportActive(task, generation)) showExportError(task, reason);
+                });
+            }
+        });
+    }
+
+    private void showExportPreview(ExportTask task, String notice) {
+        if (exportTask != task || task.cancelled || closed || !checkAccountOwner()) return;
+        clearContent();
+        addText("核对导出范围", true);
+        addText(exportRangeLabel(task.range), false);
+        addText("本次实际导出 " + task.sources.size() + " 条文字消息。", true);
+        addText(task.coverage, false);
+        if (!task.history.complete || task.history.truncated) {
+            addText("本次读取仅部分覆盖；文件只包含已经读取到的匹配文字。", true);
+        }
+        if (task.history.hasMore) addText("固定范围还有后续消息，本文件只包含本批，不能视为全部范围。", true);
+        if (task.file != null) {
+            addText("缺失回复目标：" + task.missingReplies + " 条回复的目标不在导出文件中；不会补取范围外的原文，也不会猜测删除、筛除等原因。", false);
+            addText(task.file.file.getName() + " · " + String.format(Locale.US, "%.1f KiB", task.file.bytes / 1024.0), false);
+            addText("文件包含可识别发言者的原文。保存或分享由你选择；交给系统分享后临时文件保留约 24 小时，应用运行时清理，进程退出后会在后续导出时清理过期文件。", false);
+        }
+        if (notice != null) addText(notice, true);
+        if (task.file != null) {
+            addAction("保存到文件", () -> chooseExportDestination(task));
+            addAction("分享导出文件", () -> shareExport(task));
+        }
+        if (task.history.complete && task.history.hasMore
+                && (task.range.mode == RangeMode.SINCE || task.range.mode == RangeMode.UNREAD)) {
+            addAction("读取并导出下一批", () -> startExport(new RangeRequest(task.range.mode, task.range.count,
+                    task.range.expectedCursor, task.history.coveredThroughId, task.history.upperInclusiveId,
+                    false, null, null, task.range.filters), task.format, task.prompt));
+            addText("下一批仅在本次导出中继续，通用总结进度保持不变。", false);
+        }
+        addAction("重新读取此范围", () -> startExport(task.range, task.format, task.prompt));
+        addAction("返回范围选择", this::showSelection);
+    }
+
+    private void shareExport(ExportTask task) {
+        if (exportTask != task || task.cancelled || !checkAccountOwner()) return;
+        if (isSummaryAccessRevoked()) { onAccessRevoked(); return; }
+        try {
+            task.file.share(context);
+        } catch (Exception ignored) {
+            if (!closed && exportTask == task) showExportError(task, "无法打开系统分享，请重新生成后重试或使用“保存到文件”。");
+        }
+    }
+
+    private void chooseExportDestination(ExportTask task) {
+        if (exportDocumentPending || exportTask != task || task.cancelled || !checkAccountOwner()) return;
+        if (isSummaryAccessRevoked()) { onAccessRevoked(); return; }
+        int requestCode = NEXT_EXPORT_DOCUMENT_REQUEST.getAndIncrement();
+        if (requestCode > 0x7fff) {
+            showExportPreview(task, "本次运行的文件选择次数已达上限，请使用分享或重启应用后保存。");
+            return;
+        }
+        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType(task.file.mimeType);
+        intent.putExtra(Intent.EXTRA_TITLE, task.file.file.getName());
+        exportDocumentPending = true;
+        exportDocumentRequest = requestCode;
+        exportDocumentTask = task;
+        exportDocumentGeneration = operation;
+        try {
+            fragment.startActivityForResult(intent, requestCode);
+        } catch (RuntimeException ignored) {
+            exportDocumentPending = false;
+            exportDocumentTask = null;
+            showExportPreview(task, "无法打开系统文件选择器，可使用分享或稍后重试。");
+        }
+    }
+
+    /** Parent fragments keep only this dialog alive while the system file picker is active. */
+    public boolean keepExportDialogOnPause(Dialog candidate) {
+        return candidate == dialog && exportDocumentPending && !closed && exportTask != null
+                && exportDocumentTask == exportTask && exportDocumentGeneration == operation
+                && !exportTask.cancelled && sameAccountOwner();
+    }
+
+    /** Consumes only our dedicated ACTION_CREATE_DOCUMENT response. */
+    public boolean onExportActivityResult(int requestCode, int resultCode, Intent data) {
+        if (requestCode != exportDocumentRequest || exportDocumentRequest < 0) return false;
+        boolean expected = exportDocumentPending;
+        exportDocumentPending = false;
+        final ExportTask task = exportDocumentTask;
+        final int generation = exportDocumentGeneration;
+        exportDocumentTask = null;
+        if (!expected || task == null || task != exportTask || generation != operation
+                || task.cancelled || closed || !checkAccountOwner()) return true;
+        if (resultCode != Activity.RESULT_OK || data == null || data.getData() == null) {
+            showExportPreview(task, "已取消保存，未写入外部文件。");
+            return true;
+        }
+        if (isSummaryAccessRevoked()) { onAccessRevoked(); return true; }
+        final Uri destination = data.getData();
+        clearContent();
+        addText("正在保存导出文件…", true);
+        addText("保存到你选择的位置，不改变总结进度。", false);
+        addAction("停止保存并返回", () -> {
+            settingsNotice = "已停止保存；所选目标文件可能不完整，可重新导出保存。";
+            showSelection();
+        });
+        boolean saving = SummaryExportFileHelper.postSave(() -> {
+            String failure = null;
+            try {
+                SummaryExportFileHelper.save(context.getApplicationContext(), task.file, destination,
+                        () -> task.cancelled || !sameAccountOwner());
+            } catch (Exception ignored) {
+                failure = "保存失败，目标文件可能不完整。请检查存储空间或选择其他位置后重试。";
+            }
+            final String message = failure == null ? "已保存到所选文件。" : failure;
+            AndroidUtilities.runOnUIThread(() -> {
+                if (exportActive(task, generation)) showExportPreview(task, message);
+            });
+        });
+        if (!saving) showExportPreview(task, "文件提供方仍有保存操作未返回，请稍后再试或使用分享；本次未开始写入所选文件。");
+        return true;
+    }
+
+    private void showExportError(ExportTask task, String message) {
+        cancelWork();
+        clearContent();
+        addText("暂时无法导出", true);
+        addText(message, false);
+        addText("导出没有调用模型，也没有更新总结进度或摘要历史。", false);
+        addAction("重新读取并重试", () -> startExport(task.range, task.format, task.prompt));
+        addAction("返回范围选择", this::showSelection);
+    }
+
+    private void invalidateExportSources(String message) {
+        ExportTask task = exportTask;
+        clearCachedResult();
+        sourceSnapshotInvalid = true;
+        sourceMessages = null;
+        summaryHistory = null;
+        summaryRange = null;
+        lastSuccessfulSources = null;
+        lastSuccessfulHistory = null;
+        summaryConfig = null;
+        summaryPrompt = null;
+        if (task != null) showExportError(task, message);
     }
 
     private static String filterLabel(SummaryFilter.Options options) {
@@ -1480,16 +1811,20 @@ public final class GroupSummarySheet {
                 if (active(generation)) showError(error);
             }
         };
+        loadRange(historyLoader, request, callback);
+    }
+
+    private void loadRange(SummaryHistoryLoader loader, RangeRequest request, SummaryHistoryLoader.Callback callback) {
         if (request.mode == RangeMode.TODAY) {
-            historyLoader.loadToday(callback);
+            loader.loadToday(callback);
         } else if (request.mode == RangeMode.SINCE && !request.initialize && request.upper < 0) {
-            historyLoader.loadSince(request.lower, request.count, callback);
+            loader.loadSince(request.lower, request.count, callback);
         } else if (request.mode == RangeMode.UNREAD) {
-            historyLoader.loadUnread(request.lower, request.upper, request.count, callback);
+            loader.loadUnread(request.lower, request.upper, request.count, callback);
         } else if (request.mode == RangeMode.REPLAY || request.mode == RangeMode.SINCE && !request.initialize) {
-            historyLoader.loadRange(request.lower, request.upper, request.count, callback);
+            loader.loadRange(request.lower, request.upper, request.count, callback);
         } else {
-            historyLoader.loadRecent(request.count, callback);
+            loader.loadRecent(request.count, callback);
         }
     }
 

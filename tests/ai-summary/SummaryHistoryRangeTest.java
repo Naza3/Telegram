@@ -42,6 +42,8 @@ public final class SummaryHistoryRangeTest {
         test("bounded page scanning is distinguishable from an intentional complete batch", SummaryHistoryRangeTest::pageLimit);
         test("progress cancellation suppresses completion and further pages", SummaryHistoryRangeTest::progressCancel);
         test("metadata resolves IDs, explicit mentions and only known reply senders", SummaryHistoryRangeTest::metadata);
+        test("export metadata preserves General, topic roots and unavailable reply targets", SummaryHistoryRangeTest::exportMetadata);
+        test("reply quotes require explicit server text and ordinary history targets", SummaryHistoryRangeTest::quoteMetadata);
         test("account identity is checked across the snapshot and forward requests", SummaryHistoryRangeTest::accountChange);
         test("server-time auto-delete messages survive since, unread and fixed-range batches", SummaryHistoryRangeTest::autoDeleteWindows);
         System.out.println("SummaryHistoryRangeTest: " + passed + " passed, " + assertions + " assertions");
@@ -286,6 +288,86 @@ public final class SummaryHistoryRangeTest {
         SummaryMessage legacy = new SummaryMessage(DIALOG, 99, now(), "legacy", "text");
         check(legacy.senderId == 0 && legacy.replyToId == 0 && !legacy.mentionedSelf
                 && !legacy.replyToSelfKnown, "legacy constructor invented metadata");
+        check(legacy.topicId == 0 && legacy.quoteText.isEmpty(), "legacy constructor invented export metadata");
+        SummaryMessage oldFull = new SummaryMessage(DIALOG, 99, now(), "sender", "text",
+                55, 1, DIALOG, false, false, 0, true, false);
+        check(oldFull.topicId == 0 && oldFull.quoteText.isEmpty() && oldFull.replyToId == 1,
+                "old full constructor lost compatibility");
+        check(m2.topicId == 0 && m2.quoteText.isEmpty(), "ordinary chat acquired a forum topic or inferred parent quote");
+    }
+
+    private static void exportMetadata() {
+        reset(true);
+        TLRPC.Message root = service(42); root.action = new TLRPC.TL_messageActionTopicCreate();
+        TLRPC.Message rootReply = replying(message(43, "topic root reply"), 42);
+        rootReply.reply_to.forum_topic = true; // No top_id: the replied-to message is the topic root.
+        TLRPC.Message parent = topicMessage(44, 42);
+        parent.from_id.user_id = 1000; parent.media = new TLRPC.TL_messageMediaPhoto();
+        TLRPC.Message child = replying(message(45, "reply to filtered media"), 44);
+        child.reply_to.forum_topic = true; child.reply_to.reply_to_top_id = 42;
+        child.reply_to.flags = 1 << 6; child.reply_to.quote_text = "  服务器引用\n原样保留  ";
+        TLRPC.Message general = message(46, "General without reply header");
+        TLRPC.Message generalReply = replying(message(47, "General reply"), 46);
+        generalReply.reply_to.forum_topic = true; generalReply.reply_to.reply_to_top_id = 1;
+        TLRPC.Message crossPeer = replying(message(48, "cross-peer reply with overlapping ID"), 44);
+        crossPeer.reply_to.forum_topic = true; crossPeer.reply_to.reply_to_top_id = 42;
+        crossPeer.reply_to.reply_to_peer_id = new TLRPC.TL_peerChannel();
+        crossPeer.reply_to.reply_to_peer_id.channel_id = 900;
+        TLRPC.Message outside = replying(message(49, "reply beyond the snapshot"), 9000);
+        outside.reply_to.forum_topic = true; outside.reply_to.reply_to_top_id = 42;
+        TLRPC.Message quoteOnly = topicMessage(50, 42);
+        quoteOnly.reply_to.flags = 1 << 6; quoteOnly.reply_to.quote_text = "quote without target ID";
+        TLRPC.Message unflagged = topicMessage(51, 42);
+        unflagged.reply_to.quote_text = "not explicitly present in server fields";
+        Result result = new Result();
+        new SummaryHistoryLoader(0, DIALOG, 0).loadRange(41, 51, 20, result);
+        AndroidUtilities.drain();
+        reply(root, rootReply, parent, child, general, generalReply, crossPeer, outside, quoteOnly, unflagged);
+        checkComplete(result, 51, false);
+        check(result.loaded.messages.size() == 8 && result.loaded.scannedMessageCount == 10,
+                "export metadata changed pure-text history selection");
+        SummaryMessage first = find(result.loaded, 43);
+        check(first.topicId == 42 && first.replyToId == 42 && first.replyToDialogId == DIALOG,
+                "filtered topic root lost its reply relationship or topic identity");
+        SummaryMessage filtered = find(result.loaded, 45);
+        check(filtered.topicId == 42 && filtered.replyToId == 44 && filtered.replyToSelfKnown && filtered.replyToSelf,
+                "filtered parent no longer resolved its known sender or reply ID");
+        check(filtered.quoteText.equals(child.reply_to.quote_text), "reply resolution trimmed or dropped the explicit quote");
+        check(find(result.loaded, 46).topicId == 1 && find(result.loaded, 47).topicId == 1
+                && find(result.loaded, 47).replyToId == 46, "General was confused with whole-chat scope or its replied message ID");
+        SummaryMessage foreign = find(result.loaded, 48);
+        check(foreign.topicId == 42 && foreign.replyToId == 44 && foreign.replyToDialogId == -900
+                && !foreign.replyToSelfKnown, "cross-peer ID was matched against a same-ID local parent");
+        check(find(result.loaded, 49).replyToId == 9000 && !find(result.loaded, 49).replyToSelfKnown,
+                "unavailable parent was removed or its sender was guessed");
+        check(find(result.loaded, 50).replyToId == 0
+                && find(result.loaded, 50).quoteText.equals(quoteOnly.reply_to.quote_text),
+                "explicit quote was lost when the server supplied no target ID");
+        check(find(result.loaded, 51).quoteText.isEmpty(), "unflagged quote text was treated as server metadata");
+        check(network.sent.size() == 1 && network.pending.isEmpty(), "export metadata fetched extra or out-of-scope history");
+    }
+
+    private static void quoteMetadata() {
+        reset(false);
+        TLRPC.Message scheduled = replying(message(1, "scheduled reply"), 99);
+        scheduled.reply_to.reply_to_scheduled = true;
+        scheduled.reply_to.flags = 1 << 6; scheduled.reply_to.quote_text = "scheduled-only excerpt";
+        TLRPC.Message ephemeral = replying(message(2, "ephemeral reply"), 99);
+        ephemeral.reply_to.reply_to_ephemeral = true;
+        ephemeral.reply_to.flags = 1 << 6; ephemeral.reply_to.quote_text = "ephemeral-only excerpt";
+        TLRPC.Message nullQuote = replying(message(3, "missing quote payload"), 99);
+        nullQuote.reply_to.flags = 1 << 6;
+        Result result = new Result();
+        new SummaryHistoryLoader(0, DIALOG, 0).loadRange(0, 3, 3, result);
+        AndroidUtilities.drain(); reply(scheduled, ephemeral, nullQuote);
+        checkComplete(result, 3, false);
+        for (int id : new int[] {1, 2}) {
+            SummaryMessage actual = find(result.loaded, id);
+            check(actual.replyToId == 0 && actual.replyToDialogId == 0 && actual.quoteText.isEmpty(),
+                    "non-history reply was presented as a normal message target");
+        }
+        check(find(result.loaded, 3).replyToId == 99 && find(result.loaded, 3).quoteText.isEmpty(),
+                "absent quote payload invented text or removed a valid reply target");
     }
 
     private static void accountChange() {

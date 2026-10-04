@@ -2778,6 +2778,22 @@ public class TopicsFragment extends BaseFragment implements NotificationCenter.N
     }
 
     @Override
+    public boolean dismissDialogOnPause(android.app.Dialog dialog) {
+        if (groupSummarySheet != null && groupSummarySheet.keepExportDialogOnPause(dialog)) {
+            return false;
+        }
+        return super.dismissDialogOnPause(dialog);
+    }
+
+    @Override
+    public void onActivityResultFragment(int requestCode, int resultCode, android.content.Intent data) {
+        if (groupSummarySheet != null && groupSummarySheet.onExportActivityResult(requestCode, resultCode, data)) {
+            return;
+        }
+        super.onActivityResultFragment(requestCode, resultCode, data);
+    }
+
+    @Override
     public void onFragmentDestroy() {
         if (groupSummarySheet != null) {
             groupSummarySheet.dismiss();

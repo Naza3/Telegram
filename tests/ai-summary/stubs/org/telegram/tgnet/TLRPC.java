@@ -49,7 +49,8 @@ public final class TLRPC {
     public static class TL_chatForbidden extends Chat {}
     public static class TL_channelForbidden extends Chat {}
     public static class MessageReplyHeader extends TLObject {
-        public int reply_to_msg_id, reply_to_top_id;
+        public int flags, reply_to_msg_id, reply_to_top_id;
+        public String quote_text;
         public boolean forum_topic, reply_to_scheduled, reply_to_ephemeral;
         public Peer reply_to_peer_id;
     }

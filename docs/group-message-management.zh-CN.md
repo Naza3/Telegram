@@ -31,7 +31,9 @@
 
 ## 本轮交付状态
 
-- 两项功能代码与设置页面已实现，完整 APK 正在准备构建。
+- 两项功能代码与设置页面已实现；源码 [`fc73734`](https://github.com/Naza3/Telegram/commit/fc73734aa6d3d1d9380de00f045d2cd1fef3e745) 的 [第 19 次完整构建](https://github.com/Naza3/Telegram/actions/runs/37202568881) 已成功，Gradle 构建耗时 15 分 25 秒。
+- [下载 ARM64 APK 与校验文件](https://github.com/Naza3/Telegram/actions/runs/37202568881/artifacts/11303314649)：产物 `Telegram-MNN-arm64-debug-19`，ZIP 62751225 字节，2026-10-18 20:52:26（北京时间）到期。登录 GitHub 后下载 ZIP，解压安装其中的 APK。
+- 签名与上一版 Actions 包一致（SHA-256 `c8715ba0c50510b9c1cc4d52b0fd2b0aed82dd55675f89c4f48d68978b7df313`）；云端 ARM64、16 KB 对齐、原生 TL 发布实体及全部新增回归通过。真机交互未测。
 - 本地新增回归：匹配 24、设置 66、真实 TL 资格 48、异步副本管理 22 断言；AES 与真实文件存储 24 项／245 断言通过。测试命令见 [回归说明](../tests/group-messages/README.md)。
 - 最终 Android Java 编译通过（64.36 秒），2782 份 Java／XML 源文件在编译前后哈希一致。
 - 既有 AI 核心、控制器 36 项／332 断言、前台服务 23 项／237 断言及 7 项构建配置检查通过；真机交互和后台网络事件仍待手机验收。

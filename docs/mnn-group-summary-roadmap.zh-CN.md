@@ -2,7 +2,9 @@
 
 ## 本轮续做：多服务、用量、发布与选中消息
 
-按已确认顺序推进以下四项，并加入本群 UID 排除。前一轮 APK 链接见下方；本轮最终构建证据在完成后补记，不以旧构建代替。
+本轮源码 [`ba3e70a`](https://github.com/Naza3/Telegram/commit/ba3e70a80c885b24caad54942e407930080c1aa0) 的 [第 18 次完整构建](https://github.com/Naza3/Telegram/actions/runs/37198573737) 已成功；[下载 ARM64 APK 与校验文件](https://github.com/Naza3/Telegram/actions/runs/37198573737/artifacts/11301768886)。产物 `Telegram-MNN-arm64-debug-18`，ZIP 62659786 字节，2026-10-18 19:40:48（北京时间）到期。签名沿用上一版（SHA-256 `c8715ba0c50510b9c1cc4d52b0fd2b0aed82dd55675f89c4f48d68978b7df313`），16 KB 对齐、ARM64 及原生 TL 实体回归通过。云端构建使用已有 Telegram API Secrets；真机 UI、模型性能及真实群发送未测。
+
+按已确认顺序推进以下四项，并加入本群 UID 排除。本轮最终构建已成功，下载与验证记录如下；前一轮证据另保留。
 
 | 顺序 | 交付 | 当前状态 |
 | --- | --- | --- |
@@ -12,7 +14,7 @@
 | 4 | 聊天多选消息后进入总结中心，只总结选中快照，不补抓、不推进通用增量进度 | 工厂 14 组／69 断言、控制器及最终 Android 编译通过 |
 | 追加 | 用户主页显示并复制官方数字 UID；账号／群隔离的排除名单 | 存储 94、筛选 89 断言与最终 Android 编译通过 |
 
-本轮本地最终验证：25 类核心 JVM 全过（HTTP 71 组，其余 15170 断言），控制器 36 组／332 断言、前台服务 23 组／237 断言、真实 `TLRPC`／`SerializedData` 实体 13 组／297 断言、7 项构建配置及 24 组合成样例均通过。最终 Android Java 编译通过（65.35 秒），前后 2773 份 Java／XML 源文件哈希一致。证据在 `/workspace/build-logs/mnn-api-profiles-observation/`。APK CI 待本次推送后核验；真机 UI、Keystore 迁移、手机／局域网模型及真实群发送仍未测。
+本轮本地最终验证：25 类核心 JVM 全过（HTTP 71 组，其余 15170 断言），控制器 36 组／332 断言、前台服务 23 组／237 断言、真实 `TLRPC`／`SerializedData` 实体 13 组／297 断言、7 项构建配置及 24 组合成样例均通过。最终 Android Java 编译通过（65.35 秒），前后 2773 份 Java／XML 源文件哈希一致。证据在 `/workspace/build-logs/mnn-api-profiles-observation/`。本轮 APK CI 已成功；真机 UI、Keystore 迁移、手机／局域网模型及真实群发送仍未测。
 
 UID 使用 `TLRPC.User.id`，与昵称、`@username` 和消息 ID 不同。名单精确匹配实际个人发送者，匿名管理员或频道身份发言不暴露背后的个人 UID。名单仅影响总结输入，覆盖本群全部话题；导出仍遵循原有范围／筛选。排除后不为凑足 N 条补抓历史，也不自动推进通用增量游标。
 
@@ -20,7 +22,7 @@ API 配置在本机按真实账号加密保存；新增配置不会复制旧密�
 
 用量只记录服务实际返回的字段。输入字符数、输出上限都不是实际 token 用量；某次请求缺少的字段使该字段合计保持未知。速度为请求总耗时上的输出均速，包含等待和预填充，不作为模型解码速度或实机提速结论。
 
-本轮源码 [`482075b`](https://github.com/Naza3/Telegram/commit/482075b91f37e90fbb8998c7357bc8a7af7ffd74) 的 [完整构建](https://github.com/Naza3/Telegram/actions/runs/37185833685) 已成功（17 分 16 秒）；[下载 APK 与校验文件](https://github.com/Naza3/Telegram/actions/runs/37185833685/artifacts/11296649826)，产物 `Telegram-MNN-arm64-debug-17`，2026-10-18 15:44:23（北京时间）到期。签名与上一轮一致（SHA-256 `c8715ba0c50510b9c1cc4d52b0fd2b0aed82dd55675f89c4f48d68978b7df313`），16 KB 对齐、ARM64 架构及云端全部回归通过。此构建没有真机息屏、MNN 性能或真实群发送的验收结论。
+上一轮源码 [`482075b`](https://github.com/Naza3/Telegram/commit/482075b91f37e90fbb8998c7357bc8a7af7ffd74) 的 [完整构建](https://github.com/Naza3/Telegram/actions/runs/37185833685) 已成功（17 分 16 秒）；[下载 APK 与校验文件](https://github.com/Naza3/Telegram/actions/runs/37185833685/artifacts/11296649826)，产物 `Telegram-MNN-arm64-debug-17`，2026-10-18 15:44:23（北京时间）到期。签名与上一轮一致（SHA-256 `c8715ba0c50510b9c1cc4d52b0fd2b0aed82dd55675f89c4f48d68978b7df313`），16 KB 对齐、ARM64 架构及云端全部回归通过。此构建没有真机息屏、MNN 性能或真实群发送的验收结论。
 
 本计划用于逐步完善 Telegram 安卓客户端中的 MNN 群聊总结，目标是让用户快速补齐群聊进度、按自己的关注点总结。S0–S9 记录现有功能及验收，S10–S14 已进入首轮代码集成，覆盖独立总结中心、统一界面、编辑后发回来源群、发送记录和有界后台任务；未完成的设计项及设备验收继续保留。新直接总结不要求原消息跳转，旧历史及独立追问的核验能力保持各自约定。
 

@@ -1,8 +1,10 @@
 # AI 群聊总结：总结中心、界面重构与发回来源群的实施设计
 
-本轮续做已实现命名 API 配置、实际 usage／请求耗时、用户主页官方 UID 与本群排除、选中消息快照，以及长摘要分条预览与发送。最终集成与构建状态见 [路线图本轮记录](mnn-group-summary-roadmap.zh-CN.md#本轮续做多服务用量发布与选中消息)。下方第 17 次构建属于前一轮，不能证明本轮新增项通过。
+本轮续做已实现命名 API 配置、实际 usage／请求耗时、用户主页官方 UID 与本群排除、选中消息快照，以及长摘要分条预览与发送。最终集成与构建状态见 [路线图本轮记录](mnn-group-summary-roadmap.zh-CN.md#本轮续做多服务用量发布与选中消息)。下方第 17 次构建作为前一轮记录保留。
 
-本轮源码 [`482075b`](https://github.com/Naza3/Telegram/commit/482075b91f37e90fbb8998c7357bc8a7af7ffd74) 的 [完整构建](https://github.com/Naza3/Telegram/actions/runs/37185833685) 已成功（17 分 16 秒）；[下载 APK 与校验文件](https://github.com/Naza3/Telegram/actions/runs/37185833685/artifacts/11296649826)，产物 `Telegram-MNN-arm64-debug-17`，2026-10-18 15:44:23（北京时间）到期。签名与上一轮一致（SHA-256 `c8715ba0c50510b9c1cc4d52b0fd2b0aed82dd55675f89c4f48d68978b7df313`），16 KB 对齐、ARM64 架构及云端全部回归通过。此构建没有真机息屏、MNN 性能或真实群发送的验收结论。
+本轮源码 [`ba3e70a`](https://github.com/Naza3/Telegram/commit/ba3e70a80c885b24caad54942e407930080c1aa0) 的 [第 18 次完整构建](https://github.com/Naza3/Telegram/actions/runs/37198573737) 已成功；[下载 ARM64 APK 与校验文件](https://github.com/Naza3/Telegram/actions/runs/37198573737/artifacts/11301768886)。产物 `Telegram-MNN-arm64-debug-18`，ZIP 62659786 字节，2026-10-18 19:40:48（北京时间）到期。签名沿用上一版（SHA-256 `c8715ba0c50510b9c1cc4d52b0fd2b0aed82dd55675f89c4f48d68978b7df313`），16 KB 对齐、ARM64 及原生 TL 实体回归通过。云端构建使用已有 Telegram API Secrets；真机 UI、模型性能及真实群发送未测。
+
+上一轮源码 [`482075b`](https://github.com/Naza3/Telegram/commit/482075b91f37e90fbb8998c7357bc8a7af7ffd74) 的 [完整构建](https://github.com/Naza3/Telegram/actions/runs/37185833685) 已成功（17 分 16 秒）；[下载 APK 与校验文件](https://github.com/Naza3/Telegram/actions/runs/37185833685/artifacts/11296649826)，产物 `Telegram-MNN-arm64-debug-17`，2026-10-18 15:44:23（北京时间）到期。签名与上一轮一致（SHA-256 `c8715ba0c50510b9c1cc4d52b0fd2b0aed82dd55675f89c4f48d68978b7df313`），16 KB 对齐、ARM64 架构及云端全部回归通过。此构建没有真机息屏、MNN 性能或真实群发送的验收结论。
 
 更新：2026-10-04（北京时间）。状态：S10–S14 首轮代码已实现，本地检查和 APK CI 已通过；不等于所有设计目标或真机验收均已完成。设计基线为 `9703bb7`，本轮未向真实群发送消息。
 

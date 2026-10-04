@@ -4,9 +4,9 @@
 
 功能的阶段状态、验收证据和待测项目见 [实施计划](mnn-group-summary-roadmap.zh-CN.md)。已完成代码验证的功能仍需 [真机验收](mnn-device-validation.zh-CN.md)，不能以模拟测试代替实际 MNN 模型效果。
 
-本轮规则版本 6 改为**手动填写核心总结要求，默认留空**。直接总结没有内置栏目、语言或字数要求，也不自动附加旧模板和“突出与我相关”的写作指令；以前保存的自定义文字仍保留。开始总结前须填写，空白会在加载历史或调用模型前拦截；导出和连接测试独立可用。极简成员／回复输入和无原消息跳转行为保持，预算仍为 2048–64000、默认 6000。最终冻结源码的 15 类 JVM（HTTP 65 项、其余核心 5113 断言）、7 项构建配置和 24 组样例通过；Android 编译通过（59 秒）。最终源码 [`c27ae41e503c83c6790cd9a40f3b22993cbb961e`](https://github.com/Naza3/Telegram/commit/c27ae41e503c83c6790cd9a40f3b22993cbb961e) 已推送，[Telegram CI 37179400082](https://github.com/Naza3/Telegram/actions/runs/37179400082) 已通过，APK 已发布；配套 MNN 835 已构建成功，真机仍未测。
+当前版本新增主页官方 UID 复制、本群 UID 排除、命名 API 配置、实际 token 用量、长摘要分条预览与选中消息总结。核心总结要求继续由用户手动填写、默认留空；没有内置栏目、语言或字数要求。极简成员／回复输入、无原消息跳转、2048–64000 字符预算保持。实现和自动回归已通过，实际设备体验待验收。
 
-**[下载最新 Telegram APK（ARM64 调试版，第 16 次构建）](https://github.com/Naza3/Telegram/actions/runs/37179400082/artifacts/11294697666)**。登录 GitHub 下载 ZIP，解压安装其中 APK；完整校验与到期时间见下方“当前构建”。
+**[下载最新 Telegram APK（ARM64 调试版，第 18 次构建）](https://github.com/Naza3/Telegram/actions/runs/37198573737/artifacts/11301768886)**。登录 GitHub 下载 ZIP，解压安装其中 APK；签名与上一版一致，完整校验与到期时间见下方“当前构建”。
 
 配套服务可下载 [MNN 0.8.3-localapi.5（835）已签名 APK](https://github.com/Naza3/MNN/actions/runs/37175086947/artifacts/11294005611)。旧 Telegram 版本链接仅保留在历史构建记录中。
 
@@ -366,7 +366,13 @@ CI 使用 Ubuntu 24.04、JDK 21 和与本地相同的 SDK/NDK/CMake 版本，递
 
 CI 独立生成调试签名，并通过 Actions 缓存在后续构建间复用；不上传 keystore 到产物。缓存失效或被清理后会生成新的调试签名。CI 签名与之前的本地 APK 不同；如果手机安装提示签名冲突，应先核对已安装包与新包的证书并找回原签名，不通过卸载来绕过冲突。正式分发应另行配置持久的私有签名密钥。
 
-## 当前构建：手动核心总结要求（2026-10-04）
+## 当前构建：UID 排除与总结流程完善（2026-10-04）
+
+本轮源码 [`ba3e70a`](https://github.com/Naza3/Telegram/commit/ba3e70a80c885b24caad54942e407930080c1aa0) 的 [第 18 次完整构建](https://github.com/Naza3/Telegram/actions/runs/37198573737) 已成功；[下载 ARM64 APK 与校验文件](https://github.com/Naza3/Telegram/actions/runs/37198573737/artifacts/11301768886)。产物 `Telegram-MNN-arm64-debug-18`，ZIP 62659786 字节，2026-10-18 19:40:48（北京时间）到期。签名沿用上一版（SHA-256 `c8715ba0c50510b9c1cc4d52b0fd2b0aed82dd55675f89c4f48d68978b7df313`），16 KB 对齐、ARM64 及原生 TL 实体回归通过。云端构建使用已有 Telegram API Secrets；真机 UI、模型性能及真实群发送未测。
+
+本地与云端 25 类核心回归通过（HTTP 71 组、其余 15170 断言）；控制器 36 组／332 断言、前台服务 23 组／237 断言、原生 TL 实体 13 组／297 断言、7 项构建配置与 24 组样例通过。最终本地 Android 编译 65.35 秒，前后 2773 份 Java／XML 哈希一致。证据：`/workspace/build-logs/mnn-api-profiles-observation/ci-review.json`。
+
+## 此前构建：手动核心总结要求（2026-10-04）
 
 规则版本 6 的源码 [`c27ae41e503c83c6790cd9a40f3b22993cbb961e`](https://github.com/Naza3/Telegram/commit/c27ae41e503c83c6790cd9a40f3b22993cbb961e) 已推送并核对远端树，[Telegram CI 37179400082，第 16 次构建](https://github.com/Naza3/Telegram/actions/runs/37179400082) **成功**。构建任务 `111368706927` 耗时 11 分 34 秒，Gradle 构建耗时 8 分 48 秒。
 

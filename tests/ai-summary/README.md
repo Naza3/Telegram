@@ -115,7 +115,7 @@ creating an unrun manual evaluation record, and
 [device validation](../../docs/mnn-device-validation.zh-CN.md) for the remaining
 phone/MNN checks.
 
-## Direct-summary drafts and input inspection (local regression passed)
+## Direct-summary drafts and input inspection (APK build passed)
 
 When streaming is enabled, each source and merge request exposes its own
 filtered answer text as an unfinished draft. Starting the next request clears
@@ -126,17 +126,33 @@ summary history or commit the summary cursor. Ordinary JSON response mode does
 not gain intermediate drafts and still waits for the complete response.
 
 Both modes also gain per-request input inspection on progress, success and error
-screens: choose a source or merge request to view its exact system/user text and
-Java character counts. The list remains in the current task's memory, excludes
+screens: select `查看模型输入（N次请求）`, then choose a source or merge request
+to view its exact system/user text and Java character counts; long-press to select
+and copy text. The list remains in the current task's memory, excludes
 the authentication API key, and is not written to logs or persistent summary
 history. A new task, retry, leaving the panel or changing accounts clears it;
 late callbacks must not restore old contents. Full local regression passed:
 15 JVM classes, 62 HTTP cases and 1,308 other core assertions, plus 7 build-config
 checks and all 24 synthetic fixtures. Final Android Java compilation passed in
 59.7 seconds; hashes of all 2,834 tracked Java/XML source files were unchanged
-before and after compilation. New APK/CI is pending; phone checks S03–S04 and
-D03–D05 remain unrun.
-Earlier APK results below do not validate this revision.
+before and after compilation. Source
+[22214a5321a9ab0663a2c68aec159ab64e745123](https://github.com/Naza3/Telegram/commit/22214a5321a9ab0663a2c68aec159ab64e745123)
+passed [APK CI 37172659455](https://github.com/Naza3/Telegram/actions/runs/37172659455)
+in 19 minutes 9 seconds (build job 19 minutes 6 seconds; Gradle 16 minutes
+8 seconds). CI logs confirm the same 15 classes, 62 HTTP cases and 1,308 other
+assertions, including 168 export assertions, plus 7 build-config checks and
+24 fixtures. v1/v2 signing, 16 KB alignment and ARM64 checks passed. The signing
+certificate SHA-256 is `c8715ba0c50510b9c1cc4d52b0fd2b0aed82dd55675f89c4f48d68978b7df313`,
+unchanged from the previous build; cache `mnn-debug-keystore-1402824680-v1` was
+restored. Review evidence is in `/workspace/build-logs/mnn-all-stage-stream/ci-review/`.
+
+[Download the APK and checksum](https://github.com/Naza3/Telegram/actions/runs/37172659455/artifacts/11292556741):
+`Telegram-MNN-arm64-debug-12`, ZIP 62,537,189 bytes, expires
+2026-10-18 03:17:07 UTC. GitHub's artifact digest is
+`sha256:35a76b7099d426278d6fcd50ef83904f59b4b2b5b81a6479bb8a7cfb7525f8ef`;
+this hashes the ZIP, not the APK. Use the included `.sha256` for the APK.
+Phone checks S03–S04 and D03–D05 remain unrun. Earlier APK results below do not
+validate this revision.
 
 Direct summaries send source JSONL, not the readable Markdown export. Each
 source record includes `ref`, `part`, full time, sender name and `text`, with

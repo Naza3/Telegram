@@ -57,7 +57,8 @@ The tests cover:
   redirects, malformed/empty responses, text parts, truncated output, MNN's
   HTTP 200 `Error:` response, thinking removal, SSE/UTF-8 fragmentation and
   completion markers, request/response budgets, same-endpoint concurrency,
-  per-stage references, and cancellation before or after queued callbacks.
+  strict per-stage question references, citation-free direct summaries, and
+  cancellation before or after queued callbacks.
   Request telemetry covers safe character counts, actual response transport,
   observed thinking, empty SSE events, and filtered current-request drafts for
   streamed source and merge requests. Drafts reset between requests and do not
@@ -77,14 +78,17 @@ The tests cover:
 - `AiSummarySettingsOptionsTest`: stream/context/output option defaults,
   persistence, validation, and account-slot reuse.
 - `AiSummaryPromptTest`: lossless Unicode source splitting, source/merge
-  budgets, prompt directions, injection boundaries, and reference validation.
+  budgets, prompt directions, injection boundaries, exact manual system text, missing-core rejection, one-time core budgeting,
+  no automatic template/column/length instructions, minimal member/reply semantics, and strict
+  question-reference validation.
 - `PromptOptionsTest`: templates, custom direction limits, immutable options,
   preference scopes and precedence, owner isolation, persistence rollback, and
-  preservation of saved directions when built-in rules advance to version 2.
+  preservation of saved directions across built-in rule versions; this revision
+  advances the rules to version 6, with local verification recorded below.
 - `PromptBudgetTest`: configurable context/output estimates, reply-aware
   grouping, lossless long-message splitting, transfer/negation metadata, and
   focus-self metadata, omission of redundant defaults without changing known
-  reply facts, and brief output guidance for small source sets.
+  reply facts, and exact manual-core budgeting without built-in writing targets.
 - `SummaryHistoryStoreTest`: encrypted archive boundary, round trips, stable-ID
   replacement, account/dialog/topic isolation, record and byte limits, failed
   publication, corruption handling, scoped deletion, full reset, and logout.
@@ -115,10 +119,131 @@ creating an unrun manual evaluation record, and
 [device validation](../../docs/mnn-device-validation.zh-CN.md) for the remaining
 phone/MNN checks.
 
-## Direct-summary drafts and input inspection (APK build passed)
+## Manual core requirements and minimal direct input, rule version 6
+
+Final source [c27ae41e503c83c6790cd9a40f3b22993cbb961e](https://github.com/Naza3/Telegram/commit/c27ae41e503c83c6790cd9a40f3b22993cbb961e)
+was pushed and its remote tree verified. [CI 37179400082](https://github.com/Naza3/Telegram/actions/runs/37179400082)
+passed as build #16 (job `111368706927`: 11 minutes 34 seconds; Gradle:
+8 minutes 48 seconds). [Download APK and checksum](https://github.com/Naza3/Telegram/actions/runs/37179400082/artifacts/11294697666).
+Final regression and Android compilation evidence is listed below; the unchanged question-prompt test still
+passes its original 89 assertions with empty DEFAULT options.
+The rule-5 `09fdf4d` / [CI 37177944484](https://github.com/Naza3/Telegram/actions/runs/37177944484)
+was intentionally cancelled for the manual-core request after tests passed; no
+APK was produced. Rule-4 `77153f2` / [CI 37177156583](https://github.com/Naza3/Telegram/actions/runs/37177156583)
+was also cancelled. `030059c` / [CI 37175361566](https://github.com/Naza3/Telegram/actions/runs/37175361566)
+is a passed intermediate checkpoint with an earlier source format.
+
+The user must enter the core writing requirements in Telegram. New preferences
+start empty; previously saved custom text is retained, and clearing/saving empty
+text is allowed. Missing core text blocks direct summary before loading history
+or calling the model. Export and connection testing remain independent.
+`systemPrompt(options)` returns exactly the existing trimmed `customInstructions`:
+no fixed headings, language, writing length, template or focus-self instruction
+is appended. The entire normalized core goes in SYSTEM once per source/merge
+request and is budgeted once by its UTF-16 length. USER contains protocol/data
+and necessary multi-stage processing notes, never a duplicate core. Raw protocol
+helpers remain usable without a core; option-aware direct request/budget helpers
+reject empty core. Independent question prompts retain their own rules and can
+still use empty DEFAULT options.
+
+Source requests now carry the overall batch start/end time, a self-contained
+member alias/nickname dictionary in each chunk, and JSON-quoted original text.
+They omit per-message timestamps, real message IDs and sequential `[mN]` IDs.
+`B @A` means B replied to member A; it no longer identifies which of A's messages
+was the target and is not an ordinary text mention. Missing/unknown targets stay
+`@未收录` / `@目标未知`. The overall time range cannot establish an individual
+message's date for relative expressions such as “tomorrow”.
+
+Known member aliases stay stable across the snapshot, including same-name
+members and nickname changes. Nickname lists use last-seen order, including
+A→B→A; unknown identities retain `?` without name-based identity inference.
+Continuation slices preserve the entire body. Intermediate summaries and every
+merge round retain member aliases and unknown markers to avoid merging
+same-name people or counting one renamed person twice. Merge inputs remain
+JSONL. Direct summaries do not require citations and never activate source links;
+citation-free results can enter the explicit cache and history. New history has
+`source_links=false`; legacy records lacking the field default to `true` and
+retain revalidated source navigation. Independent follow-up questions retain
+strict JSONL source references and citation validation. Export message layouts
+and fields remain intact. Markdown includes only nonempty
+manual core requirements; JSON keeps compatible direction metadata with empty
+`template_instructions` and the manual text in `custom_instructions`. Export
+adds no automatic template/focus writing goal and accepts empty core text.
+
+The final frozen-source rule-6 regression passed 15 JVM classes: 65 HTTP cases
+and 5,113 other assertions (budget 3,537, Prompt 451, options 58, cache 35;
+export 280, question 89 unchanged). All 7 build-config checks and 24 synthetic fixtures
+passed. Logs are in `/workspace/build-logs/mnn-manual-prompt/`. This includes
+export-direction cleanup. Android Java compilation passed in 59 seconds;
+SHA hashes were unchanged for all 2,835 Java/XML files, 2,748 main-source files
+and 8 changed production files. Completed CI independently passed the same
+15 classes, 65 HTTP cases, 5,113 other assertions, 7 build-config checks and
+24 fixtures. v1/v2 signing, 16 KiB alignment and ARM64 checks passed. Cache
+`mnn-debug-keystore-1402824680-v1` was restored; certificate SHA-256
+`c8715ba0c50510b9c1cc4d52b0fd2b0aed82dd55675f89c4f48d68978b7df313`
+matches the previous build. Review evidence is in
+`/workspace/build-logs/mnn-manual-prompt/telegram-ci/review-summary.json`.
+
+The artifact is `Telegram-MNN-arm64-debug-16`, ZIP 62,538,285 bytes, expires
+2026-10-18 05:27:43 UTC. GitHub ZIP SHA-256 is
+`68f04c6f7d27c6a5f1d89d2fb511b9643cfc6d275de1ffc903de3828cb1acece`;
+this is not the raw APK hash. Use the packaged `.sha256` for the APK. Previous
+rule-5 counts do not validate this revision. During preceding rule-4
+checks, one initial focused question-cancellation run failed once and was not
+reproduced in the later 64-case HTTP run, full 15-class run or 20 isolated
+repeats. This is not evidence of a production race fix. Device behavior and
+model performance remain untested.
+
+The input budget remains 2,048–64,000 Java UTF-16 code units, default 6,000.
+Separate MNN [source 31c522ba](https://github.com/Naza3/MNN/commit/31c522ba),
+`0.8.3-localapi.5 (835)`, passed [CI 37175086947](https://github.com/Naza3/MNN/actions/runs/37175086947).
+[Download the signed MNN APK](https://github.com/Naza3/MNN/actions/runs/37175086947/artifacts/11294005611),
+using the existing CI signing identity. It passed 51 helper tests and 534 full
+App tests including 88 API-focused tests, with zero failures. The
+[updated MNN documentation](https://github.com/Naza3/MNN/commit/88676faf) describes
+the new combined message-content limit of 65,536 UTF-16 units and independent
+256 KiB (262,144-byte) UTF-8 HTTP-body limit. Heavy escaping can hit the byte
+limit first. Updating Telegram alone cannot enlarge an older MNN server's limit.
+Actual model token context is unchanged. MNN output remains limited to 2,048:
+2,001–2,048 are allowed, 4,096/8,192 are rejected; only the exact server-reported
+`max_tokens` range error maps to the specific Telegram explanation.
+
+The source data format remains unchanged from rule 4. Automatic three-section
+summaries and 220/440-character writing targets are removed. Protocol notes
+still explain member aliases, replies, continuations and self metadata; they do
+not select a writing task. There is no fixed total instruction size for manual
+core text. Use per-request input inspection to view the exact SYSTEM/USER text.
+
+Synthetic audits used 2,000 output tokens and a 32,000 input budget. Rule 6
+explicitly supplies the artificial fixture core `请概括以下合成对话。` (10 UTF-16
+units). This is manually supplied test text, not a product default or a user
+chat; built-in core text is zero. No model, tokenizer or HTTP call was made.
+Values below sum **source request** inputs in UTF-16 units / number of source
+requests, excluding later merge inputs:
+
+| Synthetic fixture | Old JSONL | Intermediate rule 3 | Intermediate rule 4 | Previous rule 5 | Rule 6, manual 10-unit core |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 100 × 20 characters, no replies | 13,627 / 1 | 5,955 / 1 | 3,222 / 1 | 2,889 / 1 | 2,817 / 1 |
+| 100 × 20 characters, 50 known replies | 20,022 / 1 | 6,550 / 1 | 3,722 / 1 | 3,389 / 1 | 3,317 / 1 |
+| 300 × 20 characters, no replies | 40,262 / 2 | 16,555 / 1 | 8,422 / 1 | 8,089 / 1 | 8,017 / 1 |
+| 100 × 200 characters, no replies | 32,462 / 2 | 24,718 / 2 | 21,222 / 1 | 20,889 / 1 | 20,817 / 1 |
+
+Rule-6 evidence is in `/workspace/build-logs/mnn-manual-prompt/offline-audit/`
+under `synthetic-32000/counts.txt` and `synthetic-64000/counts.txt`. The four
+fixtures have identical counts at 64,000 because they already fit 32,000.
+Actual input depends on the user's core text; the artificial 10-unit core is not
+a default. Historical evidence remains in `mnn-compact-64k`, `mnn-minimal-input`
+and `mnn-short-prompt`. These are not token or latency measurements and cannot
+predict reductions for real chats. Device
+cases P01–P04, B05–B08, C03, H11 and E08 remain unrun.
+
+## Previous direct-summary drafts and input inspection build
 
 When streaming is enabled, each source and merge request exposes its own
-filtered answer text as an unfinished draft. Starting the next request clears
+filtered answer text as an unfinished draft. Some custom formats may remain
+hidden until the entire summary succeeds; progress and received-character
+counts still update. Existing reasoning protection remains, so completion of
+an intermediate request does not guarantee a visible draft. Starting the next request clears
 the previous draft; labels identify the source segment or merge round and
 segment. Recognized thinking remains hidden, draft references are not clickable,
 and `length`, cancellation or a broken stream cannot publish success, save
@@ -154,18 +279,21 @@ this hashes the ZIP, not the APK. Use the included `.sha256` for the APK.
 Phone checks S03–S04 and D03–D05 remain unrun. Earlier APK results below do not
 validate this revision.
 
-Direct summaries send source JSONL, not the readable Markdown export. Each
-source record includes `ref`, `part`, full time, sender name and `text`, with
+In the previous build, direct summaries sent source JSONL rather than the
+readable Markdown export. Each old source record included `ref`, `part`, full
+time, sender name and `text`, with
 known `sender_id`, reply relations and other relevant metadata. Ordinary
 summaries contain no follow-up question history; merges use summaries produced
 within the current task.
 
-A synthetic input audit in `/workspace/build-logs/mnn-prompt-input-audit/`
+The old JSONL synthetic input audit in `/workspace/build-logs/mnn-prompt-input-audit/`
 used 100 messages of 20 characters each without replies. It measured **13,627
 Java UTF-16 code units**: 2,000 original-text characters, 10,792 JSONL metadata
 and record-syntax characters, 259 system-rule characters and 576 user-rule/stage
 characters. These are text-length measurements, not bytes, model tokens or a
-fixed ratio for real conversations. The HTTP JSON wrapper is not included.
+fixed ratio for real conversations. They are retained as the old-format
+comparison, not measurements of the new compact records. The HTTP JSON wrapper
+is not included.
 The `2,000 × 4 = 8,000` output reserve is local budget bookkeeping, not extra
 text sent to the model or counted in the input display. MNN's current API accepts
 1–2,048 output tokens; Telegram's 64–8,192 settings range also serves other

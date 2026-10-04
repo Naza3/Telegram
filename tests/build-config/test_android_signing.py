@@ -84,9 +84,9 @@ class AndroidSigningPreparationTest(unittest.TestCase):
         ])).hexdigest()
 
     @classmethod
-    def run_keytool(cls, args):
+    def run_keytool(cls, args, environ=None):
         result = subprocess.run(
-            [cls.keytool, *args], env=cls.base_env, stdin=subprocess.DEVNULL,
+            [cls.keytool, *args], env=cls.base_env if environ is None else environ, stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30, check=False,
         )
         if result.returncode:
@@ -183,21 +183,85 @@ class AndroidSigningPreparationTest(unittest.TestCase):
         old = b"previous signer must remain unchanged"
         self.output.write_bytes(old)
         environ = {**self.environ, "ANDROID_KEYSTORE_BASE64": base64.b64encode(b"invalid store").decode("ascii")}
-        self.assert_rejected(self.run_cli(environ), "store", old)
+        self.assert_rejected(self.run_cli(environ), "store_format", old)
 
     def test_wrong_store_password_does_not_log_external_diagnostics(self):
         sentinel = "SYNTHETIC_SECRET_DO_NOT_PRINT\nInjected error log"
         environ = {**self.environ, "ANDROID_KEYSTORE_PASSWORD": sentinel}
         result = self.run_cli(environ)
-        self.assert_rejected(result, "store")
+        self.assert_rejected(result, "store_password")
         self.assertNotIn(sentinel, result.stderr)
         self.assertNotIn("Injected error log", result.stderr)
 
     def test_unknown_alias_is_rejected_without_echoing_alias(self):
         sentinel = "SYNTHETIC_ALIAS_DO_NOT_PRINT"
         result = self.run_cli({**self.environ, "ANDROID_KEY_ALIAS": sentinel})
-        self.assert_rejected(result, "store")
+        self.assert_rejected(result, "alias")
         self.assertNotIn(sentinel, result.stderr)
+
+    def test_wrong_pkcs12_password_is_classified_without_logging_diagnostics(self):
+        sentinel = "SYNTHETIC_WRONG_PKCS12_PASSWORD"
+        environ = {
+            **self.environ,
+            "ANDROID_KEYSTORE_BASE64": base64.b64encode(self.pkcs12.read_bytes()).decode("ascii"),
+            "ANDROID_KEYSTORE_PASSWORD": sentinel,
+        }
+        result = self.run_cli(environ, expected=self.pkcs12_expected)
+        self.assert_rejected(result, "store_password")
+        self.assertNotIn(sentinel, result.stderr)
+
+    def test_whitespace_hint_follows_password_or_alias_failure_without_trimming(self):
+        for name, value, reason in (
+            ("ANDROID_KEYSTORE_PASSWORD", self.STORE_PASSWORD + "\n", "store_password_whitespace"),
+            ("ANDROID_KEYSTORE_PASSWORD", " " + self.STORE_PASSWORD, "store_password_whitespace"),
+            ("ANDROID_KEY_ALIAS", " " + self.ALIAS, "alias_whitespace"),
+            ("ANDROID_KEY_ALIAS", self.ALIAS + "\n", "alias_whitespace"),
+        ):
+            with self.subTest(name=name, reason=reason):
+                result = self.run_cli({**self.environ, name: value})
+                self.assert_rejected(result, reason)
+                self.assertNotIn(value, result.stderr)
+
+    def test_valid_whitespace_password_and_alias_are_preserved(self):
+        environ = {
+            **self.environ,
+            "ANDROID_KEYSTORE_PASSWORD": " " + self.STORE_PASSWORD + " ",
+            "ANDROID_KEY_PASSWORD": " " + self.KEY_PASSWORD + " ",
+            "ANDROID_KEY_ALIAS": " " + self.ALIAS + " ",
+        }
+        spaced_store = self.output.parent / "synthetic-spaced.jks"
+        self.run_keytool([
+            "-genkeypair", "-noprompt", "-storetype", "JKS", "-keystore", str(spaced_store),
+            "-alias", environ["ANDROID_KEY_ALIAS"], "-storepass:env", "ANDROID_KEYSTORE_PASSWORD",
+            "-keypass:env", "ANDROID_KEY_PASSWORD", "-keyalg", "RSA", "-keysize", "2048",
+            "-dname", "CN=Synthetic whitespace test", "-validity", "2",
+        ], environ)
+        certificate = self.run_keytool([
+            "-exportcert", "-keystore", str(spaced_store), "-alias", environ["ANDROID_KEY_ALIAS"],
+            "-storepass:env", "ANDROID_KEYSTORE_PASSWORD",
+        ], environ)
+        environ["ANDROID_KEYSTORE_BASE64"] = base64.b64encode(spaced_store.read_bytes()).decode("ascii")
+        result = self.run_cli(environ, expected=hashlib.sha256(certificate).hexdigest())
+        self.assertEqual(0, result.returncode)
+        self.assertEqual(helper.SUCCESS_MESSAGE + "\n", result.stdout)
+        self.assertEqual("", result.stderr)
+        self.assertEqual(spaced_store.read_bytes(), self.output.read_bytes())
+
+    def test_alias_cannot_inject_password_diagnostics(self):
+        sentinel = "SYNTHETIC_ALIAS\nkeytool error: java.io.IOException: keystore password was incorrect"
+        result = self.run_cli({**self.environ, "ANDROID_KEY_ALIAS": sentinel})
+        self.assert_rejected(result, "alias")
+        self.assertNotIn("SYNTHETIC_ALIAS", result.stderr)
+
+    def test_unknown_tool_diagnostics_remain_generic_and_private(self):
+        sentinel = b"SYNTHETIC_UNKNOWN_TOOL_DIAGNOSTIC_DO_NOT_PRINT"
+        completed = subprocess.CompletedProcess([], 1, sentinel, sentinel)
+        with mock.patch.object(helper.subprocess, "run", return_value=completed):
+            with self.assertRaises(helper.SigningError) as caught:
+                helper.prepare(self.output, self.expected, self.environ)
+        self.assertEqual(helper.ERRORS["store"], str(caught.exception))
+        self.assertFalse(self.output.exists())
+        self.assertEqual([], list(self.output.parent.glob(".android-signing-*")))
 
     def test_wrong_private_key_password_is_rejected_before_install(self):
         result = self.run_cli({**self.environ, "ANDROID_KEY_PASSWORD": "SYNTHETIC_WRONG_KEY_PASSWORD"})

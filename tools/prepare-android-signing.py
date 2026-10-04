@@ -34,6 +34,21 @@ ERRORS = {
     "output": "Signing output must be a regular file in a directory without symlinks.",
     "tools": "A JDK with keytool and jarsigner is required to validate signing secrets.",
     "store": "The signing keystore, store password or alias could not be validated.",
+    "store_password": (
+        "The keystore could not be unlocked. Verify ANDROID_KEYSTORE_PASSWORD and the complete original keystore."
+    ),
+    "store_password_whitespace": (
+        "The keystore could not be unlocked. Verify ANDROID_KEYSTORE_PASSWORD and the complete original keystore. "
+        "Check this secret for unintended leading or trailing whitespace."
+    ),
+    "alias": "ANDROID_KEY_ALIAS does not exist in the supplied keystore.",
+    "alias_whitespace": (
+        "ANDROID_KEY_ALIAS does not exist in the supplied keystore. "
+        "Check this secret for unintended leading or trailing whitespace."
+    ),
+    "store_format": (
+        "ANDROID_KEYSTORE_BASE64 decodes successfully, but its content is not a recognized keystore format."
+    ),
     "entry": "The signing alias must contain a private key entry.",
     "certificate": "The signing certificate does not match the expected certificate.",
     "key": "The signing private key password could not be validated.",
@@ -77,16 +92,41 @@ def java_tool(name, environ):
     return candidate
 
 
+def store_error_reason(stdout, stderr, environ):
+    """Classify known English keytool failures without forwarding tool output.
+
+    Only a tool-generated exception prefix is inspected. In particular, an alias
+    containing diagnostic-looking text must not be mistaken for a password error.
+    Unrecognized diagnostics keep the generic error instead of exposing details.
+    """
+    for diagnostic in (stdout, stderr):
+        message = re.match(rb"\Akeytool error: java\.[a-z.]+: (.*)", diagnostic, re.IGNORECASE | re.DOTALL)
+        if not message:
+            continue
+        text = message.group(1).lower()
+        if text.startswith((b"keystore password was incorrect", b"keystore was tampered with, or password was incorrect")):
+            value = environ.get("ANDROID_KEYSTORE_PASSWORD", "")
+            return "store_password_whitespace" if value != value.strip() else "store_password"
+        if text.startswith(b"alias <") and re.search(rb"> does not exist(?:\r?\n|$)", text):
+            value = environ.get("ANDROID_KEY_ALIAS", "")
+            return "alias_whitespace" if value != value.strip() else "alias"
+        if text.startswith((b"unrecognized keystore format", b"invalid keystore format")):
+            return "store_format"
+    return "store"
+
+
 def checked_run(command, environ, reason):
     try:
         result = subprocess.run(
             command, env=environ, stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             timeout=45, check=False,
         )
     except (OSError, ValueError, subprocess.SubprocessError):
         raise SigningError(reason) from None
     if result.returncode != 0:
+        if reason == "store":
+            reason = store_error_reason(result.stdout, result.stderr, environ)
         raise SigningError(reason)
     return result.stdout
 

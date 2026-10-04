@@ -56,6 +56,10 @@ jobs:
           distribution: temurin
           java-version: '21'
 
+      - name: Test signing and API configuration with synthetic credentials
+        shell: bash
+        run: python3 -B -m unittest discover -s tests/build-config -p 'test_*.py'
+
       - name: Restore and verify the original signing key from Secrets
         shell: bash
         env:
@@ -71,7 +75,6 @@ jobs:
         env:
           AI_SUMMARY_TOOLS_DIR: ${{ env.MNN_BUILD_DIR }}/ai-summary-tools
         run: |
-          python3 -B -m unittest discover -s tests/build-config -p 'test_*.py'
           bash tests/ai-summary/bootstrap-tools.sh
           bash tests/ai-summary/run.sh
           bash tests/ai-summary-controller/run.sh

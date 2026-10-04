@@ -3,6 +3,8 @@
 import base64
 import hashlib
 import importlib.util
+import io
+import json
 import os
 from pathlib import Path
 import shutil
@@ -12,6 +14,7 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
+import zipfile
 
 
 HELPER_PATH = Path(__file__).resolve().parents[2] / "tools" / "prepare-android-signing.py"
@@ -184,6 +187,52 @@ class AndroidSigningPreparationTest(unittest.TestCase):
         self.output.write_bytes(old)
         environ = {**self.environ, "ANDROID_KEYSTORE_BASE64": base64.b64encode(b"invalid store").decode("ascii")}
         self.assert_rejected(self.run_cli(environ), "store_format", old)
+
+    def test_truncated_jks_and_pkcs12_with_valid_base64_report_incomplete_content(self):
+        previous = b"existing output must remain unchanged"
+        self.output.write_bytes(previous)
+        for store in (self.jks_bytes, self.pkcs12.read_bytes()):
+            for incomplete in (store[:8], store[:len(store) // 2], store[:-1]):
+                with self.subTest(store_size=len(store), truncated_size=len(incomplete)):
+                    environ = {**self.environ, "ANDROID_KEYSTORE_BASE64": base64.b64encode(incomplete).decode("ascii")}
+                    self.assert_rejected(self.run_cli(environ), "store_format", previous)
+
+    def test_der_length_error_is_reported_as_invalid_content(self):
+        damaged = bytearray(self.pkcs12.read_bytes())
+
+        def der_bounds(offset):
+            length = damaged[offset + 1]
+            if length < 128:
+                return offset + 2, offset + 2 + length
+            count = length & 127
+            start = offset + 2 + count
+            return start, start + int.from_bytes(damaged[offset + 2:start], "big")
+
+        # Navigate the public PKCS12 envelope: SEQUENCE -> version INTEGER ->
+        # ContentInfo SEQUENCE -> OID -> explicit [0] -> OCTET STRING.
+        outer_start, _ = der_bounds(0)
+        _, version_end = der_bounds(outer_start)
+        content_start, _ = der_bounds(version_end)
+        _, oid_end = der_bounds(content_start)
+        octet_offset, _ = der_bounds(oid_end)
+        self.assertEqual(0x04, damaged[octet_offset])
+        damaged[octet_offset + 1] = 0xff  # DER forbids this length byte.
+        environ = {**self.environ, "ANDROID_KEYSTORE_BASE64": base64.b64encode(damaged).decode("ascii")}
+        self.assert_rejected(self.run_cli(environ), "store_format")
+
+    def test_double_base64_zip_and_json_are_not_treated_as_keystores(self):
+        store = self.pkcs12.read_bytes()
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as zipped:
+            zipped.writestr("synthetic.keystore", store)
+        cases = (
+            base64.b64encode(store), archive.getvalue(),
+            json.dumps({"synthetic": base64.b64encode(store).decode("ascii")}).encode(),
+        )
+        for wrong_file in cases:
+            with self.subTest(payload_size=len(wrong_file)):
+                environ = {**self.environ, "ANDROID_KEYSTORE_BASE64": base64.b64encode(wrong_file).decode("ascii")}
+                self.assert_rejected(self.run_cli(environ), "store_format")
 
     def test_wrong_store_password_does_not_log_external_diagnostics(self):
         sentinel = "SYNTHETIC_SECRET_DO_NOT_PRINT\nInjected error log"

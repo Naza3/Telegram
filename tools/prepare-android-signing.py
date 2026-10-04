@@ -47,7 +47,8 @@ ERRORS = {
         "Check this secret for unintended leading or trailing whitespace."
     ),
     "store_format": (
-        "ANDROID_KEYSTORE_BASE64 decodes successfully, but its content is not a recognized keystore format."
+        "ANDROID_KEYSTORE_BASE64 decodes successfully, but the keystore format is invalid or its content is incomplete. "
+        "Use the complete original keystore file."
     ),
     "entry": "The signing alias must contain a private key entry.",
     "certificate": "The signing certificate does not match the expected certificate.",
@@ -100,10 +101,15 @@ def store_error_reason(stdout, stderr, environ):
     Unrecognized diagnostics keep the generic error instead of exposing details.
     """
     for diagnostic in (stdout, stderr):
-        message = re.match(rb"\Akeytool error: java\.[a-z.]+: (.*)", diagnostic, re.IGNORECASE | re.DOTALL)
+        message = re.match(rb"\Akeytool error: (java\.[a-z.]+)(?:: (.*))?(?:\r?\n|$)",
+                           diagnostic, re.IGNORECASE | re.DOTALL)
         if not message:
             continue
-        text = message.group(1).lower()
+        exception = message.group(1).lower()
+        # Truncated JKS and PKCS12 files can report EOF with no message at all.
+        if exception == b"java.io.eofexception":
+            return "store_format"
+        text = (message.group(2) or b"").lower()
         if text.startswith((b"keystore password was incorrect", b"keystore was tampered with, or password was incorrect")):
             value = environ.get("ANDROID_KEYSTORE_PASSWORD", "")
             return "store_password_whitespace" if value != value.strip() else "store_password"
@@ -111,6 +117,11 @@ def store_error_reason(stdout, stderr, environ):
             value = environ.get("ANDROID_KEY_ALIAS", "")
             return "alias_whitespace" if value != value.strip() else "alias"
         if text.startswith((b"unrecognized keystore format", b"invalid keystore format")):
+            return "store_format"
+        if exception == b"java.io.ioexception" and (
+                text.startswith((b"derinputstream.", b"dervalue.", b"toderinputstream rejects tag type",
+                                 b"invalid lenbyte", b"short read of der length"))
+                or re.match(rb"tag number over [0-9]+(?: at [0-9]+)? is not supported", text)):
             return "store_format"
     return "store"
 

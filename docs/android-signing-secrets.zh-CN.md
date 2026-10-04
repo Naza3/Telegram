@@ -33,6 +33,8 @@ Windows PowerShell：
 
 打开生成的文本文件，复制全部内容到第一个 Secret。GitHub 保存后不能重新显示 Secret 内容，需要保留自己的完整私密备份。
 
+本次提供的 `Telegram-ANDROID_KEYSTORE_BASE64.txt` 去掉换行后为 3536 个字符，对应 2650 字节的原密钥库。请从下载后的完整文本文件全选复制，避免仅复制聊天预览中的部分内容；这是本次备份的核对信息，不是其他有效密钥库的长度限制。
+
 ## 构建行为
 
 当前 APK 工作流先恢复并验证 Secrets 中的密钥，然后才开始测试与 Android 构建。缺少任何一项、Base64 无效、密码或别名错误、没有私钥或证书不匹配都会停止；不会回退到 Cache，也不会生成新签名。
@@ -44,6 +46,8 @@ Windows PowerShell：
 本轮迁移提交使用 `[skip ci]`，给手工录入 Secrets 留出时间。GitHub 连接当前无法管理 Secrets（403），不能宣称已代为写入或已完成云端验证。
 
 本地验证：14 项签名合成测试与 7 项原有 API 配置测试通过；原密钥经 Base64 恢复后与备份字节一致，证书校验及试签名通过。实际运行 `:TMessagesProj_App:validateSigningAfatDebug --rerun-tasks` 成功（27 秒，5 项任务执行），缺失密钥时构建脚本明确拒绝且不生成新密钥。没有生成或发布新 APK。
+
+首次云端验证的 [第 22 次](https://github.com/Naza3/Telegram/actions/runs/37212591733) 与增加安全诊断后的 [第 23 次](https://github.com/Naza3/Telegram/actions/runs/37213035641) 都在原密钥库恢复校验阶段停止，没有生成 APK。第 23 次先运行的 26 项合成配置测试全部通过，临时密钥清理成功；截至该次验证，实际 Secrets 配置仍未通过，不能视为完成迁移。通用错误不足以确定是文件、密码或别名问题；本地复现表明被截断但仍可 Base64 解码的密钥库也可能触发此类错误，不能仅凭它断言密码填写错误。
 
 ## 本地构建
 

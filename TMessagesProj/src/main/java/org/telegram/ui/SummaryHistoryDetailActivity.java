@@ -205,7 +205,8 @@ public final class SummaryHistoryDetailActivity extends BaseFragment implements 
         text(content, SummaryHistoryActivity.chatLabel(record), true);
         text(content, "生成于 " + SummaryHistoryActivity.formatTime(record.generatedAtMillis)
                 + " · " + record.sources.size() + " 条原文", false);
-        text(content, "这是生成当时保存的结果，不代表当前最新消息或模型。原消息可能已修改或删除；点击引用后才联网重新核验。", false);
+        text(content, "这是生成当时保存的结果，不代表当前最新消息或模型。原消息可能已修改或删除。"
+                + (record.sourceLinks ? "点击引用后才联网重新核验。" : ""), false);
         text(content, record.rangeLabel + (record.partial ? " · 部分覆盖" : ""), true);
         if (!record.coverageNote.isEmpty()) text(content, record.coverageNote, false);
         if (!record.templateLabel.isEmpty()) text(content, "总结方向：" + record.templateLabel, false);
@@ -216,9 +217,9 @@ public final class SummaryHistoryDetailActivity extends BaseFragment implements 
         TextView summary = text(content, linkSources(record), false);
         summary.setTextSize(16);
         summary.setTextColor(getThemedColor(Theme.key_windowBackgroundWhiteBlackText));
-        summary.setMovementMethod(LinkMovementMethod.getInstance());
-        summary.setLinksClickable(true);
-        text(content, "本机仅保存摘要和引用校验信息，不保存原消息正文。", false);
+        if (record.sourceLinks) summary.setMovementMethod(LinkMovementMethod.getInstance());
+        summary.setLinksClickable(record.sourceLinks);
+        text(content, "本机仅保存摘要和来源校验信息，不保存原消息正文。", false);
     }
 
     private CharSequence linkSources(SummaryHistoryStore.Record snapshot) {
@@ -226,6 +227,7 @@ public final class SummaryHistoryDetailActivity extends BaseFragment implements 
         SpannableStringBuilder linked = new SpannableStringBuilder(snapshot.summary);
         Matcher headings = HEADING.matcher(snapshot.summary);
         while (headings.find()) linked.setSpan(new StyleSpan(Typeface.BOLD), headings.start(), headings.end(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        if (!snapshot.sourceLinks) return linked;
         Matcher references = REFERENCE.matcher(snapshot.summary);
         while (references.find()) {
             final int reference;
@@ -247,7 +249,7 @@ public final class SummaryHistoryDetailActivity extends BaseFragment implements 
     }
 
     private void openSource(SummarySourceReference reference, int number) {
-        if (!active() || record == null || reference.dialogId != record.dialogId) return;
+        if (!active() || record == null || !record.sourceLinks || reference.dialogId != record.dialogId) return;
         closePreview();
         previewReference = reference;
         final int request = operation;

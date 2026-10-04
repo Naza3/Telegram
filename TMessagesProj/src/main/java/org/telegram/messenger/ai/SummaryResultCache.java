@@ -117,12 +117,11 @@ public final class SummaryResultCache {
         return new Key(account, ownerId, dialogId, topicId, hex(digest.digest()), dialogs, ids);
     }
 
-    /** Only call after a full, validated result; false means caching was skipped, not task failure. */
+    /** Only call after a full direct-summary result; false means caching was skipped, not task failure. */
     public synchronized boolean put(Key key, String summary, long generatedAtMillis) {
-        if (key == null || !currentOwner(key) || summary == null || summary.isEmpty() || generatedAtMillis <= 0) return false;
+        if (key == null || !currentOwner(key) || summary == null || summary.trim().isEmpty() || generatedAtMillis <= 0) return false;
         if (summary.length() > maxBytes) { invalidate(key); return false; }
-        try { AiSummaryPrompt.validateReferences(summary, key.sourceIds.length); }
-        catch (IllegalArgumentException error) { return false; }
+        // Direct summaries no longer carry citation markers. Source IDs still support invalidation.
         // Conservative retained-size estimate includes UTF-16/UTF-8 payload, source IDs and object overhead.
         long bytes = key.retainedBytes + 192L + Math.max(2L * summary.length(), summary.getBytes(StandardCharsets.UTF_8).length);
         invalidate(key);

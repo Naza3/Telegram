@@ -829,7 +829,7 @@ public final class GroupSummarySheet {
                         + progress.completed + " / " + progress.total);
                 break;
             case VALIDATING:
-                progressStatus.setText("正在校验原文引用…");
+                progressStatus.setText("正在校验总结结果…");
                 break;
         }
     }
@@ -845,7 +845,7 @@ public final class GroupSummarySheet {
         if (progress.stage == AiSummaryClient.Stage.MERGE) {
             return "第 " + progress.mergeRound + " 轮合并 · 第 " + current + " / " + total + " 段";
         }
-        return "最终引用校验阶段";
+        return "最终结果校验阶段";
     }
 
     private void beginStreamingRequest() {
@@ -1520,7 +1520,7 @@ public final class GroupSummarySheet {
         cancelWork();
         clearContent();
         addText("总结方向", true);
-        addText("保持话题、结论、待办和原文引用。补充要求只改变关注点，不会排除所选范围中的消息。", false);
+        addText("保持话题、结论、待办。补充要求只改变关注点，不会排除所选范围中的消息。", false);
         RadioGroup templates = new RadioGroup(context);
         templates.setOrientation(RadioGroup.VERTICAL);
         int defaultTemplateId = 0;
@@ -2210,7 +2210,8 @@ public final class GroupSummarySheet {
                     System.currentTimeMillis(), title, range, coverageNote == null ? "" : coverageNote,
                     summaryPrompt == null ? "通用总结" : PromptOptions.templateLabel(summaryPrompt.templateId),
                     summaryPrompt == null ? "" : summaryPrompt.customInstructions,
-                    summaryConfig == null ? "" : summaryConfig.model, summary, !summaryHistory.complete, references);
+                    summaryConfig == null ? "" : summaryConfig.model, summary, !summaryHistory.complete, references,
+                    supportsSummarySourceLinks());
             persistHistory(historyRecord);
         } catch (RuntimeException error) {
             historySaveNotice = historyFailureNotice(error);
@@ -2291,7 +2292,7 @@ public final class GroupSummarySheet {
         }
         if (unfinished != null && !unfinished.isEmpty()) {
             addText((unfinishedStage == null ? "当前模型请求" : unfinishedStage)
-                    + " · 以下内容未完成，尚未通过最终引用校验", true);
+                    + " · 以下内容未完成，尚未通过最终结果校验", true);
             TextView partial = addText(unfinished, false);
             partial.setLinksClickable(false);
         }
@@ -2345,12 +2346,14 @@ public final class GroupSummarySheet {
                     + summaryConfig.maxOutputTokens + " token。请求名称不代表已核实的实际模型版本。", false);
         }
         addText(coverageNote, false);
-        addText("点击 [m数字] 先核验并预览原文，再选择跳回群聊；请结合原文核对模型生成的结论。", false);
+        boolean sourceLinks = supportsSummarySourceLinks();
+        addText(sourceLinks ? "点击 [m数字] 先核验并预览原文，再选择跳回群聊；请结合原文核对模型生成的结论。"
+                : "请结合聊天内容核对模型生成的结论。", false);
         TextView result = addText(linkSources(summary), false);
         result.setTextColor(color(Theme.key_dialogTextBlack));
         result.setTextSize(TypedValue.COMPLEX_UNIT_DIP, 16);
-        result.setMovementMethod(LinkMovementMethod.getInstance());
-        result.setLinksClickable(true);
+        if (sourceLinks) result.setMovementMethod(LinkMovementMethod.getInstance());
+        result.setLinksClickable(sourceLinks);
         if (summaryHistory != null && summaryHistory.complete && sourceMessages != null && !sourceMessages.isEmpty()
                 && (resultCommitted || viewingCachedResult || summaryRange.mode == RangeMode.REPLAY)) {
             addAction("追问本次消息", this::showQuestions);
@@ -2373,6 +2376,11 @@ public final class GroupSummarySheet {
         addAction("重新选择范围", this::showSelection);
     }
 
+    private boolean supportsSummarySourceLinks() {
+        // Direct-summary rules v4 use aliases without the [mN] citation protocol.
+        return summaryPrompt != null && summaryPrompt.builtinRulesVersion < 4;
+    }
+
     private CharSequence linkSources(String summary) {
         final int resultOperation = operation;
         SpannableStringBuilder text = new SpannableStringBuilder(summary);
@@ -2381,6 +2389,7 @@ public final class GroupSummarySheet {
             text.setSpan(new StyleSpan(Typeface.BOLD), headings.start(), headings.end(),
                     Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         }
+        if (!supportsSummarySourceLinks()) return text;
         Matcher references = REFERENCE.matcher(summary);
         while (references.find()) {
             int index;

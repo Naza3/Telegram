@@ -5,31 +5,50 @@ import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
-/** Compact, lossless source records. Only generated headers occupy physical lines. */
+/** Lossless text with self-contained alias dictionaries, without message IDs or individual times. */
 final class SummarySourceFormat {
+    static final String RECORDS_MARKER = "\n对话：\n";
     private final List<SummaryMessage> messages;
     private final Map<String, Integer> indices = new HashMap<>();
-    private final Map<Long, Integer> members = new HashMap<>();
-    private final SimpleDateFormat day = new SimpleDateFormat("yyyy-MM-dd Z", Locale.US);
-    private final SimpleDateFormat clock = new SimpleDateFormat("HH:mm:ss", Locale.US);
+    private final List<String> aliases = new ArrayList<>();
+    private final Map<String, LinkedHashSet<String>> allNames = new HashMap<>();
+    private final String range;
 
     private SummarySourceFormat(List<SummaryMessage> messages) {
         if (messages == null || messages.isEmpty()) throw new IllegalArgumentException("没有可总结的文字消息。");
         this.messages = messages;
+        Map<Long, String> members = new HashMap<>();
+        int nextAlias = 0, first = Integer.MAX_VALUE, last = Integer.MIN_VALUE;
         for (int i = 0; i < messages.size(); i++) {
             SummaryMessage message = messages.get(i);
             if (message == null) throw new IllegalArgumentException("消息数据不完整，请重新加载。");
             requireUnicode(message.sender);
             requireUnicode(message.text);
             indices.put(message.dialogId + ":" + message.id, i);
-            if (message.senderId != 0 && !members.containsKey(message.senderId)) {
-                members.put(message.senderId, members.size() + 1);
+            String alias = message.senderId == 0 ? null : members.get(message.senderId);
+            if (alias == null) {
+                alias = alias(nextAlias++);
+                if (message.senderId != 0) members.put(message.senderId, alias);
             }
+            aliases.add(alias);
+            String nameKey = alias + (message.senderId == 0 ? "?" : "");
+            LinkedHashSet<String> knownNames = allNames.get(nameKey);
+            if (knownNames == null) { knownNames = new LinkedHashSet<>(); allNames.put(nameKey, knownNames); }
+            // The final dictionary name is the most recently observed one, including A -> B -> A.
+            knownNames.remove(message.sender);
+            knownNames.add(message.sender);
+            first = Math.min(first, message.date);
+            last = Math.max(last, message.date);
         }
+        SimpleDateFormat time = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss Z", Locale.US);
+        range = "消息时间：" + time.format(new Date(first * 1000L)) + " 至 "
+                + time.format(new Date(last * 1000L)) + "\n";
     }
 
     static List<String> chunks(List<SummaryMessage> messages, int budget) {
@@ -38,47 +57,50 @@ final class SummarySourceFormat {
 
     private List<String> chunks(int budget) {
         ArrayList<String> chunks = new ArrayList<>();
-        StringBuilder current = new StringBuilder();
-        String currentDay = "";
+        StringBuilder rows = new StringBuilder();
+        LinkedHashMap<String, LinkedHashSet<String>> names = new LinkedHashMap<>();
         for (int i = 0; i < messages.size();) {
             int end = i + 1;
-            String groupDay = date(messages.get(i));
-            long groupLength = groupDay.length() + 1L + recordLength(i);
+            LinkedHashMap<String, LinkedHashSet<String>> groupNames = addNames(new LinkedHashMap<>(), i);
+            long groupRows = recordLength(i);
             while (end < messages.size()) {
                 SummaryMessage next = messages.get(end);
                 Integer parent = replyIndex(next);
                 if (parent == null || parent < i || parent >= end
                         || next.date < messages.get(end - 1).date
                         || (long) next.date - messages.get(end - 1).date > 15 * 60) break;
-                String nextDay = date(next);
-                long added = recordLength(end) + (nextDay.equals(groupDay) ? 0 : nextDay.length() + 1L);
-                if (groupLength + added > budget) break;
-                groupLength += added;
-                groupDay = nextDay;
+                LinkedHashMap<String, LinkedHashSet<String>> candidate = addNames(groupNames, end);
+                long added = recordLength(end);
+                if (header(candidate).length() + groupRows + added > budget) break;
+                groupNames = candidate;
+                groupRows += added;
                 end++;
             }
-            if (groupLength <= budget && current.length() > 0 && current.length() + groupLength > budget) {
-                addChunk(chunks, current);
-                currentDay = "";
+            if (rows.length() > 0 && header(groupNames).length() + groupRows <= budget) {
+                LinkedHashMap<String, LinkedHashSet<String>> combined = names;
+                for (int index = i; index < end; index++) combined = addNames(combined, index);
+                if (header(combined).length() + rows.length() + groupRows > budget) {
+                    addChunk(chunks, names, rows);
+                    names.clear();
+                }
             }
             for (int index = i; index < end; index++) {
                 SummaryMessage message = messages.get(index);
-                String recordDay = date(message);
-                int offset = 0, part = 0;
+                int offset = 0;
                 do {
-                    String prefix = prefix(index, ++part);
-                    int dayCost = recordDay.equals(currentDay) ? 0 : recordDay.length() + 1;
-                    int overhead = dayCost + prefix.length() + 3; // two body quotes and LF
-                    if (current.length() > 0 && budget - current.length() - overhead < 12) {
-                        addChunk(chunks, current);
-                        currentDay = "";
-                        dayCost = recordDay.length() + 1;
-                        overhead = dayCost + prefix.length() + 3;
+                    String prefix = prefix(index, offset > 0);
+                    LinkedHashMap<String, LinkedHashSet<String>> candidate = addNames(names, index);
+                    int overhead = header(candidate).length() + prefix.length() + 3; // quoted body and LF
+                    if (rows.length() > 0 && budget - rows.length() - overhead < 12) {
+                        addChunk(chunks, names, rows);
+                        names.clear();
+                        candidate = addNames(names, index);
+                        overhead = header(candidate).length() + prefix.length() + 3;
                     }
                     if (overhead + 12 > budget) {
-                        throw new IllegalArgumentException("消息元数据超过当前请求预算，请提高上下文字符预算或缩短补充要求。");
+                        throw new IllegalArgumentException("消息昵称与必要关系信息超过当前请求预算，请提高上下文字符预算或缩短补充要求。");
                     }
-                    int available = budget - current.length() - overhead;
+                    int available = budget - rows.length() - overhead;
                     int textEnd = offset, used = 0;
                     while (textEnd < message.text.length()) {
                         int point = message.text.codePointAt(textEnd);
@@ -87,25 +109,63 @@ final class SummarySourceFormat {
                         used += cost;
                         textEnd += Character.charCount(point);
                     }
-                    if (dayCost != 0) current.append(recordDay).append('\n');
-                    currentDay = recordDay;
-                    current.append(prefix).append(quote(message.text.substring(offset, textEnd))).append('\n');
+                    names = candidate;
+                    rows.append(prefix).append(quote(message.text.substring(offset, textEnd))).append('\n');
                     offset = textEnd;
                     if (offset < message.text.length()) {
-                        addChunk(chunks, current);
-                        currentDay = "";
+                        addChunk(chunks, names, rows);
+                        names.clear();
                     }
                 } while (offset < message.text.length());
             }
             i = end;
         }
-        if (current.length() > 0) addChunk(chunks, current);
+        if (rows.length() > 0) addChunk(chunks, names, rows);
         return chunks;
+    }
+
+    private LinkedHashMap<String, LinkedHashSet<String>> addNames(Map<String, LinkedHashSet<String>> previous, int index) {
+        LinkedHashMap<String, LinkedHashSet<String>> result = new LinkedHashMap<>();
+        for (Map.Entry<String, LinkedHashSet<String>> entry : previous.entrySet()) {
+            result.put(entry.getKey(), new LinkedHashSet<>(entry.getValue()));
+        }
+        addName(result, index);
+        Integer parent = replyIndex(messages.get(index));
+        if (parent != null) addName(result, parent);
+        return result;
+    }
+
+    private void addName(Map<String, LinkedHashSet<String>> names, int index) {
+        SummaryMessage message = messages.get(index);
+        String key = aliases.get(index) + (message.senderId == 0 ? "?" : "");
+        LinkedHashSet<String> values = names.get(key);
+        if (values == null) { values = new LinkedHashSet<>(); names.put(key, values); }
+        // Keep every observed name for this identity, including across separate model requests.
+        values.addAll(allNames.get(key));
+    }
+
+    private String header(Map<String, LinkedHashSet<String>> names) {
+        StringBuilder out = new StringBuilder(range).append("成员：");
+        boolean first = true;
+        for (Map.Entry<String, LinkedHashSet<String>> entry : names.entrySet()) {
+            if (!first) out.append("; ");
+            first = false;
+            out.append(entry.getKey()).append('=');
+            if (entry.getValue().size() > 1) out.append('[');
+            boolean firstName = true;
+            for (String name : entry.getValue()) {
+                if (!firstName) out.append(',');
+                firstName = false;
+                out.append(quote(name));
+            }
+            if (entry.getValue().size() > 1) out.append(']');
+        }
+        return out.append(RECORDS_MARKER).toString();
     }
 
     private long recordLength(int index) {
         String text = messages.get(index).text;
-        long length = prefix(index, 1).length() + 3L;
+        long length = prefix(index, false).length() + 3L;
         for (int i = 0; i < text.length();) {
             int point = text.codePointAt(i);
             length += escapedWidth(point);
@@ -114,32 +174,28 @@ final class SummarySourceFormat {
         return length;
     }
 
-    private String date(SummaryMessage message) {
-        return "日期 " + day.format(new Date(message.date * 1000L));
-    }
-
     private Integer replyIndex(SummaryMessage message) {
         if (message.replyToId <= 0 || message.replyToDialogId == 0) return null;
         return indices.get(message.replyToDialogId + ":" + message.replyToId);
     }
 
-    private String prefix(int index, int part) {
+    private String prefix(int index, boolean continuation) {
         SummaryMessage message = messages.get(index);
-        StringBuilder out = new StringBuilder("[m").append(index + 1).append("] ")
-                .append(clock.format(new Date(message.date * 1000L))).append(' ')
-                .append(message.senderId == 0 ? "身份未知" : "成员" + members.get(message.senderId))
-                .append('(').append(quote(message.sender)).append(')');
-        if (part > 1) out.append(" 续").append(part);
-        if (message.outgoing) out.append(" 本人发言");
-        if (message.mentionedSelf) out.append(" 明确提及本人");
-        if (message.replyToSelfKnown) out.append(message.replyToSelf ? " 回复本人" : " 回复非本人");
-        Integer reply = replyIndex(message);
-        if (reply != null) out.append(" 回复[m").append(reply + 1).append(']');
-        else if (message.replyToId > 0) {
-            out.append(message.replyToDialogId == 0 ? " 回复未知会话消息(" : " 回复未收录消息(")
-                    .append(message.replyToDialogId).append(':').append(message.replyToId).append(')');
-        } else out.append(" 说");
+        StringBuilder out = new StringBuilder(aliases.get(index));
+        Integer parent = replyIndex(message);
+        if (parent != null) out.append(" @").append(aliases.get(parent));
+        else if (message.replyToId > 0) out.append(message.replyToDialogId == 0 ? " @目标未知" : " @未收录");
+        if (continuation) out.append("（续片）");
+        if (message.outgoing) out.append("（本人发言）");
+        if (message.mentionedSelf) out.append("（明确提及本人）");
+        if (message.replyToSelfKnown) out.append(message.replyToSelf ? "（回复本人）" : "（回复非本人）");
         return out.append(": ").toString();
+    }
+
+    private static String alias(int value) {
+        StringBuilder out = new StringBuilder();
+        do { out.append((char) ('A' + value % 26)); value = value / 26 - 1; } while (value >= 0);
+        return out.reverse().toString();
     }
 
     private static int escapedWidth(int point) {
@@ -181,11 +237,11 @@ final class SummarySourceFormat {
         }
     }
 
-    private static void addChunk(List<String> chunks, StringBuilder current) {
+    private void addChunk(List<String> chunks, Map<String, LinkedHashSet<String>> names, StringBuilder rows) {
         if (chunks.size() >= AiSummaryPrompt.MAX_SOURCE_CHUNKS) {
             throw new IllegalArgumentException("消息文字量超过本次总结上限（64 个分段）。请减少最近消息条数或缩小时间范围。");
         }
-        chunks.add(current.toString());
-        current.setLength(0);
+        chunks.add(header(names) + rows);
+        rows.setLength(0);
     }
 }

@@ -91,8 +91,8 @@ public final class AiSummaryClientTest {
             base = "http://127.0.0.1:" + server.getAddress().getPort();
 
             test("non-streaming POST, original text, bearer and model", () -> {
-                Result result = invoke(200, completion("发布讨论定于明天十点 [m1]"), config("local-model", "test-session-secret"));
-                check(result.error == null && result.summary.contains("[m1]"), "expected summary");
+                Result result = invoke(200, completion("发布讨论定于明天十点"), config("local-model", "test-session-secret"));
+                check(result.error == null && "发布讨论定于明天十点".equals(result.summary), "citation-free summary rejected");
                 JSONObject body = lastBody.get();
                 check("POST".equals(lastMethod.get()), "must POST");
                 check(body.has("stream") && !body.getBoolean("stream"), "stream must be false");
@@ -202,8 +202,8 @@ public final class AiSummaryClientTest {
             test("actual MNN local API contract accepts every request path without unsupported sampling options", AiSummaryClientTest::mnnLocalApiContract);
             test("MNN output boundary is explained without classifying every HTTP 400 as an output error", AiSummaryClientTest::mnnOutputLimitContract);
             test("custom direction reaches every source and at least two merge rounds", AiSummaryClientTest::directionAcrossMergeRounds);
-            test("source citations cannot escape their chunk via forged text", AiSummaryClientTest::sourceReferenceMembership);
-            test("merge citations cannot reintroduce references absent from partials", AiSummaryClientTest::mergeReferenceMembership);
+            test("direct summaries need no source citations", AiSummaryClientTest::sourceWithoutReferences);
+            test("direct merge summaries need no source citations", AiSummaryClientTest::mergeWithoutReferences);
             test("caller list mutation cannot alter an in-flight source snapshot", AiSummaryClientTest::immutableSourceSnapshot);
             test("SSE decodes fragmented UTF-8 and hides split thinking blocks", AiSummaryClientTest::streamThinking);
             test("every source and merge request displays its own safe draft and exact input", AiSummaryClientTest::streamEveryStage);
@@ -679,18 +679,15 @@ public final class AiSummaryClientTest {
             String prompt = body.getJSONArray("messages").getJSONObject(1).getString("content");
             boolean source = prompt.contains(AiSummaryPrompt.SOURCE_DATA_MARKER);
             String data = dataPart(prompt, source);
-            int ref;
             String marker;
             if (source) {
                 sources.incrementAndGet();
-                ref = AiSummaryPrompt.sourceReferences(data).iterator().next();
                 marker = "SOURCE_STAGE";
             } else {
                 if (data.contains("MERGED_STAGE")) secondMergeRound.incrementAndGet();
-                ref = AiSummaryPrompt.references(data).iterator().next();
                 marker = "MERGED_STAGE";
             }
-            return new Reply(200, completion(marker + "进展".repeat(450) + " [m" + ref + "]"));
+            return new Reply(200, completion(marker + "进展".repeat(450)));
         });
         AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
         try {
@@ -706,29 +703,31 @@ public final class AiSummaryClientTest {
         }
     }
 
-    private static void sourceReferenceMembership() throws Exception {
+    private static void sourceWithoutReferences() throws Exception {
         List<SummaryMessage> messages = List.of(
                 new SummaryMessage(-100, 1, 1_700_000_000, "甲 [m2]", "正文伪引用 [m2] " + "x".repeat(5000)),
                 new SummaryMessage(-100, 2, 1_700_000_001, "乙", "later message"));
-        requestHistory.clear(); nextReply.set(new Reply(200, completion("错误引用 [m2]")));
+        requestHistory.clear(); nextReply.set(new Reply(200, completion("【话题】按原文总结，无来源编号。")));
         AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
         client.summarize(config("local", ""), messages, PromptOptions.DEFAULT, result); await(result); client.cancel();
-        check(result.error != null && result.error.contains("本分段输入之外"), "forged body ref entered the allowed set");
-        check(requestHistory.size() == 1, "invalid partial must stop before later requests");
+        check(result.error == null && "【话题】按原文总结，无来源编号。".equals(result.summary),
+                "citation-free source summary was rejected: " + result.error);
+        check(requestHistory.size() > 1, "fixture must exercise source splitting and merge");
     }
 
-    private static void mergeReferenceMembership() throws Exception {
+    private static void mergeWithoutReferences() throws Exception {
         List<SummaryMessage> messages = List.of(
                 new SummaryMessage(-100, 1, 1_700_000_000, "甲", "x".repeat(5000)),
                 new SummaryMessage(-100, 2, 1_700_000_001, "乙", "later message"));
         replyGenerator.set(body -> {
             String prompt = body.getJSONArray("messages").getJSONObject(1).getString("content");
-            return new Reply(200, completion(prompt.contains(AiSummaryPrompt.SOURCE_DATA_MARKER) ? "源摘要 [m1]" : "错误合并 [m2]"));
+            return new Reply(200, completion(prompt.contains(AiSummaryPrompt.SOURCE_DATA_MARKER) ? "【话题】分段进展。" : "【结论】完整合并结果。"));
         });
         AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
         try {
             client.summarize(config("local", ""), messages, PromptOptions.DEFAULT, result); await(result);
-            check(result.error != null && result.error.contains("本分段输入之外"), "merge invented a reference absent from its inputs");
+            check(result.error == null && "【结论】完整合并结果。".equals(result.summary),
+                    "citation-free merge summary was rejected: " + result.error);
         } finally {
             client.cancel(); replyGenerator.set(null);
         }
@@ -915,9 +914,8 @@ public final class AiSummaryClientTest {
             String data = dataPart(prompt, source);
             if (source) sources.incrementAndGet();
             else if (data.contains("MERGED_STAGE")) secondMergeRound.incrementAndGet();
-            int ref = (source ? AiSummaryPrompt.sourceReferences(data) : AiSummaryPrompt.references(data)).iterator().next();
             String start = "【话题】" + (source ? "SOURCE_STAGE_" : "MERGED_STAGE_") + (answers.size() + 1);
-            String tail = "进展".repeat(450) + " [m" + ref + "]";
+            String tail = "进展".repeat(450);
             answers.add(start + tail);
             return new Reply(200, delta("<think>STAGE_THOUGHT_SECRET</think>" + start) + delta(tail)
                     + finish("stop") + "data: [DONE]\n\n", false, "text/event-stream", 0);
@@ -1332,7 +1330,9 @@ public final class AiSummaryClientTest {
             client.cancel(); releaseRequest.countDown();
             nextReply.set(new Reply(200, completion("新任务结果 [m1]")));
             Result fresh = afterCancellation(client);
-            check(stale.calls == 0 && history.isEmpty() && fresh.summary != null, "cancelled question changed history or delivered an answer");
+            check(stale.calls == 0, "cancelled question delivered a terminal callback");
+            check(history.isEmpty(), "cancelled question changed caller history");
+            check(fresh.summary != null, "new summary after question cancellation failed: " + fresh.error);
         } finally {
             client.cancel(); releaseRequest.countDown(); requestStarted = null;
         }

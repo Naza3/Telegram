@@ -45,10 +45,13 @@ public final class SummaryResultCacheTest {
     private static void explicitAndInvalidation() {
         SummaryResultCache cache = new SummaryResultCache(8, 16384);
         SummaryResultCache.Key key = key(0, 1000, -10, 0, message(1, "原文", 0), OPTIONS, CONFIG, "");
-        check(cache.put(key, "摘要 [m1]", 1234), "completed validated result stored");
+        check(cache.put(key, "【话题】讨论发布。【结论】尚未决定。【待办】无明确事项。", 1234), "completed citation-free result stored");
         check(cache.get(key, false) == null, "normal/regeneration path never reuses unknown model alias");
         check(cache.get(key, true).generatedAtMillis == 1234, "explicit history shows original generation time");
-        check(!cache.put(key, "无来源的输出", 1235), "unvalidated output not stored");
+        check(cache.put(key, "无引用编号的完整输出", 1235), "citation-free result must remain available to explicit history");
+        check("无引用编号的完整输出".equals(cache.get(key, true).summary), "cached plain summary changed");
+        check(!cache.put(key, " \n\t ", 1236) && !cache.put(key, null, 1236), "empty or null result not stored");
+        check("无引用编号的完整输出".equals(cache.get(key, true).summary), "rejected empty output replaced completed history");
         UserConfig.getInstance(0).setClientUserId(2000);
         check(cache.get(key, true) == null && !cache.put(key, "旧账号迟到结果 [m1]", 1235), "slot switch blocks stale cache reads and writes");
         cache.clearOwner(0, 1000);

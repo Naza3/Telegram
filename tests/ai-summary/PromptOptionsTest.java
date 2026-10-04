@@ -114,13 +114,13 @@ public final class PromptOptionsTest {
         PromptPreferences.save(account, owner, -10, 0, PromptPreferences.Scope.CHAT, saved);
         String key = "local_ai_prompt_" + owner + "_chat_-10_topic_0";
         org.json.JSONObject record = new org.json.JSONObject(MessagesController.getMainSettings(account).getString(key, ""));
-        check(record.getInt("rules_version") == 3, "new saved directions identify the compact conversation-source rules version");
-        for (int priorVersion : new int[] {1, 2}) {
+        check(record.getInt("rules_version") == 4, "new saved directions identify the alias-only conversation-source rules version");
+        for (int priorVersion : new int[] {1, 2, 3}) {
             record.put("rules_version", priorVersion);
             MessagesController.getMainSettings(account).edit().putString(key, record.toString()).commit();
             PromptPreferences.Resolved loaded = PromptPreferences.load(account, owner, -10, 0);
             check(loaded.scope == PromptPreferences.Scope.CHAT && loaded.options.equals(saved), "prior saved template and custom direction remain usable after the rule update");
-            check(loaded.options.builtinRulesVersion == 3, "a new request snapshots current rules rather than claiming to run old rules");
+            check(loaded.options.builtinRulesVersion == 4, "a new request snapshots current rules rather than claiming to run old rules");
         }
         PromptPreferences.clearOwner(account, owner);
         UserConfig.getInstance(account).setClientUserId(1003);

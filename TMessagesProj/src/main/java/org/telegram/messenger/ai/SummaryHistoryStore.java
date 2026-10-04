@@ -40,12 +40,22 @@ public final class SummaryHistoryStore {
         public final String model;
         public final String summary;
         public final boolean partial;
+        /** Whether [mN] in this result denotes an ordered source reference. */
+        public final boolean sourceLinks;
         public final List<SummarySourceReference> sources;
 
         public Record(String id, long dialogId, long topicId, long generatedAtMillis,
                 String chatTitle, String rangeLabel, String coverageNote, String templateLabel,
                 String customInstructions, String model, String summary, boolean partial,
                 List<SummarySourceReference> sources) {
+            this(id, dialogId, topicId, generatedAtMillis, chatTitle, rangeLabel, coverageNote, templateLabel,
+                    customInstructions, model, summary, partial, sources, true);
+        }
+
+        public Record(String id, long dialogId, long topicId, long generatedAtMillis,
+                String chatTitle, String rangeLabel, String coverageNote, String templateLabel,
+                String customInstructions, String model, String summary, boolean partial,
+                List<SummarySourceReference> sources, boolean sourceLinks) {
             requireId(id);
             if (dialogId >= 0 || dialogId == Long.MIN_VALUE || topicId < 0 || generatedAtMillis <= 0) {
                 throw new IllegalArgumentException("总结历史的聊天或时间无效。");
@@ -74,6 +84,7 @@ public final class SummaryHistoryStore {
             this.model = metadata(model);
             this.summary = summary;
             this.partial = partial;
+            this.sourceLinks = sourceLinks;
             this.sources = Collections.unmodifiableList(snapshot);
         }
     }
@@ -203,11 +214,14 @@ public final class SummaryHistoryStore {
                             source.getInt("date"), source.getInt("edit_date"), source.getLong("sender_id"),
                             source.getString("text_hash")));
                 }
+                // Missing on older records, whose [mN] output used ordered source references.
+                Object sourceLinks = value.has("source_links") ? value.get("source_links") : Boolean.TRUE;
+                if (!(sourceLinks instanceof Boolean)) throw corrupt();
                 Record record = new Record(value.getString("id"), value.getLong("dialog_id"),
                         value.getLong("topic_id"), value.getLong("generated_at"), value.getString("chat_title"),
                         value.getString("range_label"), value.getString("coverage_note"), value.getString("template_label"),
                         value.getString("custom_instructions"), value.getString("model"), value.getString("summary"),
-                        value.getBoolean("partial"), sources);
+                        value.getBoolean("partial"), sources, (Boolean) sourceLinks);
                 if (!ids.add(record.id)) throw corrupt();
                 records.add(record);
             }
@@ -233,7 +247,8 @@ public final class SummaryHistoryStore {
                         .put("chat_title", record.chatTitle).put("range_label", record.rangeLabel)
                         .put("coverage_note", record.coverageNote).put("template_label", record.templateLabel)
                         .put("custom_instructions", record.customInstructions).put("model", record.model)
-                        .put("summary", record.summary).put("partial", record.partial).put("sources", sources));
+                        .put("summary", record.summary).put("partial", record.partial)
+                        .put("source_links", record.sourceLinks).put("sources", sources));
             }
             return new JSONObject().put("version", 1).put("records", entries).toString();
         } catch (JSONException impossible) {

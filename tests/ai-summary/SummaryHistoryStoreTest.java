@@ -20,6 +20,9 @@ public final class SummaryHistoryStoreTest {
 
     public static void main(String[] args) throws Exception {
         test("encrypted round trip preserves immutable ordered hash references", SummaryHistoryStoreTest::roundTrip);
+        test("reference-free results retain sources without enabling links", SummaryHistoryStoreTest::referenceFreeRoundTrip);
+        test("legacy records without source-links metadata keep citation semantics", SummaryHistoryStoreTest::legacySourceLinks);
+        test("invalid source-links metadata fails without rewriting history", SummaryHistoryStoreTest::invalidSourceLinks);
         test("newest-first sorting and account/chat/topic filtering", SummaryHistoryStoreTest::filtering);
         test("same ID replacement is unique and durable", SummaryHistoryStoreTest::replacement);
         test("delete and scoped clear retain unrelated records", SummaryHistoryStoreTest::deletion);
@@ -56,6 +59,8 @@ public final class SummaryHistoryStoreTest {
         SummaryHistoryStore.Record loaded = SummaryHistoryStore.get(ACCOUNT, OWNER, "first");
         check(loaded != null && loaded.partial && loaded.generatedAtMillis == 10000 && loaded.topicId == 42,
                 "record header changed");
+        check(record.sourceLinks && loaded.sourceLinks && stored.getBoolean("source_links"),
+                "legacy constructor lost its ordered-reference semantics");
         check(loaded.chatTitle.equals("测试群") && loaded.rangeLabel.equals("最近 20 条")
                 && loaded.coverageNote.equals("覆盖说明") && loaded.templateLabel.equals("通用总结")
                 && loaded.customInstructions.equals("突出结论") && loaded.model.equals("本地模型")
@@ -64,6 +69,59 @@ public final class SummaryHistoryStoreTest {
                 && loaded.sources.get(0).matchesText("RAW_SOURCE_MUST_NOT_PERSIST_A"), "[mN] source order changed");
         check(SummaryHistoryStore.get(ACCOUNT, OWNER, "missing") == null, "missing ID did not return null");
         expect(() -> all().clear(), "returned list must be immutable");
+    }
+
+    private static void referenceFreeRoundTrip() throws Exception {
+        reset();
+        ArrayList<SummarySourceReference> sources = new ArrayList<>();
+        sources.add(reference(22, "PRIVATE_SOURCE_BODY"));
+        SummaryHistoryStore.Record record = new SummaryHistoryStore.Record("no-links", CHAT, 42, 10000,
+                "测试群", "最近 20 条", "覆盖说明", "通用总结", "突出结论", "本地模型",
+                "原文中提到 [m1]，这只是普通文字。", false, sources, false);
+        sources.clear();
+        save(record);
+        SummaryHistoryStore.Record loaded = SummaryHistoryStore.get(ACCOUNT, OWNER, record.id);
+        check(loaded != null && !loaded.sourceLinks && loaded.summary.equals(record.summary),
+                "reference-free result was converted into a citation result");
+        check(loaded.sources.size() == 1 && loaded.sources.get(0).id == 22
+                && loaded.sources.get(0).matchesText("PRIVATE_SOURCE_BODY"), "source metadata was discarded to disable links");
+        String plain = SummaryHistoryCipher.decrypt(ACCOUNT, OWNER, file());
+        check(!plain.contains("PRIVATE_SOURCE_BODY"), "reference-free save persisted a raw source body");
+        JSONObject json = new JSONObject(plain);
+        check(json.getInt("version") == 1 && !json.getJSONArray("records").getJSONObject(0).getBoolean("source_links"),
+                "reference-free flag missing or storage schema unnecessarily changed");
+        save(record("other", CHAT, 0, 20000));
+        check(!SummaryHistoryStore.get(ACCOUNT, OWNER, record.id).sourceLinks,
+                "rewriting history lost the reference-free flag");
+    }
+
+    private static void legacySourceLinks() throws Exception {
+        reset();
+        save(record("legacy", CHAT, 42, 10000, "旧摘要 [m1]", false,
+                Arrays.asList(reference(22, "旧原文"))));
+        JSONObject json = new JSONObject(SummaryHistoryCipher.decrypt(ACCOUNT, OWNER, file()));
+        json.getJSONArray("records").getJSONObject(0).remove("source_links");
+        setFile(SummaryHistoryCipher.encrypt(ACCOUNT, OWNER, json.toString()));
+        SummaryHistoryStore.Record legacy = SummaryHistoryStore.get(ACCOUNT, OWNER, "legacy");
+        check(legacy != null && legacy.sourceLinks && legacy.sources.get(0).id == 22,
+                "record without optional field no longer supports its original citations");
+        save(record("new", CHAT, 0, 20000));
+        check(SummaryHistoryStore.get(ACCOUNT, OWNER, "legacy").sourceLinks,
+                "rewriting old history changed its citation semantics");
+    }
+
+    private static void invalidSourceLinks() throws Exception {
+        reset(); save(record("good", CHAT, 0, 1000));
+        JSONObject json = new JSONObject(SummaryHistoryCipher.decrypt(ACCOUNT, OWNER, file()));
+        JSONObject stored = json.getJSONArray("records").getJSONObject(0);
+        for (Object invalid : Arrays.asList("false", "true", 0, 1, JSONObject.NULL, new JSONArray(), new JSONObject())) {
+            stored.put("source_links", invalid);
+            String broken = SummaryHistoryCipher.encrypt(ACCOUNT, OWNER, json.toString());
+            setFile(broken);
+            expect(() -> all(), "non-boolean source-links metadata was accepted");
+            expect(() -> save(record("new", CHAT, 0, 2000)), "invalid link protocol was overwritten by save");
+            check(broken.equals(file()), "invalid link metadata mutated the stored file");
+        }
     }
 
     private static void filtering() {

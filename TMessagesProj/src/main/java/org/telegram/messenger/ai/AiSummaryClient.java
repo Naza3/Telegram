@@ -260,7 +260,6 @@ public final class AiSummaryClient {
                     String summary = complete(config, systemPrompt, prompt, request,
                             !questionTask || chunks.size() == 1, callback);
                     if (questionTask) SummaryQuestionPrompt.validateAnswer(summary, AiSummaryPrompt.sourceReferences(chunk));
-                    else AiSummaryPrompt.validateReferences(summary, AiSummaryPrompt.sourceReferences(chunk));
                     summaries.add(summary);
                     progress(request, callback, Stage.SOURCE, i + 1, chunks.size(), 0, started);
                 }
@@ -287,9 +286,8 @@ public final class AiSummaryClient {
                                         config.inputCharacterBudget, config.maxOutputTokens);
                         String summary = complete(config, systemPrompt, prompt, request,
                                 !questionTask || mergeChunks.size() == 1, callback);
-                        // The chunk contains only summaries validated against their own inputs.
+                        // Questions retain verified citations; direct summaries use a citation-free protocol.
                         if (questionTask) SummaryQuestionPrompt.validateAnswer(summary, SummaryQuestionPrompt.mergeReferences(chunk));
-                        else AiSummaryPrompt.validateReferences(summary, AiSummaryPrompt.references(chunk));
                         merged.add(summary);
                         progress(request, callback, Stage.MERGE, merged.size(), mergeChunks.size(), mergeRound, started);
                     }
@@ -297,7 +295,7 @@ public final class AiSummaryClient {
                 }
                 String result = summaries.get(0);
                 progress(request, callback, Stage.VALIDATING, 0, 1, mergeRound, started);
-                if (!questionTask || !SummaryQuestionPrompt.isInsufficientEvidence(result)) {
+                if (questionTask && !SummaryQuestionPrompt.isInsufficientEvidence(result)) {
                     AiSummaryPrompt.validateReferences(result, snapshot.size());
                 }
                 progress(request, callback, Stage.VALIDATING, 1, 1, mergeRound, started);

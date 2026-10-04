@@ -294,7 +294,7 @@ public final class SummaryQuestionSheet {
         addAction(lastError == null ? "提问" : "重试本轮", () -> ask(config));
         if (lastError != null && config.stream) {
             addAction("使用普通模式重试", () -> ask(new AiSummarySettings.Config(config.baseUrl,
-                    config.model, config.apiKey, config.maxOutputTokens, false, config.inputCharacterBudget)));
+                    config.model, config.apiKey, config.maxOutputTokens, false, config.inputCharacterBudget, config.serviceType)));
             addText("仅本轮使用普通模式，沿用相同原文和已完成的问答。", false);
         }
     }

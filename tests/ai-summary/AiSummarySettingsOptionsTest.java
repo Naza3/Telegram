@@ -34,7 +34,23 @@ public final class AiSummarySettingsOptionsTest {
                 "64k profile survives save and reload without normalization to the old bound");
         check(AiSummarySettings.validate(new AiSummarySettings.Config(old.baseUrl, old.model, "", 8193, true, 64000)) != null,
                 "output upper bound remains unchanged");
-        System.out.println("AiSummarySettingsOptionsTest: 9 assertions passed");
+        check(old.serviceType == AiSummarySettings.ServiceType.GENERIC,
+                "loopback address alone does not imply an MNN server limit");
+        AiSummarySettings.Config mnn = new AiSummarySettings.Config(old.baseUrl, old.model, "", 2048,
+                true, 64000, AiSummarySettings.ServiceType.MNN_LOCAL);
+        check(AiSummarySettings.validate(mnn) == null, "explicit supported MNN profile accepted");
+        AiSummarySettings.save(account, 2000, mnn);
+        check(AiSummarySettings.load(account, 2000).serviceType == AiSummarySettings.ServiceType.MNN_LOCAL,
+                "explicit service profile survives reload");
+        check(AiSummarySettings.validate(new AiSummarySettings.Config(old.baseUrl, old.model, "", 4096,
+                true, 64000, AiSummarySettings.ServiceType.MNN_LOCAL)).contains("2048"),
+                "MNN profile fails before an incompatible HTTP request");
+        check(AiSummarySettings.validate(new AiSummarySettings.Config(old.baseUrl, old.model, "", 4096,
+                true, 64000, AiSummarySettings.ServiceType.GENERIC)) == null,
+                "generic OpenAI servers retain independent output limits");
+        check(AiSummarySettings.validate(new AiSummarySettings.Config(old.baseUrl, old.model, "", 512,
+                false, 6000, null)) != null, "missing service type is invalid");
+        System.out.println("AiSummarySettingsOptionsTest: 15 assertions passed");
     }
 
     private static void check(boolean condition, String message) {

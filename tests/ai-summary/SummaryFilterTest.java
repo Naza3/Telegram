@@ -2,8 +2,11 @@ package org.telegram.messenger.ai;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 
 public final class SummaryFilterTest {
     private static final long OWNER = 1000;
@@ -16,6 +19,12 @@ public final class SummaryFilterTest {
         boundedContext();
         combinationsAndEmpty();
         immutableOptionsAndSnapshot();
+        publishedMessageIdentity();
+        publishedExclusionUsesOnlyConfirmedIds();
+        publishedExclusionPreservesOccurrences();
+        publishedExclusionIsAnImmutableSnapshot();
+        publishedExclusionBeforeSelfContext();
+        publishedExclusionRejectsInvalidInputs();
         System.out.println("SummaryFilterTest: " + assertions + " assertions passed");
     }
 
@@ -150,6 +159,141 @@ public final class SummaryFilterTest {
         check(nullSource, "invalid source was silently discarded");
     }
 
+    private static void publishedMessageIdentity() {
+        SummaryFilter.PublishedMessageId identity = new SummaryFilter.PublishedMessageId(DIALOG, 7);
+        SummaryFilter.PublishedMessageId same = new SummaryFilter.PublishedMessageId(DIALOG, 7);
+        check(identity.dialogId == DIALOG && identity.messageId == 7, "published identity lost its exact dialog/message fields");
+        check(identity.equals(same) && same.equals(identity) && identity.hashCode() == same.hashCode(),
+                "equal published identities must share value equality and hash code");
+        Set<SummaryFilter.PublishedMessageId> identities = new HashSet<>(Arrays.asList(identity, same));
+        check(identities.size() == 1 && identities.contains(new SummaryFilter.PublishedMessageId(DIALOG, 7)),
+                "confirmed identity sets must resolve separately constructed equal values");
+        check(!identity.equals(new SummaryFilter.PublishedMessageId(-200, 7))
+                && !identity.equals(new SummaryFilter.PublishedMessageId(DIALOG, 8))
+                && !identity.equals(null) && !identity.equals("-100:7"), "published identity equality ignored its full type or composite key");
+        SummaryFilter.PublishedMessageId limits = new SummaryFilter.PublishedMessageId(Long.MIN_VALUE + 1, Integer.MAX_VALUE);
+        check(limits.dialogId == Long.MIN_VALUE + 1 && limits.messageId == Integer.MAX_VALUE, "valid signed identity limits were narrowed");
+        for (long dialog : new long[] {0, 1, Long.MAX_VALUE, Long.MIN_VALUE}) {
+            invalid(() -> new SummaryFilter.PublishedMessageId(dialog, 1), "invalid published dialog was accepted");
+        }
+        for (int id : new int[] {0, -1, Integer.MIN_VALUE}) {
+            invalid(() -> new SummaryFilter.PublishedMessageId(DIALOG, id), "unconfirmed/local message ID was accepted");
+        }
+    }
+
+    private static void publishedExclusionUsesOnlyConfirmedIds() {
+        String summaryLike = "【话题】发布安排\n【结论】确认上线\n【待办】完成检查😀";
+        SummaryMessage published = message(10, OWNER, summaryLike);
+        SummaryMessage foreignSameId = new SummaryMessage(-200, 10, 10, "Same name", summaryLike,
+                OWNER, 0, 0, false, true, 0, false, false);
+        SummaryMessage ordinaryOwn = message(11, OWNER, summaryLike);
+        SummaryMessage listedOtherSender = message(12, 55, "没有总结标题，也不是本人发言");
+        SummaryMessage pendingOrOtherDevice = message(13, OWNER, "【话题】未确认或其他客户端的总结");
+        SummaryMessage rich = new SummaryMessage(DIALOG, 14, 123, "保留姓名", "保留\n完整原文😀", -300,
+                10, DIALOG, true, false, 456, true, true, 77, "服务端引用原文");
+        List<SummaryMessage> input = Arrays.asList(published, foreignSameId, ordinaryOwn,
+                listedOtherSender, pendingOrOtherDevice, rich);
+        Set<SummaryFilter.PublishedMessageId> confirmed = new HashSet<>(Arrays.asList(
+                new SummaryFilter.PublishedMessageId(DIALOG, 10), new SummaryFilter.PublishedMessageId(DIALOG, 12),
+                new SummaryFilter.PublishedMessageId(DIALOG, 99)));
+        SummaryFilter.ExclusionResult result = SummaryFilter.excludePublished(input, confirmed);
+        check(result.messages.equals(Arrays.asList(foreignSameId, ordinaryOwn, pendingOrOtherDevice, rich))
+                && result.excludedCount == 2, "only exact confirmed dialog/message pairs may remove actual input entries");
+        check(result.messages.get(3) == rich && rich.text.equals("保留\n完整原文😀") && rich.quoteText.equals("服务端引用原文"),
+                "remaining sources must retain original objects, Unicode text and all metadata");
+        check(input.size() == 6 && input.get(0) == published && confirmed.size() == 3,
+                "exclusion mutated the loaded range or caller's confirmed-ID set");
+        SummaryFilter.ExclusionResult noMatches = SummaryFilter.excludePublished(input,
+                Collections.singleton(new SummaryFilter.PublishedMessageId(-300, 10)));
+        check(noMatches.excludedCount == 0 && noMatches.messages.equals(input),
+                "unrelated confirmed IDs must not infer exclusions from titles, owner, names or matching numeric IDs");
+    }
+
+    private static void publishedExclusionPreservesOccurrences() {
+        SummaryMessage first = message(1, 55, "first");
+        SummaryMessage repeated = message(2, OWNER, "published");
+        SummaryMessage duplicateIdentity = message(2, 55, "same identity with different source text");
+        SummaryMessage last = message(3, 55, "last");
+        List<SummaryMessage> input = Arrays.asList(first, repeated, first, duplicateIdentity, repeated, last);
+        SummaryFilter.ExclusionResult result = SummaryFilter.excludePublished(input,
+                Collections.singleton(new SummaryFilter.PublishedMessageId(DIALOG, 2)));
+        check(result.excludedCount == 3 && result.messages.equals(Arrays.asList(first, first, last)),
+                "excludedCount counts input occurrences; exclusion must not deduplicate or reorder remaining sources");
+        SummaryFilter.ExclusionResult emptySet = SummaryFilter.excludePublished(input, Collections.emptySet());
+        check(emptySet.excludedCount == 0 && emptySet.messages.equals(input) && emptySet.messages != input,
+                "empty confirmation set must copy the complete input without changing its occurrences");
+        SummaryFilter.ExclusionResult emptyRange = SummaryFilter.excludePublished(Collections.emptyList(),
+                Collections.singleton(new SummaryFilter.PublishedMessageId(DIALOG, 2)));
+        check(emptyRange.messages.isEmpty() && emptyRange.excludedCount == 0,
+                "confirmed records outside an empty candidate range must not create replacements or inflate counts");
+        SummaryFilter.ExclusionResult all = SummaryFilter.excludePublished(Arrays.asList(repeated, duplicateIdentity),
+                Collections.singleton(new SummaryFilter.PublishedMessageId(DIALOG, 2)));
+        check(all.messages.isEmpty() && all.excludedCount == 2, "an entirely excluded range must remain empty without backfill");
+    }
+
+    private static void publishedExclusionIsAnImmutableSnapshot() {
+        SummaryMessage excluded = message(1, OWNER, "published"), retained = message(2, 55, "retained");
+        ArrayList<SummaryMessage> input = new ArrayList<>(Arrays.asList(excluded, retained));
+        Set<SummaryFilter.PublishedMessageId> confirmed = new HashSet<>(Collections.singleton(new SummaryFilter.PublishedMessageId(DIALOG, 1)));
+        SummaryFilter.ExclusionResult result = SummaryFilter.excludePublished(input, confirmed);
+        input.clear();
+        input.add(message(3, 55, "later input"));
+        confirmed.clear();
+        confirmed.add(new SummaryFilter.PublishedMessageId(DIALOG, 2));
+        check(result.messages.equals(Collections.singletonList(retained)) && result.excludedCount == 1,
+                "later caller list/set edits changed an earlier exclusion result");
+        immutable(() -> result.messages.add(excluded), "exclusion result allowed additions");
+        immutable(() -> result.messages.set(0, excluded), "exclusion result allowed replacements");
+        immutable(() -> result.messages.remove(0), "exclusion result allowed removals");
+        immutable(() -> result.messages.clear(), "exclusion result allowed clearing");
+        SummaryFilter.ExclusionResult emptySet = SummaryFilter.excludePublished(input, Collections.emptySet());
+        input.clear();
+        check(emptySet.messages.size() == 1 && emptySet.messages.get(0).id == 3,
+                "empty confirmation fast path leaked the caller's mutable input list");
+        immutable(() -> emptySet.messages.clear(), "empty confirmation fast path returned a mutable result");
+    }
+
+    private static void publishedExclusionBeforeSelfContext() {
+        List<SummaryMessage> input = Arrays.asList(message(1, 55, "published reply parent"),
+                message(2, 55, "ordinary before"), message(3, 55, "published neighbor before"),
+                full(4, 55, "self-related reply", true, 1, DIALOG, true, true),
+                message(5, 55, "published neighbor after"), message(6, 55, "ordinary after"),
+                message(7, 55, "outside bounded context"));
+        SummaryFilter.Options self = new SummaryFilter.Options(SummaryFilter.Mode.FILTER_SELF, 0, "");
+        check(ids(SummaryFilter.apply(input, OWNER, self)).equals("1,3,4,5"),
+                "fixture must exercise both excluded reply-parent and excluded neighbor context");
+        Set<SummaryFilter.PublishedMessageId> confirmed = new HashSet<>(Arrays.asList(
+                new SummaryFilter.PublishedMessageId(DIALOG, 1), new SummaryFilter.PublishedMessageId(DIALOG, 3),
+                new SummaryFilter.PublishedMessageId(DIALOG, 5)));
+        SummaryFilter.ExclusionResult remaining = SummaryFilter.excludePublished(input, confirmed);
+        SummaryFilter.Result selected = SummaryFilter.apply(remaining.messages, OWNER, self);
+        check(remaining.excludedCount == 3 && remaining.messages.size() == 4,
+                "exclusion must report the selected-range reduction before normal filtering");
+        check(ids(selected).equals("2,4,6") && selected.matchedCount == 1 && selected.contextCount == 2,
+                "self context reintroduced an excluded parent/neighbor or lost surviving source order");
+        for (SummaryMessage message : selected.messages) {
+            check(!confirmed.contains(new SummaryFilter.PublishedMessageId(message.dialogId, message.id)),
+                    "self-related context contains a confirmed published summary");
+        }
+        check(selected.coverageNote.contains("本次范围内 4 条唯一文字"),
+                "normal filtering must describe the post-exclusion snapshot it actually received");
+        SummaryFilter.ExclusionResult allExcluded = SummaryFilter.excludePublished(Collections.singletonList(input.get(3)),
+                Collections.singleton(new SummaryFilter.PublishedMessageId(DIALOG, 4)));
+        check(SummaryFilter.apply(allExcluded.messages, OWNER, self).messages.isEmpty(),
+                "self-related selection fetched or restored a message after the entire candidate range was excluded");
+    }
+
+    private static void publishedExclusionRejectsInvalidInputs() {
+        invalid(() -> SummaryFilter.excludePublished(null, Collections.emptySet()), "null source list accepted");
+        invalid(() -> SummaryFilter.excludePublished(Collections.emptyList(), null), "null confirmation set accepted");
+        invalid(() -> SummaryFilter.excludePublished(Arrays.asList(message(1, 55, "valid"), null), Collections.emptySet()),
+                "null source element silently ignored");
+        Set<SummaryFilter.PublishedMessageId> nullIdentity = new HashSet<>();
+        nullIdentity.add(null);
+        invalid(() -> SummaryFilter.excludePublished(Collections.emptyList(), nullIdentity),
+                "invalid confirmation member silently ignored for an empty candidate range");
+    }
+
     private static SummaryMessage message(int id, long sender, String text) {
         return full(id, sender, text, false, 0, 0, false, false);
     }
@@ -162,6 +306,19 @@ public final class SummaryFilterTest {
         StringBuilder out = new StringBuilder();
         for (SummaryMessage m : result.messages) { if (out.length() > 0) out.append(','); out.append(m.id); }
         return out.toString();
+    }
+    private static void invalid(Runnable operation, String reason) {
+        try { operation.run(); }
+        catch (IllegalArgumentException expected) {
+            check(expected.getMessage() != null && !expected.getMessage().isEmpty(), "invalid input needs an explicit error");
+            return;
+        }
+        throw new AssertionError(reason);
+    }
+    private static void immutable(Runnable operation, String reason) {
+        try { operation.run(); }
+        catch (UnsupportedOperationException expected) { assertions++; return; }
+        throw new AssertionError(reason);
     }
     private static void check(boolean condition, String message) { assertions++; if (!condition) throw new AssertionError(message); }
 }

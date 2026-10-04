@@ -17,6 +17,7 @@ public final class AiSummarySettings {
     /** Conservative character estimate, not the model tokenizer's context limit. */
     public static final int DEFAULT_INPUT_CHARACTER_BUDGET = 6000;
     public static final int MAX_INPUT_CHARACTER_BUDGET = 64000;
+    public enum ServiceType { GENERIC, MNN_LOCAL }
     private static final String PREFIX = "local_ai_summary_";
 
     private AiSummarySettings() {
@@ -29,6 +30,8 @@ public final class AiSummarySettings {
         public final int maxOutputTokens;
         public final boolean stream;
         public final int inputCharacterBudget;
+        /** Explicit user choice; never inferred from a loopback address or model alias. */
+        public final ServiceType serviceType;
 
         public Config(String baseUrl, String model, String apiKey) {
             this(baseUrl, model, apiKey, DEFAULT_MAX_OUTPUT_TOKENS);
@@ -44,12 +47,18 @@ public final class AiSummarySettings {
 
         public Config(String baseUrl, String model, String apiKey, int maxOutputTokens,
                       boolean stream, int inputCharacterBudget) {
+            this(baseUrl, model, apiKey, maxOutputTokens, stream, inputCharacterBudget, ServiceType.GENERIC);
+        }
+
+        public Config(String baseUrl, String model, String apiKey, int maxOutputTokens,
+                      boolean stream, int inputCharacterBudget, ServiceType serviceType) {
             this.baseUrl = baseUrl == null ? "" : baseUrl.trim();
             this.model = model == null ? "" : model.trim();
             this.apiKey = apiKey == null ? "" : apiKey.trim();
             this.maxOutputTokens = maxOutputTokens;
             this.stream = stream;
             this.inputCharacterBudget = inputCharacterBudget;
+            this.serviceType = serviceType;
         }
     }
 
@@ -70,7 +79,8 @@ public final class AiSummarySettings {
                 apiKey,
                 preferences.getInt(PREFIX + "max_output_tokens", DEFAULT_MAX_OUTPUT_TOKENS),
                 preferences.getInt(PREFIX + "stream", 0) == 1,
-                preferences.getInt(PREFIX + "input_character_budget", DEFAULT_INPUT_CHARACTER_BUDGET));
+                preferences.getInt(PREFIX + "input_character_budget", DEFAULT_INPUT_CHARACTER_BUDGET),
+                preferences.getInt(PREFIX + "service_type", 0) == 1 ? ServiceType.MNN_LOCAL : ServiceType.GENERIC);
     }
 
     /** Returns whether the API key was persisted securely (false means session-only storage). */
@@ -92,6 +102,7 @@ public final class AiSummarySettings {
                 .putInt(PREFIX + "max_output_tokens", config.maxOutputTokens)
                 .putInt(PREFIX + "stream", config.stream ? 1 : 0)
                 .putInt(PREFIX + "input_character_budget", config.inputCharacterBudget)
+                .putInt(PREFIX + "service_type", config.serviceType == ServiceType.MNN_LOCAL ? 1 : 0)
                 .remove(PREFIX + "api_key")
                 .apply();
         return AiSummarySecretStore.save(account, ownerId, config.apiKey);
@@ -99,7 +110,7 @@ public final class AiSummarySettings {
 
     private static void requireOwner(int account, long ownerId) {
         if (ownerId <= 0 || UserConfig.getInstance(account).getClientUserId() != ownerId) {
-            throw new IllegalStateException("当前账号已变化，请重新打开群聊后配置模型。");
+            throw new IllegalStateException("当前账号已变化，请重新打开 AI 总结后配置模型。");
         }
     }
 
@@ -126,6 +137,10 @@ public final class AiSummarySettings {
         }
         if (config.maxOutputTokens < 64 || config.maxOutputTokens > 8192) {
             return "最大输出 tokens 必须在 64 到 8192 之间。";
+        }
+        if (config.serviceType == null) return "请选择有效的模型服务类型。";
+        if (config.serviceType == ServiceType.MNN_LOCAL && config.maxOutputTokens > 2048) {
+            return "MNN 本机 API（localapi.5）的最大输出为 2048 tokens，请降低此值；更大的输出需要服务端支持。";
         }
         if (config.inputCharacterBudget < 2048 || config.inputCharacterBudget > MAX_INPUT_CHARACTER_BUDGET) {
             return "上下文字符预算须在 2048–" + MAX_INPUT_CHARACTER_BUDGET + " 之间。这是保守估算，不是精确 token 数。";

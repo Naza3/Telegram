@@ -66,9 +66,12 @@ public final class AiSummaryClient {
         public final int inputCharacters, maxOutputTokens, receivedCharacters;
         public final boolean reasoningObserved;
         public final long elapsedMs;
+        /** -1 until observed. Content includes reasoning; neither field claims first answer-token timing. */
+        public final long responseElapsedMs, firstContentElapsedMs;
 
         RequestStatus(RequestPhase phase, boolean streaming, int inputCharacters, int maxOutputTokens,
-                      int receivedCharacters, boolean reasoningObserved, long elapsedMs) {
+                      int receivedCharacters, boolean reasoningObserved, long elapsedMs,
+                      long responseElapsedMs, long firstContentElapsedMs) {
             this.phase = phase;
             this.streaming = streaming;
             this.inputCharacters = inputCharacters;
@@ -76,6 +79,8 @@ public final class AiSummaryClient {
             this.receivedCharacters = receivedCharacters;
             this.reasoningObserved = reasoningObserved;
             this.elapsedMs = elapsedMs;
+            this.responseElapsedMs = responseElapsedMs;
+            this.firstContentElapsedMs = firstContentElapsedMs;
         }
     }
 
@@ -584,6 +589,7 @@ public final class AiSummaryClient {
         boolean streaming, reasoningObserved, lastReasoning;
         int receivedCharacters, lastCharacters;
         long lastUpdate;
+        long responseElapsedMs = -1, firstContentElapsedMs = -1;
 
         RequestMonitor(int request, Callback callback, boolean streaming, int inputCharacters, int maxOutputTokens) {
             this.request = request;
@@ -594,9 +600,11 @@ public final class AiSummaryClient {
         }
 
         void phase(RequestPhase phase) {
+            long elapsed = Math.max(0, (System.nanoTime() - started) / 1_000_000L);
+            if (phase == RequestPhase.RESPONSE && responseElapsedMs < 0) responseElapsedMs = elapsed;
             if (callback == null) return;
             RequestStatus status = new RequestStatus(phase, streaming, inputCharacters, maxOutputTokens,
-                    receivedCharacters, reasoningObserved, Math.max(0, (System.nanoTime() - started) / 1_000_000L));
+                    receivedCharacters, reasoningObserved, elapsed, responseElapsedMs, firstContentElapsedMs);
             deliver(request, () -> callback.onRequestStatus(status));
         }
 
@@ -604,6 +612,9 @@ public final class AiSummaryClient {
             receivedCharacters = characters;
             reasoningObserved |= reasoning;
             long now = System.nanoTime();
+            if (characters > 0 && firstContentElapsedMs < 0) {
+                firstContentElapsedMs = Math.max(0, (now - started) / 1_000_000L);
+            }
             if (characters > 0 && (characters != lastCharacters || reasoningObserved != lastReasoning)
                     && (force || lastUpdate == 0 || reasoningObserved != lastReasoning || now - lastUpdate >= 250_000_000L)) {
                 lastUpdate = now;

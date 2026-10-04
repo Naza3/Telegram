@@ -19,7 +19,7 @@ mapfile -d '' test_files < <(find "$test_dir" -maxdepth 1 -name '*Test.java' -pr
 production_dir="$repo_dir/TMessagesProj/src/main/java/org/telegram/messenger/ai"
 mapfile -d '' production_files < <(find "$production_dir" -maxdepth 1 -name '*.java' \
     ! -name 'AiSummarySecretStore.java' ! -name 'SummaryHistoryCipher.java' \
-    ! -name 'SummaryHistoryStorage.java' -print0)
+    ! -name 'SummaryHistoryStorage.java' ! -name 'SummaryPrivateStorage.java' -print0)
 java -jar "$ecj_jar" -17 -encoding UTF-8 -warn:none -cp "$json_jar" -d "$classes_dir" \
     "${stub_files[@]}" "${test_files[@]}" \
     "${production_files[@]}"

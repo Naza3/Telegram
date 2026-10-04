@@ -204,6 +204,23 @@ public final class AiSummaryClientTest {
             test("cancellation suppresses queued detailed diagnostic errors", AiSummaryClientTest::cancelDetailedDiagnostic);
             test("actual MNN local API contract accepts every request path without unsupported sampling options", AiSummaryClientTest::mnnLocalApiContract);
             test("MNN output boundary is explained without classifying every HTTP 400 as an output error", AiSummaryClientTest::mnnOutputLimitContract);
+            test("explicit MNN service profile rejects incompatible output before any network request", () -> {
+                int before = requestHistory.size();
+                for (int tokens : List.of(4096, 8192)) {
+                    AiSummarySettings.Config incompatible = new AiSummarySettings.Config(base + "/v1", "local", "", tokens,
+                            true, 64000, AiSummarySettings.ServiceType.MNN_LOCAL);
+                    AiSummaryClient client = new AiSummaryClient();
+                    Result result = new Result();
+                    client.summarize(incompatible, MESSAGES, TEST_PROMPT, result);
+                    await(result); client.cancel();
+                    check(result.summary == null && result.error.contains("2048") && result.inputs.isEmpty(),
+                            "explicit MNN output mismatch must fail before encoding request input");
+                    Diagnostic probe = new Diagnostic();
+                    client.testConnection(incompatible, probe); await(probe); client.cancel();
+                    check(probe.result == null && probe.error.contains("2048"), "probe must apply the same MNN contract");
+                }
+                check(requestHistory.size() == before, "an incompatible MNN profile reached the model service");
+            });
             test("custom direction reaches every source and at least two merge rounds", AiSummaryClientTest::directionAcrossMergeRounds);
             test("direct summaries need no source citations", AiSummaryClientTest::sourceWithoutReferences);
             test("direct merge summaries need no source citations", AiSummaryClientTest::mergeWithoutReferences);
@@ -850,6 +867,14 @@ public final class AiSummaryClientTest {
                 elapsed = status.elapsedMs;
             }
             check(result.statuses.get(2).receivedCharacters == answer.length(), "JSON framing counted as model content");
+            check(result.statuses.get(0).responseElapsedMs == -1 && result.statuses.get(0).firstContentElapsedMs == -1,
+                    "timing cannot claim response/content before the server replied");
+            check(result.statuses.get(1).responseElapsedMs >= 0 && result.statuses.get(1).firstContentElapsedMs == -1,
+                    "response timing must not invent generated content timing");
+            AiSummaryClient.RequestStatus completedStatus = result.statuses.get(2);
+            check(completedStatus.firstContentElapsedMs >= completedStatus.responseElapsedMs
+                    && completedStatus.elapsedMs >= completedStatus.firstContentElapsedMs,
+                    "ordinary complete-body timing must follow HTTP response timing");
             for (java.lang.reflect.Field field : AiSummaryClient.RequestStatus.class.getDeclaredFields()) {
                 check(field.getType().isPrimitive() || field.getType() == AiSummaryClient.RequestPhase.class,
                         "request status can retain raw payload or credentials");
@@ -895,11 +920,15 @@ public final class AiSummaryClientTest {
             AiSummaryClient.RequestStatus reasoning = result.statuses.get(result.statuses.size() - 1);
             check(reasoning.phase == AiSummaryClient.RequestPhase.CONTENT && reasoning.receivedCharacters == hidden.length()
                     && result.partials.isEmpty() && result.calls == 0, "reasoning was invisible to status or exposed as answer");
+            check(reasoning.firstContentElapsedMs >= reasoning.responseElapsedMs && reasoning.responseElapsedMs >= 0,
+                    "hidden reasoning contributes only to received-content timing, not a visible answer");
             allowAnswer.countDown(); await(result);
             check(answer.equals(result.summary), "reasoning field contaminated final answer");
             AiSummaryClient.RequestStatus last = result.statuses.get(result.statuses.size() - 1);
             check(last.receivedCharacters == hidden.length() + answer.length() && last.reasoningObserved,
                     "final accumulated content statistics were not flushed");
+            check(last.firstContentElapsedMs == reasoning.firstContentElapsedMs,
+                    "first received-content timing must remain fixed when answer text later arrives");
             for (String partial : result.partials) check(!partial.contains(hidden), "reasoning field leaked in a partial");
         } finally {
             client.cancel(); allowReasoning.countDown(); allowAnswer.countDown(); server.removeContext(path);

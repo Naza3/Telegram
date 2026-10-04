@@ -97,6 +97,7 @@ public final class SummaryResultCache {
         putString(digest, hashSecret(config.apiKey));
         putInt(digest, config.maxOutputTokens); putInt(digest, config.inputCharacterBudget);
         putInt(digest, config.stream ? 1 : 0);
+        putString(digest, config.serviceType == null ? "" : config.serviceType.name());
         putString(digest, "sampling=server-default");
         putString(digest, actualModelVersion == null ? "" : actualModelVersion);
         putString(digest, TimeZone.getDefault().getID());

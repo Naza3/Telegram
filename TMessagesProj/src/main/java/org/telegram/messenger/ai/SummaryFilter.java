@@ -3,14 +3,56 @@ package org.telegram.messenger.ai;
 
 import java.util.ArrayList;
 import java.util.BitSet;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 
 /** Deterministic selection from an already loaded snapshot. It never fetches more history. */
 public final class SummaryFilter {
     public enum Mode { ALL, FOCUS_SELF, FILTER_SELF }
+
+    /** A server-confirmed message identity; callers supply only the current real account's records. */
+    public static final class PublishedMessageId {
+        public final long dialogId;
+        public final int messageId;
+
+        public PublishedMessageId(long dialogId, int messageId) {
+            if (dialogId >= 0 || dialogId == Long.MIN_VALUE || messageId <= 0) {
+                throw new IllegalArgumentException("已发送总结的群或服务端消息标识无效。");
+            }
+            this.dialogId = dialogId;
+            this.messageId = messageId;
+        }
+
+        @Override
+        public boolean equals(Object object) {
+            if (!(object instanceof PublishedMessageId)) {
+                return false;
+            }
+            PublishedMessageId other = (PublishedMessageId) object;
+            return dialogId == other.dialogId && messageId == other.messageId;
+        }
+
+        @Override
+        public int hashCode() {
+            return 31 * (int) (dialogId ^ (dialogId >>> 32)) + messageId;
+        }
+    }
+
+    public static final class ExclusionResult {
+        public final List<SummaryMessage> messages;
+        /** Actual input entries removed, including each occurrence if the input repeats an identity. */
+        public final int excludedCount;
+
+        private ExclusionResult(List<SummaryMessage> messages, int excludedCount) {
+            this.messages = Collections.unmodifiableList(new ArrayList<>(messages));
+            this.excludedCount = excludedCount;
+        }
+    }
 
     public static final class Options {
         public static final Options DEFAULT = new Options(Mode.ALL, 0, "");
@@ -52,6 +94,41 @@ public final class SummaryFilter {
     }
 
     private SummaryFilter() { }
+
+    /**
+     * Remove only confirmed identities from an already selected range, without replacing any entry.
+     * Run this before apply() so self-related context cannot reintroduce an excluded message.
+     */
+    public static ExclusionResult excludePublished(List<SummaryMessage> messages,
+            Set<PublishedMessageId> publishedIds) {
+        if (messages == null) {
+            throw new IllegalArgumentException("缺少本次消息快照。");
+        }
+        if (publishedIds == null) {
+            throw new IllegalArgumentException("缺少已确认发送的总结消息标识。");
+        }
+        ArrayList<SummaryMessage> snapshot = new ArrayList<>(messages);
+        HashSet<SourceKey> excluded = new HashSet<>();
+        for (PublishedMessageId id : new HashSet<>(publishedIds)) {
+            if (id == null) {
+                throw new IllegalArgumentException("已确认发送的总结消息标识包含无效记录。");
+            }
+            excluded.add(new SourceKey(id.dialogId, id.messageId));
+        }
+        ArrayList<SummaryMessage> remaining = new ArrayList<>(snapshot.size());
+        int excludedCount = 0;
+        for (SummaryMessage message : snapshot) {
+            if (message == null) {
+                throw new IllegalArgumentException("消息快照包含无效来源，请重新读取。");
+            }
+            if (excluded.contains(new SourceKey(message.dialogId, message.id))) {
+                excludedCount++;
+            } else {
+                remaining.add(message);
+            }
+        }
+        return new ExclusionResult(remaining, excludedCount);
+    }
 
     /** ownerId must be the same real Telegram account identity used to load this snapshot. */
     public static Result apply(List<SummaryMessage> messages, long ownerId, Options options) {

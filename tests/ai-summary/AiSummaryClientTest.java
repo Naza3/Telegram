@@ -23,6 +23,7 @@ import java.util.concurrent.atomic.AtomicReference;
 public final class AiSummaryClientTest {
     private static final List<SummaryMessage> MESSAGES = List.of(
             new SummaryMessage(-100, 51, 1_700_000_000, "甲", "明天十点讨论发布计划。"));
+    private static final PromptOptions TEST_PROMPT = new PromptOptions(PromptOptions.GENERAL, "测试要求：概述聊天中的事实。");
     private static int passed;
     private static HttpServer server;
     private static String base;
@@ -90,6 +91,7 @@ public final class AiSummaryClientTest {
             server.start();
             base = "http://127.0.0.1:" + server.getAddress().getPort();
 
+            test("blank manual core stops before HTTP and permits a later configured request", AiSummaryClientTest::blankManualCore);
             test("non-streaming POST, original text, bearer and model", () -> {
                 Result result = invoke(200, completion("发布讨论定于明天十点"), config("local-model", "test-session-secret"));
                 check(result.error == null && "发布讨论定于明天十点".equals(result.summary), "citation-free summary rejected");
@@ -97,6 +99,7 @@ public final class AiSummaryClientTest {
                 check("POST".equals(lastMethod.get()), "must POST");
                 check(body.has("stream") && !body.getBoolean("stream"), "stream must be false");
                 check("local-model".equals(body.getString("model")), "model was not forwarded");
+                check(TEST_PROMPT.customInstructions.equals(body.getJSONArray("messages").getJSONObject(0).getString("content")), "manual system text changed");
                 check(body.getJSONArray("messages").getJSONObject(1).getString("content").contains(MESSAGES.get(0).text), "original source text absent");
                 check("Bearer test-session-secret".equals(lastAuthorization.get()), "bearer missing");
             });
@@ -215,7 +218,7 @@ public final class AiSummaryClientTest {
             test("ordinary mode remains available when service ignores stream", () -> {
                 nextReply.set(new Reply(200, completion("【话题】结果 [m1]")));
                 AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
-                client.summarize(streamConfig(), MESSAGES, result); await(result); client.cancel();
+                client.summarize(streamConfig(), MESSAGES, TEST_PROMPT, result); await(result); client.cancel();
                 check(result.summary == null && result.error.contains("关闭流式"), "ignored stream was silently accepted");
                 check(invoke(200, completion("普通结果 [m1]"), config("local", "")).summary != null, "ordinary retry unavailable");
             });
@@ -230,7 +233,7 @@ public final class AiSummaryClientTest {
             test("impossible input/output budget fails before sending messages", () -> {
                 requestHistory.clear();
                 AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
-                client.summarize(new AiSummarySettings.Config(base, "local", "", 8192, false, 2048), MESSAGES, result);
+                client.summarize(new AiSummarySettings.Config(base, "local", "", 8192, false, 2048), MESSAGES, TEST_PROMPT, result);
                 await(result); client.cancel();
                 check(result.error != null && requestHistory.isEmpty(), "over-budget request reached service");
             });
@@ -272,7 +275,7 @@ public final class AiSummaryClientTest {
         requestStarted = new CountDownLatch(1); releaseRequest = new CountDownLatch(1);
         nextReply.set(new Reply(200, completion("旧请求 [m1]"), true));
         AiSummaryClient client = new AiSummaryClient(); Result stale = new Result();
-        client.summarize(config("local", ""), MESSAGES, stale);
+        client.summarize(config("local", ""), MESSAGES, TEST_PROMPT, stale);
         check(requestStarted.await(5, TimeUnit.SECONDS), "request did not begin");
         client.cancel(); releaseRequest.countDown();
         nextReply.set(new Reply(200, completion("新请求 [m1]")));
@@ -284,7 +287,7 @@ public final class AiSummaryClientTest {
     private static void cancelQueuedCallback() throws Exception {
         nextReply.set(new Reply(200, completion("将被取消 [m1]")));
         AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
-        client.summarize(config("local", ""), MESSAGES, result);
+        client.summarize(config("local", ""), MESSAGES, TEST_PROMPT, result);
         long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
         java.lang.reflect.Field taskField = AiSummaryClient.class.getDeclaredField("task");
         taskField.setAccessible(true);
@@ -302,10 +305,39 @@ public final class AiSummaryClientTest {
         check(result.calls == 0 && result.statuses.isEmpty(), "cancelled queued callback delivered");
     }
 
+    private static void blankManualCore() throws Exception {
+        AiSummaryClient client = new AiSummaryClient();
+        requestHistory.clear();
+        nextReply.set(new Reply(200, completion("已使用手动要求")));
+        try {
+            PromptOptions[] emptyOptions = {null, PromptOptions.DEFAULT,
+                    new PromptOptions(PromptOptions.TODOS, " \n\t ")};
+            for (int i = 0; i <= emptyOptions.length; i++) {
+                Result blocked = new Result();
+                if (i == emptyOptions.length) client.summarize(config("local", ""), MESSAGES, blocked);
+                else client.summarize(config("local", ""), MESSAGES, emptyOptions[i], blocked);
+                await(blocked);
+                check(blocked.calls == 1 && blocked.summary == null
+                        && "请先填写核心总结要求。".equals(blocked.error), "blank core did not report the required field");
+                check(blocked.inputs.isEmpty() && blocked.statuses.isEmpty() && requestHistory.isEmpty(),
+                        "blank core reached request input or HTTP");
+            }
+            Result fresh = new Result();
+            client.summarize(config("local", ""), MESSAGES, TEST_PROMPT, fresh);
+            await(fresh);
+            check("已使用手动要求".equals(fresh.summary) && fresh.error == null,
+                    "client did not recover after entering a manual core");
+            check(requestHistory.size() == 1 && fresh.inputs.size() == 1,
+                    "manual retry sent an unexpected number of requests");
+        } finally {
+            client.cancel();
+        }
+    }
+
     private static Result invoke(int status, String body, AiSummarySettings.Config config) throws Exception {
         nextReply.set(new Reply(status, body));
         AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
-        client.summarize(config, MESSAGES, result); await(result); client.cancel();
+        client.summarize(config, MESSAGES, TEST_PROMPT, result); await(result); client.cancel();
         check(result.calls == 1, "expected exactly one terminal callback"); return result;
     }
     private static Diagnostic diagnose(int status, String body, AiSummarySettings.Config config) throws Exception {
@@ -453,7 +485,7 @@ public final class AiSummaryClientTest {
             check(diagnostic.result != null, "MNN contract rejected diagnostic: " + diagnostic.error);
             for (AiSummarySettings.Config config : List.of(plain, streaming)) {
                 Result summary = new Result();
-                client.summarize(config, MESSAGES, summary); await(summary);
+                client.summarize(config, MESSAGES, TEST_PROMPT, summary); await(summary);
                 check(summary.summary != null, "MNN contract rejected summary: " + summary.error);
                 Result question = new Result();
                 client.ask(config, MESSAGES, PromptOptions.DEFAULT, "几点？", List.of(), question); await(question);
@@ -518,7 +550,7 @@ public final class AiSummaryClientTest {
             for (int limit : List.of(2000, 2001, 2048, 2049)) {
                 requestHistory.clear();
                 Result result = new Result();
-                client.summarize(new AiSummarySettings.Config(base, "mnn-local", "OUTPUT_LIMIT_PRIVATE_KEY", limit, false, 16000), MESSAGES, result);
+                client.summarize(new AiSummarySettings.Config(base, "mnn-local", "OUTPUT_LIMIT_PRIVATE_KEY", limit, false, 16000), MESSAGES, TEST_PROMPT, result);
                 await(result);
                 check(requestHistory.size() == 1 && requestHistory.get(0).getInt("max_tokens") == limit,
                         "output boundary was silently capped or retried before reaching MNN");
@@ -555,7 +587,7 @@ public final class AiSummaryClientTest {
                 requestHistory.clear();
                 AiSummarySettings.Config config = new AiSummarySettings.Config(base, "mnn-local", "LARGE_INPUT_AUTH", 512, streaming, 64000);
                 Result result = new Result();
-                client.summarize(config, messages, result); await(result);
+                client.summarize(config, messages, TEST_PROMPT, result); await(result);
                 check(result.summary != null && requestHistory.size() == 1, "64k source was rejected or unnecessarily split: " + result.error);
                 JSONObject body = requestHistory.get(0);
                 String system = body.getJSONArray("messages").getJSONObject(0).getString("content");
@@ -574,7 +606,7 @@ public final class AiSummaryClientTest {
             }
             requestHistory.clear();
             Result invalid = new Result();
-            client.summarize(new AiSummarySettings.Config(base, "mnn-local", "", 512, false, 64001), messages, invalid);
+            client.summarize(new AiSummarySettings.Config(base, "mnn-local", "", 512, false, 64001), messages, TEST_PROMPT, invalid);
             await(invalid);
             check(invalid.error != null && requestHistory.isEmpty(), "64001 budget reached HTTP instead of failing validation");
         } finally {
@@ -696,7 +728,8 @@ public final class AiSummaryClientTest {
             check(sources.get() == sourceCount && secondMergeRound.get() >= 1, "did not exercise at least two merge rounds");
             for (JSONObject body : requestHistory) {
                 String prompt = body.getJSONArray("messages").getJSONObject(1).getString("content");
-                check(prompt.contains(options.customInstructions) && prompt.contains("待办跟进"), "direction missing from an intermediate request");
+                check(options.customInstructions.equals(body.getJSONArray("messages").getJSONObject(0).getString("content")), "manual core changed in an intermediate request");
+                check(!prompt.contains(options.customInstructions) && !prompt.contains("待办跟进"), "core or legacy template duplicated in user data");
             }
         } finally {
             client.cancel(); replyGenerator.set(null);
@@ -709,7 +742,7 @@ public final class AiSummaryClientTest {
                 new SummaryMessage(-100, 2, 1_700_000_001, "乙", "later message"));
         requestHistory.clear(); nextReply.set(new Reply(200, completion("【话题】按原文总结，无来源编号。")));
         AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
-        client.summarize(config("local", ""), messages, PromptOptions.DEFAULT, result); await(result); client.cancel();
+        client.summarize(config("local", ""), messages, TEST_PROMPT, result); await(result); client.cancel();
         check(result.error == null && "【话题】按原文总结，无来源编号。".equals(result.summary),
                 "citation-free source summary was rejected: " + result.error);
         check(requestHistory.size() > 1, "fixture must exercise source splitting and merge");
@@ -725,7 +758,7 @@ public final class AiSummaryClientTest {
         });
         AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
         try {
-            client.summarize(config("local", ""), messages, PromptOptions.DEFAULT, result); await(result);
+            client.summarize(config("local", ""), messages, TEST_PROMPT, result); await(result);
             check(result.error == null && "【结论】完整合并结果。".equals(result.summary),
                     "citation-free merge summary was rejected: " + result.error);
         } finally {
@@ -775,7 +808,7 @@ public final class AiSummaryClientTest {
                 + delta("【话题】中文😀") + delta(" [m1]") + finish("stop") + "data: [DONE]\n\n";
         nextReply.set(sse(stream));
         AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
-        client.summarize(streamConfig(), MESSAGES, result); await(result); client.cancel();
+        client.summarize(streamConfig(), MESSAGES, TEST_PROMPT, result); await(result); client.cancel();
         check("【话题】中文😀 [m1]".equals(result.summary), "split UTF-8/thinking corrupt final response: " + result.error);
         check(!result.partials.isEmpty(), "no partial text was delivered");
         check(result.summary.equals(result.partials.get(result.partials.size() - 1)), "throttled final text was lost");
@@ -793,7 +826,7 @@ public final class AiSummaryClientTest {
         nextReply.set(new Reply(200, completion(answer), true));
         AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
         try {
-            client.summarize(config("local", "STATUS_CREDENTIAL_SECRET"), MESSAGES, result);
+            client.summarize(config("local", "STATUS_CREDENTIAL_SECRET"), MESSAGES, TEST_PROMPT, result);
             check(requestStarted.await(5, TimeUnit.SECONDS), "ordinary request did not arrive");
             AndroidUtilities.drain();
             check(result.statuses.size() == 1 && result.statuses.get(0).phase == AiSummaryClient.RequestPhase.SENDING,
@@ -852,7 +885,7 @@ public final class AiSummaryClientTest {
         });
         AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
         try {
-            client.summarize(new AiSummarySettings.Config(base + "/status-stream/v1", "local", "STATUS_AUTH_SECRET", 512, true), MESSAGES, result);
+            client.summarize(new AiSummarySettings.Config(base + "/status-stream/v1", "local", "STATUS_AUTH_SECRET", 512, true), MESSAGES, TEST_PROMPT, result);
             awaitStatus(() -> result.statuses.stream().anyMatch(status -> status.phase == AiSummaryClient.RequestPhase.RESPONSE));
             check(result.statuses.size() == 2 && result.statuses.get(1).streaming
                     && result.statuses.get(1).receivedCharacters == 0, "empty role or heartbeat counted as generated text");
@@ -888,7 +921,7 @@ public final class AiSummaryClientTest {
             nextReply.set(stream ? sse("data: " + response + "\n\ndata: [DONE]\n\n") : new Reply(200, response));
             AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
             try {
-                client.summarize(new AiSummarySettings.Config(base, "local", "LIMIT_AUTH_SECRET", 2000, stream, 32000), MESSAGES, result);
+                client.summarize(new AiSummarySettings.Config(base, "local", "LIMIT_AUTH_SECRET", 2000, stream, 32000), MESSAGES, TEST_PROMPT, result);
                 await(result);
                 check(result.summary == null && result.error.contains("2000 tokens") && result.error.contains("结果不完整"),
                         "length error lost actual configured cap or accepted incomplete answer");
@@ -922,7 +955,7 @@ public final class AiSummaryClientTest {
         });
         AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
         try {
-            client.summarize(streamConfig(), messages, result); await(result);
+            client.summarize(streamConfig(), messages, TEST_PROMPT, result); await(result);
             check(result.summary != null, "final streaming merge failed: " + result.error);
             check(sources.get() >= 8 && secondMergeRound.get() >= 1, "fixture must include multiple source and merge rounds");
             check(result.calls == 1 && answers.get(answers.size() - 1).equals(result.summary), "draft became a final result");
@@ -1009,7 +1042,7 @@ public final class AiSummaryClientTest {
             nextReply.set(new Reply(200, streams[i], false, "text/event-stream", 0));
             AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
             try {
-                client.summarize(streamConfig(), MESSAGES, result); await(result);
+                client.summarize(streamConfig(), MESSAGES, TEST_PROMPT, result); await(result);
                 check(result.summary == null && result.error != null && result.calls == 1 && requestHistory.size() == 1,
                         "incomplete stream succeeded or retried automatically");
                 check(result.events.get(result.events.size() - 1).equals("ERROR"), "draft arrived after the terminal error");
@@ -1042,7 +1075,7 @@ public final class AiSummaryClientTest {
             // Large-limit case uses normal chunks to avoid a million individual socket writes.
             nextReply.set(new Reply(200, stream, false, "text/event-stream", 0));
             AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
-            client.summarize(streamConfig(), MESSAGES, result); await(result); client.cancel();
+            client.summarize(streamConfig(), MESSAGES, TEST_PROMPT, result); await(result); client.cancel();
             check(result.summary == null && result.error != null, "incomplete/error SSE returned success");
             check(!result.error.contains("DO_NOT_ECHO_SECRET"), "server detail leaked");
             for (String partial : result.partials) check(!partial.contains("DO_NOT_ECHO_SECRET"), "reasoning leaked to partial result");
@@ -1070,7 +1103,7 @@ public final class AiSummaryClientTest {
         });
         AiSummaryClient client = new AiSummaryClient(); Result stale = new Result();
         try {
-            client.summarize(new AiSummarySettings.Config(base + "/stream-cancel/v1", "local", "", 512, true), MESSAGES, stale);
+            client.summarize(new AiSummarySettings.Config(base + "/stream-cancel/v1", "local", "", 512, true), MESSAGES, TEST_PROMPT, stale);
             long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
             while (stale.partials.isEmpty() && System.nanoTime() < end) { AndroidUtilities.drain(); Thread.sleep(5); }
             check(!stale.partials.isEmpty(), "stream did not deliver an initial partial");
@@ -1097,7 +1130,7 @@ public final class AiSummaryClientTest {
         nextReply.set(new Reply(200, completion("取消的请求 [m1]"), true));
         AiSummaryClient client = new AiSummaryClient(); Result result = new Result();
         try {
-            client.summarize(config("local", ""), MESSAGES, result);
+            client.summarize(config("local", ""), MESSAGES, TEST_PROMPT, result);
             check(requestStarted.await(5, TimeUnit.SECONDS), "request never reached the server");
             // Both SENDING and the sensitive input are queued, but the UI has not consumed them.
             client.cancel();
@@ -1115,7 +1148,7 @@ public final class AiSummaryClientTest {
         long end = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
         while (true) {
             Result result = new Result();
-            client.summarize(config("local", ""), MESSAGES, result); await(result);
+            client.summarize(config("local", ""), MESSAGES, TEST_PROMPT, result); await(result);
             if (result.error == null || !result.error.contains("已有任务") || System.nanoTime() >= end) return result;
             Thread.sleep(20); // The cancelled worker keeps its permit until transport cleanup ends.
         }
@@ -1139,7 +1172,8 @@ public final class AiSummaryClientTest {
                 String prompt = body.getJSONArray("messages").getJSONObject(1).getString("content");
                 check(system.length() + prompt.length() + taskConfig.maxOutputTokens * 4 <= taskConfig.inputCharacterBudget,
                         "a request ignored configured context/output reserves");
-                check(prompt.contains(direction.customInstructions), "budget path lost direction");
+                check(direction.customInstructions.equals(body.getJSONArray("messages").getJSONObject(0).getString("content")), "budget path lost manual core");
+                check(!prompt.contains(direction.customInstructions), "manual core duplicated into data prompt");
             }
         } finally {
             client.cancel(); replyGenerator.set(null);
@@ -1153,9 +1187,9 @@ public final class AiSummaryClientTest {
         AiSummaryClient first = new AiSummaryClient(), second = new AiSummaryClient();
         Result blocked = new Result();
         try {
-            first.summarize(config("model-one", ""), MESSAGES, blocked);
+            first.summarize(config("model-one", ""), MESSAGES, TEST_PROMPT, blocked);
             check(requestStarted.await(5, TimeUnit.SECONDS), "first endpoint task did not start");
-            Result rejected = new Result(); second.summarize(config("model-two", ""), MESSAGES, rejected); await(rejected);
+            Result rejected = new Result(); second.summarize(config("model-two", ""), MESSAGES, TEST_PROMPT, rejected); await(rejected);
             check(rejected.error != null && rejected.error.contains("已有任务"), "second client reached a busy endpoint");
             Diagnostic probe = new Diagnostic();
             second.testConnection(new AiSummarySettings.Config(base.replace("127.0.0.1", "localhost") + "/v1/", "", ""), probe);

@@ -7,7 +7,7 @@ import java.util.Collections;
 /** Snapshot identity, explicit-only access, invalidation and bounded retained memory. */
 public final class SummaryResultCacheTest {
     private static int assertions;
-    private static final PromptOptions OPTIONS = PromptOptions.DEFAULT;
+    private static final PromptOptions OPTIONS = new PromptOptions(PromptOptions.GENERAL, "整理本次讨论的要点。");
     private static final AiSummarySettings.Config CONFIG = new AiSummarySettings.Config("http://127.0.0.1:8080/v1", "mnn-local", "private-key", 512, false, 6000);
     public static void main(String[] args) {
         UserConfig.getInstance(0).setClientUserId(1000);
@@ -28,7 +28,7 @@ public final class SummaryResultCacheTest {
         check(!key.equals(key(0, 1000, -10, 0, message(1, "原文", 1), OPTIONS, CONFIG, "")), "edit timestamp included");
         SummaryMessage metadata = new SummaryMessage(-10, 1, 1700000001, "sender", "原文", 55, 8, -10, true, false, 0, true, true);
         check(!key.equals(key(0, 1000, -10, 0, metadata, OPTIONS, CONFIG, "")), "reply and self metadata included");
-        check(!key.equals(key(0, 1000, -10, 0, original, new PromptOptions(PromptOptions.PROJECT, ""), CONFIG, "")), "template included");
+        check(!key.equals(key(0, 1000, -10, 0, original, new PromptOptions(PromptOptions.PROJECT, OPTIONS.customInstructions), CONFIG, "")), "legacy template preference remains part of cache identity");
         check(!key.equals(key(0, 1000, -10, 0, original, new PromptOptions(PromptOptions.GENERAL, "关注风险"), CONFIG, "")), "custom instructions included");
         check(!key.equals(key(0, 1000, -10, 0, original, OPTIONS.withFocusSelf(true), CONFIG, "")), "session self emphasis included");
         for (AiSummarySettings.Config changed : Arrays.asList(
@@ -41,6 +41,12 @@ public final class SummaryResultCacheTest {
             check(!key.equals(key(0, 1000, -10, 0, original, OPTIONS, changed, "")), "all API/generation configuration included");
         }
         check(!key.equals(key(0, 1000, -10, 0, original, OPTIONS, CONFIG, "actual-model-v2")), "verified model version included when available");
+        try {
+            key(0, 1000, -10, 0, original, PromptOptions.DEFAULT, CONFIG, "");
+            throw new AssertionError("blank core created a usable direct-summary cache key");
+        } catch (IllegalArgumentException expected) {
+            check("请先填写核心总结要求。".equals(expected.getMessage()), "blank core cache rejection lost its actionable reason");
+        }
     }
     private static void explicitAndInvalidation() {
         SummaryResultCache cache = new SummaryResultCache(8, 16384);

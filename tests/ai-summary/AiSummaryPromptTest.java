@@ -8,12 +8,15 @@ import java.util.List;
 /** Standalone assertions: run using the offline test runner in this directory. */
 public final class AiSummaryPromptTest {
     private static int assertions;
+    private static final PromptOptions CORE = new PromptOptions(PromptOptions.GENERAL, "按原文列出风险和仍需确认的问题。");
 
     public static void main(String[] args) {
         minimalSourcesAndLosslessUnicodeChunks();
         sourceProtocolIsolation();
         aliasesAndReplySemantics();
-        defaultPromptOverheadRemainsSmall();
+        userCoreControlsTheWritingTask();
+        emptyCoreFailsBeforeBuildingRequests();
+        dynamicBudgetCountsTheCoreOnce();
         compactRulesPreserveMetadataSemantics();
         explicitBudgetFailures();
         citationFreePartialsMergeWithoutInventingReferences();
@@ -62,7 +65,7 @@ public final class AiSummaryPromptTest {
         check(messages.get(1).text.equals(second.toString()), "later messages retain their own member identity without message IDs");
         String prompt = AiSummaryPrompt.sourcePrompt(chunks.get(0), 1, chunks.size());
         check(!prompt.contains("绝对不能重新编号") && !prompt.contains("使用原始行首引用")
-                        && !AiSummaryPrompt.SYSTEM_PROMPT.contains("每项具体陈述末尾引用"),
+                        && !AiSummaryPrompt.systemPrompt(CORE).contains("每项具体陈述末尾引用"),
                 "direct summary rules do not force citations absent from the minimal source protocol");
         SummaryMessage nullable = new SummaryMessage(1, 2, 3, null, null);
         check(nullable.sender.isEmpty() && nullable.text.isEmpty(), "nullable model input is normalized");
@@ -115,12 +118,12 @@ public final class AiSummaryPromptTest {
                 "same-numbered targets from outside or unknown dialogs never bind to an in-batch member");
         check(!chunk.contains("-99") && !chunk.contains("[m") && !chunk.contains("回复[m"),
                 "minimal relation notation does not transmit dialog or message identifiers");
-        String prompt = AiSummaryPrompt.sourcePrompt(chunk, 1, 1, PromptOptions.DEFAULT, 6000, 512);
+        String prompt = AiSummaryPrompt.sourcePrompt(chunk, 1, 1, CORE, 6000, 512);
         String rules = sourceRules(prompt);
         check(rules.contains("昵称") && rules.contains("末项"),
                 "renamed identities select the last observed nickname");
-        check(rules.contains("同名") && rules.contains("代号"),
-                "same-name inputs request aliases that distinguish their actual identities");
+        check(rules.contains("字母=身份") && rules.contains("同代号"),
+                "source format explains that aliases encode identity rather than equal display names");
         check(rules.contains("@") && rules.contains("回复"), "source instructions explain the alias reply relationship");
         check(!prompt.contains("必须附") && !prompt.contains("每项具体陈述末尾引用"),
                 "explicitly budgeted direct source prompts do not reintroduce mandatory citations");
@@ -136,22 +139,90 @@ public final class AiSummaryPromptTest {
                 "over-budget history must fail before sending a partial subset");
     }
 
-    private static void defaultPromptOverheadRemainsSmall() {
-        List<SummaryMessage> messages = Arrays.asList(
-                new SummaryMessage(-10, 1, 1700000000, "甲", "周五发布。", 55, 0, 0, false, false, 0, false, false),
-                new SummaryMessage(-10, 2, 1700000001, "乙", "准备检查。", 66, 0, 0, false, false, 0, false, false));
+    private static void userCoreControlsTheWritingTask() {
+        String manual = "  Return English JSON with keys risks and unanswered.\n"
+                + "Use \"verbatim\" names, preserve emoji 😀, and write a detailed paragraph per item.  ";
+        String core = manual.trim();
+        List<SummaryMessage> messages = Collections.singletonList(new SummaryMessage(-10, 1, 1700000000,
+                "甲", "周五发布。", 55, 0, 0, false, false, 0, false, false));
+        String source = AiSummaryPrompt.sourceChunks(messages).get(0);
+        String merge = AiSummaryPrompt.mergeChunks(Arrays.asList("Risk: timing unclear.", "Question: which release?")).get(0);
+        String expectedSourceUser = AiSummaryPrompt.sourcePrompt(source, 1, 1);
+        String expectedMergeUser = AiSummaryPrompt.mergePrompt(merge);
+        for (String template : new String[] {PromptOptions.GENERAL, PromptOptions.PROJECT,
+                PromptOptions.DECISIONS, PromptOptions.TODOS}) {
+            for (boolean focus : new boolean[] {false, true}) {
+                PromptOptions options = new PromptOptions(template, manual).withFocusSelf(focus);
+                check(AiSummaryPrompt.systemPrompt(options).equals(core),
+                        "manual core is the entire system message, preserving its text after existing trim normalization");
+                for (int outputTokens : new int[] {512, 2000}) {
+                    String sourceUser = AiSummaryPrompt.sourcePrompt(source, 1, 1, options, 32000, outputTokens);
+                    String mergeUser = AiSummaryPrompt.mergePrompt(merge, options, 32000, outputTokens);
+                    check(sourceUser.equals(expectedSourceUser) && sourceUser.endsWith(source),
+                            "template, focus and output settings do not append writing rules or alter source data");
+                    check(mergeUser.equals(expectedMergeUser) && mergeUser.endsWith(merge),
+                            "merge carries protocol and exact partial data without adding another writing task");
+                    check(!sourceUser.contains(core) && !mergeUser.contains(core),
+                            "manual core is not duplicated into source or merge user messages");
+                    for (String unwanted : new String[] {"【话题】", "【结论】", "【待办】", "正文不超过", "简洁勿凑字",
+                            "兼顾主要话题、已确认结论、不同意见与待办，压缩重复讨论。",
+                            "优先梳理项目进展、已完成事项、阻塞、风险和下一步，明确区分计划与实际完成。",
+                            "优先梳理已确认决定、决策理由、替代方案、反对意见与未决争议；不能把建议写成决定。",
+                            "优先梳理明确待办、负责人、截止时间和依赖；保留任务取消或转交，不猜测指派。",
+                            "优先本人发言"}) {
+                        check(!sourceUser.contains(unwanted) && !mergeUser.contains(unwanted),
+                                "protocol messages do not override custom columns or writing style with former automatic requirements");
+                    }
+                }
+            }
+        }
+    }
+
+    private static void emptyCoreFailsBeforeBuildingRequests() {
+        List<SummaryMessage> messages = Collections.singletonList(new SummaryMessage(-10, 1, 1700000000, "甲", "原文"));
+        String rawSource = AiSummaryPrompt.sourceChunks(messages).get(0);
+        String rawMerge = AiSummaryPrompt.mergeChunks(Arrays.asList("first", "second")).get(0);
+        check(AiSummaryPrompt.sourceRecordCount(rawSource) == 1,
+                "protocol-only source formatting remains usable without a core for independent question tooling");
+        check(AiSummaryPrompt.sourcePrompt(rawSource, 1, 1).endsWith(rawSource)
+                        && AiSummaryPrompt.mergePrompt(rawMerge).endsWith(rawMerge),
+                "raw protocol wrappers do not invent a default core");
+        fails(() -> AiSummaryPrompt.systemPrompt(null), "missing options cannot select a built-in core");
+        for (PromptOptions empty : Arrays.asList(PromptOptions.DEFAULT,
+                new PromptOptions(PromptOptions.PROJECT, " \n\t ").withFocusSelf(true))) {
+            fails(() -> AiSummaryPrompt.systemPrompt(empty), "empty manual core is rejected before transport");
+            fails(() -> AiSummaryPrompt.dataBudget(empty), "legacy budget requires a manual core");
+            fails(() -> AiSummaryPrompt.dataBudget(empty, 6000, 512), "configured budget requires a manual core");
+            fails(() -> AiSummaryPrompt.sourceChunks(messages, empty), "legacy source planning cannot silently fall back to template rules");
+            fails(() -> AiSummaryPrompt.sourceChunks(messages, empty, 6000, 512), "configured source planning rejects empty core");
+            fails(() -> AiSummaryPrompt.sourcePrompt(rawSource, 1, 1, empty), "legacy source request rejects empty core");
+            fails(() -> AiSummaryPrompt.sourcePrompt(rawSource, 1, 1, empty, 6000, 512), "configured source request rejects empty core");
+            fails(() -> AiSummaryPrompt.mergeChunks(Arrays.asList("first", "second"), empty), "legacy merge planning rejects empty core");
+            fails(() -> AiSummaryPrompt.mergeChunks(Arrays.asList("first", "second"), empty, 6000, 512), "configured merge planning rejects empty core");
+            fails(() -> AiSummaryPrompt.mergePrompt(rawMerge, empty), "legacy merge request rejects empty core");
+            fails(() -> AiSummaryPrompt.mergePrompt(rawMerge, empty, 6000, 512), "configured merge request rejects empty core");
+        }
+    }
+
+    private static void dynamicBudgetCountsTheCoreOnce() {
+        PromptOptions shortCore = new PromptOptions(PromptOptions.GENERAL, "输出原文中的风险。");
+        PromptOptions longCore = new PromptOptions(PromptOptions.PROJECT,
+                "预算核对\n" + repeat("😀\"\\\u0001", 150)).withFocusSelf(true);
+        int difference = longCore.customInstructions.length() - shortCore.customInstructions.length();
         for (int outputTokens : new int[] {512, 2000}) {
-            List<String> chunks = AiSummaryPrompt.sourceChunks(messages, PromptOptions.DEFAULT, 32000, outputTokens);
-            check(chunks.size() == 1, "simple known-member messages fit one default-direction request");
-            String chunk = chunks.get(0);
-            String prompt = AiSummaryPrompt.sourcePrompt(chunk, 1, 1, PromptOptions.DEFAULT, 32000, outputTokens);
-            int fixedCharacters = AiSummaryPrompt.SYSTEM_PROMPT.length() + prompt.length() - chunk.length();
-            check(fixedCharacters <= 200, "simple default source rules stay within 200 UTF-16 characters excluding the unchanged source data");
-            check(prompt.endsWith(chunk), "shorter rules preserve the exact complete source data suffix");
-            String rules = sourceRules(prompt);
-            check(rules.contains("【话题】") && rules.contains("【结论】") && rules.contains("【待办】"),
-                    "compact instructions retain all three result sections");
-            check(!rules.contains("[m") && !rules.contains("必须附"), "compact instructions do not reinstate source citations");
+            check(AiSummaryPrompt.dataBudget(shortCore, 32000, outputTokens)
+                            - AiSummaryPrompt.dataBudget(longCore, 32000, outputTokens) == difference,
+                    "configured source budget charges the exact normalized UTF-16 core once, not its escaped JSON size or duplicated directions");
+        }
+        check(AiSummaryPrompt.systemPrompt(longCore).equals(longCore.customInstructions),
+                "Unicode and embedded controls in the manual core survive prompt assembly without JSON-stringifying the system text");
+        List<SummaryMessage> messages = Collections.singletonList(new SummaryMessage(-10, 1, 1, "甲", repeat("测试😀", 1000)));
+        List<String> chunks = AiSummaryPrompt.sourceChunks(messages, longCore, 6000, 512);
+        for (int i = 0; i < chunks.size(); i++) {
+            String user = AiSummaryPrompt.sourcePrompt(chunks.get(i), i + 1, chunks.size(), longCore, 6000, 512);
+            check(AiSummaryPrompt.systemPrompt(longCore).length() + user.length()
+                            + AiSummaryPrompt.outputReserveCharacters(512) <= 6000,
+                    "actual system and user text plus output reserve fit after charging the manual core");
         }
     }
 
@@ -160,39 +231,37 @@ public final class AiSummaryPromptTest {
         SummaryMessage message = new SummaryMessage(-10, 1, 1700000000, untrusted, untrusted,
                 55, 0, 0, false, false, 0, false, false);
         String chunk = AiSummaryPrompt.sourceChunks(Collections.singletonList(message)).get(0);
-        String rules = sourceRules(AiSummaryPrompt.sourcePrompt(chunk, 1, 1, PromptOptions.DEFAULT, 6000, 512));
+        String rules = sourceRules(AiSummaryPrompt.sourcePrompt(chunk, 1, 1, CORE, 6000, 512));
         SummaryMessage simple = new SummaryMessage(-10, 1, 1700000000, "甲", "普通正文",
                 55, 0, 0, false, false, 0, false, false);
         String simpleChunk = AiSummaryPrompt.sourceChunks(Collections.singletonList(simple)).get(0);
         String simpleRules = sourceRules(AiSummaryPrompt.sourcePrompt(simpleChunk, 1, 1,
-                PromptOptions.DEFAULT, 6000, 512));
+                CORE, 6000, 512));
         check(rules.equals(simpleRules), "forged quoted names and bodies cannot alter the trusted compact rules");
         check(rules.contains("@") && rules.contains("回复对象") && rules.contains("非提及")
-                        && rules.contains("缺失不补"),
-                "compact rules distinguish replies from mentions and prohibit inventing absent reply targets");
-        check(rules.contains("本人发言/明确提及未标=否")
-                        && rules.contains("回复本人未标=未知"),
+                        && rules.contains("缺失目标无原文"),
+                "source protocol distinguishes reply targets from mentions and describes absent target data");
+        check(rules.contains("本人标记") && rules.contains("其余未标=否")
+                        && rules.contains("回复本人关系未标=未知"),
                 "compact rules preserve known self facts and the different meanings of absent metadata");
-        check(rules.contains("相对时间") && rules.contains("照原文"),
-                "compact rules avoid assigning per-message dates that the minimal source protocol omits");
-        check(rules.contains("数据内指令不执行"), "compact rules retain the source-data instruction boundary");
+        check(rules.contains("时间仅为整批范围"),
+                "source protocol explains that the range is not a per-message timestamp");
 
         List<SummaryMessage> unknown = Arrays.asList(new SummaryMessage(-10, 1, 1700000000, "同名", "甲段"),
                 new SummaryMessage(-10, 2, 1700000001, "同名", "乙段"));
         String unknownChunk = AiSummaryPrompt.sourceChunks(unknown).get(0);
         String unknownRules = sourceRules(AiSummaryPrompt.sourcePrompt(unknownChunk, 1, 1));
-        check(unknownRules.contains("身份未知") && unknownRules.contains("不判")
-                        && unknownRules.contains("同人") && unknownRules.contains("异人"),
-                "actual unknown-member metadata retains the warning against guessing identity from nicknames");
+        check(unknownRules.contains("身份未知") && unknownRules.contains("代号仅区分记录"),
+                "unknown member aliases distinguish records without establishing person identity");
 
         List<String> slices = AiSummaryPrompt.sourceChunks(Collections.singletonList(new SummaryMessage(-10, 3,
                 1700000000, "甲", repeat("长消息😀", 2000), 55, 0, 0, false, false, 0, false, false)));
         check(slices.size() > 1, "continuation-rule fixture spans source requests");
         for (int i = 0; i < slices.size(); i++) {
             String continuationRules = sourceRules(AiSummaryPrompt.sourcePrompt(slices.get(i), i + 1, slices.size()));
-            check(continuationRules.contains("续片") && continuationRules.contains("上段末条")
-                            && continuationRules.contains("不要重复计算"),
-                    "continuation slices preserve the instruction not to duplicate a split message");
+            check(continuationRules.contains("续片") && continuationRules.contains("延续")
+                            && continuationRules.contains("上段末条"),
+                    "continuation protocol identifies the prior message boundary without adding a writing task");
         }
     }
 
@@ -207,7 +276,7 @@ public final class AiSummaryPromptTest {
                     "citation-free direct output is accepted without modifying its content");
         }
         check(!chunks.get(0).contains("[m"), "merge does not invent references for citation-free summaries");
-        String prompt = AiSummaryPrompt.mergePrompt(chunks.get(0), PromptOptions.DEFAULT, 6000, 512);
+        String prompt = AiSummaryPrompt.mergePrompt(chunks.get(0), CORE, 6000, 512);
         check(prompt.contains(AiSummaryPrompt.quote(partials.get(0))) && prompt.contains(AiSummaryPrompt.quote(partials.get(1))),
                 "complete-request merge budgeting accepts citation-free results");
         check(!prompt.contains("每项具体陈述末尾引用") && !prompt.contains("绝对不能重新编号"),
@@ -251,18 +320,21 @@ public final class AiSummaryPromptTest {
             String chunk = chunks.get(i);
             String prompt = AiSummaryPrompt.sourcePrompt(chunk, i + 1, chunks.size(), options);
             check(chunk.length() <= AiSummaryPrompt.dataBudget(options), "source respects direction-adjusted budget");
-            check(prompt.contains("项目进展") && prompt.contains(AiSummaryPrompt.quote(options.customInstructions)), "direction present on every source request");
+            check(AiSummaryPrompt.systemPrompt(options).equals(options.customInstructions)
+                            && !prompt.contains(options.customInstructions) && !prompt.contains("项目进展"),
+                    "each source uses the manual system core without adding template instructions or duplicating it");
             String rules = sourceRules(prompt);
-            check(rules.contains("昵称(代号)") && rules.contains("?") && rules.contains("未知"),
+            check(rules.contains("代号") && rules.contains("?") && rules.contains("身份"),
                     "every intermediate source summary must carry identity aliases and unknown-identity markers into merging");
-            check(prompt.length() + AiSummaryPrompt.SYSTEM_PROMPT.length() + AiSummaryPrompt.OUTPUT_RESERVE_CHARACTERS
+            check(prompt.length() + AiSummaryPrompt.systemPrompt(options).length() + AiSummaryPrompt.OUTPUT_RESERVE_CHARACTERS
                     <= AiSummaryPrompt.MAX_REQUEST_CHARACTERS, "system, user, data and output reserve fit");
             fails(() -> AiSummaryPrompt.sourceReferences(chunk), "direct conversation data never grants question citation authority");
             check(!prompt.contains("绝对不能重新编号") && !prompt.contains("使用原始行首引用"),
                     "each direct source prompt avoids requiring identifiers omitted from its input");
         }
         PromptOptions escaped = new PromptOptions(PromptOptions.GENERAL, repeat("\u0001x", 500));
-        fails(() -> AiSummaryPrompt.sourceChunks(input, escaped), "escaped requirements exhausting budget fail before HTTP, without silent truncation");
+        check(AiSummaryPrompt.systemPrompt(escaped).equals(escaped.customInstructions), "manual core controls are preserved without inflating the text budget to transport escape length");
+        fails(() -> AiSummaryPrompt.sourceChunks(input, escaped, 2048, 64), "insufficient space for the full manual core fails before HTTP, without silent truncation");
         fails(() -> AiSummaryPrompt.sourcePrompt(repeat("x", 3500), 1, 1, options), "wrong-budget prebuilt chunk rejected");
         fails(() -> AiSummaryPrompt.validateReferences("引用 [m01]", Collections.singleton(1)), "allowed-set validator also rejects noncanonical references");
         check(AiSummaryPrompt.references("来源 [m2][m4][m2]").equals(new java.util.LinkedHashSet<>(Arrays.asList(2, 4))), "references retain global ids and deduplicate");
@@ -279,12 +351,14 @@ public final class AiSummaryPromptTest {
             List<String> next = new ArrayList<>();
             for (String group : groups) {
                 String prompt = AiSummaryPrompt.mergePrompt(group, options);
-                check(prompt.contains("决策与争议") && prompt.contains(options.customInstructions), "same immutable direction on every merge round");
-                check(prompt.contains("昵称(代号)") && prompt.contains("未知")
+                check(AiSummaryPrompt.systemPrompt(options).equals(options.customInstructions)
+                                && !prompt.contains(options.customInstructions) && !prompt.contains("决策与争议"),
+                        "each merge round keeps the manual core separate and does not insert the saved template");
+                check(prompt.contains("代号") && prompt.contains("未知")
                                 && prompt.contains("同名") && prompt.contains("同代号")
-                                && (prompt.contains("不重复") || prompt.contains("勿重复") || prompt.contains("不因别名")),
+                                && prompt.contains("不代表新增人物") && prompt.contains("不能混同"),
                         "each merge round preserves identity despite shared names, renamed nicknames, or unknown identities");
-                check(prompt.length() + AiSummaryPrompt.SYSTEM_PROMPT.length() + AiSummaryPrompt.OUTPUT_RESERVE_CHARACTERS
+                check(prompt.length() + AiSummaryPrompt.systemPrompt(options).length() + AiSummaryPrompt.OUTPUT_RESERVE_CHARACTERS
                         <= AiSummaryPrompt.MAX_REQUEST_CHARACTERS, "merge reserves direction and output");
                 StringBuilder merged = new StringBuilder("争议未决。");
                 for (String line : group.split("\n")) {
@@ -330,7 +404,7 @@ public final class AiSummaryPromptTest {
     private static String sourceRules(String prompt) {
         int dataStart = prompt.indexOf(AiSummaryPrompt.SOURCE_DATA_MARKER);
         check(dataStart >= 0, "source request has a distinct instruction/data boundary");
-        return AiSummaryPrompt.SYSTEM_PROMPT + prompt.substring(0, dataStart);
+        return prompt.substring(0, dataStart);
     }
 
     private static String repeat(String text, int times) {

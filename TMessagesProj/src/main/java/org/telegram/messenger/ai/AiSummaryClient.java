@@ -232,7 +232,6 @@ public final class AiSummaryClient {
         final ArrayList<SummaryMessage> snapshot = messages == null ? null : new ArrayList<>(messages);
         final PromptOptions direction = options; // Immutable and fixed for all source/merge requests.
         final List<SummaryQuestionPrompt.Turn> conversation = history == null ? null : new ArrayList<>(history);
-        final String systemPrompt = questionTask ? SummaryQuestionPrompt.SYSTEM_PROMPT : AiSummaryPrompt.SYSTEM_PROMPT;
         task = EXECUTOR.submit(() -> {
             long started = System.nanoTime();
             EndpointLease endpoint = null;
@@ -241,6 +240,8 @@ public final class AiSummaryClient {
                 if (error != null) {
                     throw new SummaryException(error);
                 }
+                final String systemPrompt = questionTask ? SummaryQuestionPrompt.SYSTEM_PROMPT
+                        : AiSummaryPrompt.systemPrompt(direction);
                 List<String> chunks = questionTask
                         ? SummaryQuestionPrompt.sourceChunks(snapshot, direction, question, conversation,
                                 config.inputCharacterBudget, config.maxOutputTokens)
@@ -687,7 +688,7 @@ public final class AiSummaryClient {
         if (lower.contains("context_length_exceeded") || lower.contains("maximum context length")
                 || lower.contains("context length exceeded") || lower.contains("context window") || lower.contains("prompt too long")
                 || lower.contains("input too long") || lower.contains("上下文长度")) {
-            return "输入超出模型上下文长度。请减少消息数量、缩短补充要求或使用支持更长上下文的模型。";
+            return "输入超出模型上下文长度。请减少消息数量、缩短核心要求或使用支持更长上下文的模型。";
         }
         if (lower.contains("model_not_loaded") || lower.contains("model_not_found")
                 || lower.contains("model not loaded") || lower.contains("no model loaded")

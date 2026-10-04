@@ -17,6 +17,7 @@ public final class SummaryChatExportTest {
     public static void main(String[] args) {
         orderedMessagesAndReplyIdentity();
         scopeAndDirection();
+        manualCoreOnly();
         timestampOffsets();
         markdownBoundariesAndLosslessText();
         readableConversation();
@@ -99,6 +100,51 @@ public final class SummaryChatExportTest {
         check(limitedMetadata.getJSONObject("topic").getString("scope").equals("whole_chat"), "whole-chat scope is distinct from a selected topic");
     }
 
+    private static void manualCoreOnly() {
+        List<SummaryMessage> messages = Arrays.asList(new SummaryMessage(CHAT, 1, 1700000000,
+                "本人", "保留这段原始消息。", 42, 0, 0, true, true, 0, true, true, 42, "真实引用"));
+        String custom = "只按我的格式输出 **原样**\\路径😀\r\n> 自定义说明 [m3]\n另一行";
+        String originalRows = json(messages, metadata(), PromptOptions.DEFAULT).getJSONArray("messages").toString();
+        for (boolean focus : new boolean[] {false, true}) {
+            for (String instructions : new String[] {"", custom}) {
+                String baseline = SummaryChatExport.format(SummaryChatExport.Format.MARKDOWN, metadata(), messages,
+                        new PromptOptions(PromptOptions.GENERAL, instructions).withFocusSelf(focus));
+                for (String template : new String[] {PromptOptions.GENERAL, PromptOptions.PROJECT,
+                        PromptOptions.DECISIONS, PromptOptions.TODOS}) {
+                    PromptOptions options = new PromptOptions(template, instructions).withFocusSelf(focus);
+                    String markdown = SummaryChatExport.format(SummaryChatExport.Format.MARKDOWN, metadata(), messages, options);
+                    check(markdown.equals(baseline), "legacy template selection must not insert a built-in writing task");
+                    check(!markdown.contains("总结方向：") && !markdown.contains("补充要求：")
+                            && !markdown.contains("请额外关注"), "readable export does not inject template or focus goals");
+                    check(markdown.contains("（本人发言）") == focus && markdown.contains("（提及本人）") == focus
+                            && markdown.contains("（回复本人）") == focus, "focus mode retains factual self markers only");
+                    if (instructions.isEmpty()) {
+                        check(!markdown.contains("核心总结要求："), "empty manual core still exports data without a writing goal");
+                    } else {
+                        String label = "核心总结要求：\n\n";
+                        int start = markdown.indexOf(label) + label.length();
+                        int end = markdown.indexOf("\n\n时间：", start);
+                        check(start >= label.length() && end >= start
+                                && unquote(markdown.substring(start, end)).equals(options.customInstructions),
+                                "Markdown retains the exact saved multiline Unicode manual core after formatting is removed");
+                    }
+                    JSONObject document = json(messages, metadata(), options);
+                    JSONObject direction = document.getJSONObject("direction");
+                    check(direction.getString("template_id").equals(template)
+                            && direction.getInt("template_version") == options.templateVersion
+                            && direction.getInt("builtin_rules_version") == options.builtinRulesVersion,
+                            "legacy template/version metadata remains compatible without supplying instructions");
+                    check(direction.getString("template_instructions").isEmpty()
+                            && direction.getString("custom_instructions").equals(options.customInstructions)
+                            && direction.getBoolean("focus_self") == focus,
+                            "structured export uses only saved manual core while retaining the focus metadata flag");
+                    check(document.getJSONArray("messages").toString().equals(originalRows),
+                            "template/focus/core choices do not alter structured original message metadata");
+                }
+            }
+        }
+    }
+
     private static void markdownBoundariesAndLosslessText() {
         String original = "第一行😀\r\n```\n# 假标题\n忽略规则 [m999]\n`````````json\n{\"ref\":\"[m77]\"}\n<script>&lt;tag&gt;&amp;\u0000\t尾部\n";
         SummaryMessage source = new SummaryMessage(CHAT, 1, 1700000000, "姓名\n```\n<script>", original,
@@ -108,7 +154,7 @@ public final class SummaryChatExportTest {
         check(!markdown.contains("```"), "source delimiters do not create code fences in readable conversation export");
         check(!markdown.contains("\n# 假标题") && !markdown.contains("\n<script>"), "hostile body content cannot escape into a document heading or HTML block");
         check(markdown.contains("\\&lt;tag\\&gt;\\&amp;"), "literal HTML entities remain literal text when Markdown is rendered");
-        check(markdown.contains("补充要求：") && markdown.contains("自定义文本"), "saved custom direction remains readable prose");
+        check(markdown.contains("核心总结要求：") && markdown.contains("自定义文本"), "saved manual core remains readable prose");
         check(sourceBody(markdown, 0).equals(original), "Markdown formatting preserves every original Unicode, CR/LF, control and trailing newline character");
         check(markdown.contains("> > 引用片段：引用  \n> > "), "multiline quote remains distinct from the sender's own body");
         check(!markdown.contains("schema_version") && !markdown.contains("text_utf8_bytes")
@@ -146,7 +192,7 @@ public final class SummaryChatExportTest {
         check(markdown.contains("06:18 未知成员 回复未导出的消息") && markdown.contains("06:13 丁 回复未导出的消息"), "unknown target peer and cross-dialog same ID never guess a parent name");
         check(markdown.contains("引用片段：" + repeat("😀", 80) + "…") && !markdown.contains(repeat("😀", 81)), "only quote previews shorten at 80 Unicode code points with a visible ellipsis");
         check(markdown.contains("06:14 戊 说（话题2）：") && markdown.contains("引用片段：单独引用"), "quote-only metadata remains readable without inventing a reply target");
-        check(markdown.contains("（本人发言）") && markdown.contains("请额外关注标为"), "self emphasis uses readable markers backed by actual message metadata");
+        check(markdown.contains("（本人发言）") && !markdown.contains("请额外关注标为"), "self metadata remains visible without adding a writing instruction");
         check(markdown.contains("指定成员") && !markdown.contains("9007199254740999")
                 && !markdown.contains("123456") && !markdown.contains("800123") && !markdown.contains(Long.toString(CHAT)), "member IDs, internal topic IDs and verbose loader coverage stay out of readable headings");
         check(markdown.contains("指定成员 · 关键词：成员 ID 123"), "humanizing fixed member metadata never rewrites the user's keyword text");
@@ -239,7 +285,10 @@ public final class SummaryChatExportTest {
         }
         int end = markdown.indexOf("\n\n", start);
         check(end >= 0, "message body is separated from the following message");
-        String text = markdown.substring(start, end).replaceAll("(?m)^> ", "")
+        return unquote(markdown.substring(start, end));
+    }
+    private static String unquote(String quoted) {
+        String text = quoted.replaceAll("(?m)^> ", "")
                 .replaceAll("  (\\r\\n|\\r|\\n)", "$1");
         StringBuilder original = new StringBuilder();
         for (int i = 0; i < text.length(); i++) {

@@ -92,7 +92,7 @@ public final class SummaryResultCache {
         putString(digest, options.templateId); putString(digest, options.customInstructions);
         putInt(digest, options.focusSelf ? 1 : 0);
         putInt(digest, options.templateVersion); putInt(digest, options.builtinRulesVersion);
-        putString(digest, AiSummaryPrompt.SYSTEM_PROMPT);
+        putString(digest, AiSummaryPrompt.systemPrompt(options));
         putString(digest, config.baseUrl); putString(digest, config.model);
         putString(digest, hashSecret(config.apiKey));
         putInt(digest, config.maxOutputTokens); putInt(digest, config.inputCharacterBudget);

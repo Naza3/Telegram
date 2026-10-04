@@ -154,7 +154,6 @@ public final class SummaryChatExport {
         Map<String, SummaryMessage> byKey = new LinkedHashMap<>();
         Map<String, Map<Long, Integer>> names = new LinkedHashMap<>();
         Map<Long, String> topics = new LinkedHashMap<>();
-        boolean selfMarkers = false;
         int topicNumber = 0;
         for (SummaryMessage source : messages) {
             byKey.put(key(source.dialogId, source.id), source);
@@ -164,7 +163,6 @@ public final class SummaryChatExport {
             if (source.senderId != 0 && !identities.containsKey(source.senderId)) identities.put(source.senderId, identities.size() + 1);
             if (!topics.containsKey(source.topicId)) topics.put(source.topicId, source.topicId == 0 ? "未注明话题"
                     : source.topicId == 1 ? "General" : "话题" + (++topicNumber));
-            selfMarkers |= source.outgoing || source.mentionedSelf || source.replyToSelfKnown && source.replyToSelf;
         }
         out.add("# "); markdown(out, label(metadata.chatTitle, "群聊")); out.add("\n\n");
         out.add("范围："); markdown(out, label(metadata.rangeDescription, "所选消息").replaceAll("#-?\\d+", "所选消息"));
@@ -181,12 +179,9 @@ public final class SummaryChatExport {
         }
         if (metadata.partial) out.add("本次为部分消息。\n\n");
         else if (Boolean.TRUE.equals(metadata.hasMore)) out.add("还有消息未包含在本次导出中。\n\n");
-        out.add("总结方向："); markdown(out, PromptOptions.templateLabel(options.templateId) + "。" + PromptOptions.templateInstructions(options.templateId));
-        out.add("\n\n");
         if (!options.customInstructions.isEmpty()) {
-            out.add("补充要求：\n\n"); quoteLines(out, options.customInstructions, "> "); out.add('\n');
+            out.add("核心总结要求：\n\n"); quoteLines(out, options.customInstructions, "> "); out.add('\n');
         }
-        if (options.focusSelf && selfMarkers) out.add("请额外关注标为“本人发言”“提及本人”或“回复本人”的消息。\n\n");
         SimpleDateFormat day = new SimpleDateFormat("yyyy-MM-dd", Locale.US);
         SimpleDateFormat time = new SimpleDateFormat("HH:mm", Locale.US);
         day.setTimeZone(zone(metadata.timeZoneId)); time.setTimeZone(zone(metadata.timeZoneId));
@@ -273,7 +268,8 @@ public final class SummaryChatExport {
                 + ",\"scanned_messages\":" + (metadata.scannedMessages < 0 ? "null" : metadata.scannedMessages));
         out.add("},\n\"direction\":{\"template_id\":"); out.quoted(options.templateId);
         out.add(",\"template_label\":"); out.quoted(PromptOptions.templateLabel(options.templateId));
-        out.add(",\"template_instructions\":"); out.quoted(PromptOptions.templateInstructions(options.templateId));
+        // Retain the legacy metadata field, without adding a built-in writing task.
+        out.add(",\"template_instructions\":"); out.quoted("");
         out.add(",\"custom_instructions\":"); out.quoted(options.customInstructions);
         out.add(",\"focus_self\":" + options.focusSelf + ",\"template_version\":" + options.templateVersion
                 + ",\"builtin_rules_version\":" + options.builtinRulesVersion);

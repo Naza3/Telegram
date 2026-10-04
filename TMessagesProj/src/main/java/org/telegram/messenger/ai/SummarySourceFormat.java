@@ -98,7 +98,7 @@ final class SummarySourceFormat {
                         overhead = header(candidate).length() + prefix.length() + 3;
                     }
                     if (overhead + 12 > budget) {
-                        throw new IllegalArgumentException("消息昵称与必要关系信息超过当前请求预算，请提高上下文字符预算或缩短补充要求。");
+                        throw new IllegalArgumentException("消息昵称与必要关系信息超过当前请求预算，请提高上下文字符预算或缩短核心要求。");
                     }
                     int available = budget - rows.length() - overhead;
                     int textEnd = offset, used = 0;

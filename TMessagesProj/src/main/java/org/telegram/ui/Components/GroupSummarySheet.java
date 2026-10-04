@@ -497,9 +497,9 @@ public final class GroupSummarySheet {
         });
         addText(requestInputsContent, "第 " + (index + 1) + " 次请求 · " + entry.stage, true);
         addText(requestInputsContent, "请求原文完整显示，长按可选择复制。", false);
-        addText(requestInputsContent, "system · 系统规则（" + entry.input.systemText.length() + " 字符）", true);
+        addText(requestInputsContent, "system · 核心总结要求（" + entry.input.systemText.length() + " 字符）", true);
         addRequestInputText(entry.input.systemText);
-        addText(requestInputsContent, "user · 方向及消息／合并内容（" + entry.input.userText.length() + " 字符）", true);
+        addText(requestInputsContent, "user · 消息／合并内容（" + entry.input.userText.length() + " 字符）", true);
         addRequestInputText(entry.input.userText);
         addAction(requestInputsContent, "返回请求列表", () -> {
             if (requestInputsViewerActive()) renderRequestInputList();
@@ -1022,16 +1022,16 @@ public final class GroupSummarySheet {
         addText("点击“开始总结”才会将文字发送到 MNN Chat API。也可独立导出待总结消息，不需要配置或启动模型。已完成的摘要自动加密保存在本机总结历史。", false);
 
         PromptOptions direction = effectivePrompt();
-        addText("总结方向：" + PromptOptions.templateLabel(direction.templateId) + " · "
+        addText("核心总结要求：" + (direction.customInstructions.isEmpty() ? "未填写" : "已填写") + " · "
                 + promptScopeLabel(sessionPrompt != null ? PromptPreferences.Scope.SESSION : savedPromptScope), true);
         if (!direction.customInstructions.isEmpty()) {
-            addText("已设置补充要求（" + direction.customInstructions.codePointCount(0,
+            addText("已填写核心总结要求（" + direction.customInstructions.codePointCount(0,
                     direction.customInstructions.length()) + " 字符）。", false);
         }
         if (promptNotice != null) {
             addText(promptNotice, false);
         }
-        addAction("修改总结方向", () -> {
+        addAction("编辑核心总结要求", () -> {
             recentCountText = count.getText().toString();
             showPromptEditor(effectivePrompt(), PromptPreferences.Scope.SESSION, null);
         });
@@ -1056,14 +1056,14 @@ public final class GroupSummarySheet {
             if (readSelectedCount(count)) showExportFormats(selectedRangeRequest());
         });
         if (lastSuccessfulHistory != null && lastSuccessfulSources != null) {
-            addAction("用当前方向重做上次成功范围", () -> {
+            addAction("用当前要求重做上次成功范围", () -> {
                 recentCountText = count.getText().toString();
                 RangeRequest request = new RangeRequest(RangeMode.REPLAY, recentCount, summaryState.cursor,
                         lastSuccessfulHistory.lowerExclusiveId, lastSuccessfulHistory.coveredThroughId,
                         false, lastSuccessfulHistory, lastSuccessfulHistory.messages);
                 startSummary(request);
             });
-            addText("重做使用上次成功范围的原始文字快照，重新应用当前筛选与方向，不移动增量进度；关闭面板后该快照不保留。", false);
+            addText("重做使用上次成功范围的原始文字快照，重新应用当前筛选与核心总结要求，不移动增量进度；关闭面板后该快照不保留。", false);
         }
         if (summaryState.completedAt > 0) {
             addAction("按已保存范围分批重读并重做", () -> {
@@ -1121,7 +1121,7 @@ public final class GroupSummarySheet {
         addText("导出待总结消息", true);
         addText(exportRangeLabel(request), false);
         addText("消息选择：" + filterLabel(request.filters), false);
-        addText("推荐群聊对话格式：按时间显示谁说了什么、谁回复了谁，可直接阅读或交给 AI。文件会附带当前总结方向。", false);
+        addText("推荐群聊对话格式：按时间显示谁说了什么、谁回复了谁，可直接阅读或交给 AI。文件会附带当前填写的总结要求。", false);
         addText("先读取并核对范围，再由你选择保存位置或分享应用；不会自动上传。", false);
         addAction("群聊对话（Markdown，推荐）", () -> startExport(request, SummaryChatExport.Format.MARKDOWN, prompt));
         addAction("JSON（完整数据）", () -> startExport(request, SummaryChatExport.Format.JSON, prompt));
@@ -1370,7 +1370,7 @@ public final class GroupSummarySheet {
     }
 
     private static String filterLabel(SummaryFilter.Options options) {
-        String label = options.mode == SummaryFilter.Mode.FOCUS_SELF ? "全部文字，重点关注与我相关"
+        String label = options.mode == SummaryFilter.Mode.FOCUS_SELF ? "全部文字，提供与我相关标记"
                 : options.mode == SummaryFilter.Mode.FILTER_SELF ? "仅与我相关及必要上下文" : "全部文字";
         if (options.senderId != 0) label += " · 成员 ID " + options.senderId;
         if (!options.keyword.isEmpty()) label += " · 关键词：" + options.keyword;
@@ -1386,7 +1386,7 @@ public final class GroupSummarySheet {
         modes.setOrientation(RadioGroup.VERTICAL);
         for (SummaryFilter.Mode mode : SummaryFilter.Mode.values()) {
             RadioButton option = radio(mode == SummaryFilter.Mode.ALL ? "总结全部文字"
-                    : mode == SummaryFilter.Mode.FOCUS_SELF ? "保留全部，重点关注与我相关" : "仅总结与我相关及必要上下文");
+                    : mode == SummaryFilter.Mode.FOCUS_SELF ? "保留全部，提供与我相关标记" : "仅总结与我相关及必要上下文");
             option.setId(View.generateViewId());
             option.setTag(mode);
             modes.addView(option, new RadioGroup.LayoutParams(-1, -2));
@@ -1394,6 +1394,7 @@ public final class GroupSummarySheet {
         }
         content.addView(modes, LayoutHelper.createLinear(-1, -2, 0, 4, 0, 4));
         addText("与我相关仅按明确 @ 我、已确认回复我、本人身份可确认的发言匹配，不猜测匿名身份。仅相关模式还会带入范围内前后各一条文字及明确回复的原文，作为必要上下文。", false);
+        addText("你可以在核心总结要求中说明如何使用本人及与我相关标记。", false);
         addText("成员 ID（可留空）", true);
         EditTextBoldCursor sender = edit("留空为全部成员", filterOptions.senderId == 0 ? "" : Long.toString(filterOptions.senderId),
                 InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_FLAG_SIGNED);
@@ -1475,7 +1476,7 @@ public final class GroupSummarySheet {
             case SESSION: return "本次面板";
             case CHAT: return topicId == 0 ? "本群偏好" : "当前话题偏好";
             case ACCOUNT: return "账号默认";
-            default: return "内置默认";
+            default: return "尚未保存";
         }
     }
 
@@ -1483,7 +1484,7 @@ public final class GroupSummarySheet {
         cancelWork();
         final int generation = operation;
         clearContent();
-        addText("正在读取总结方向…", true);
+        addText("正在读取核心总结要求…", true);
         Utilities.globalQueue.postRunnable(() -> {
             if (!sameAccountOwner()) {
                 AndroidUtilities.runOnUIThread(this::dismiss);
@@ -1503,12 +1504,12 @@ public final class GroupSummarySheet {
                 AndroidUtilities.runOnUIThread(() -> {
                     if (!active(generation)) return;
                     clearContent();
-                    addText("无法读取已保存的总结方向，请重试。", true);
+                    addText("无法读取已保存的核心总结要求，请重试。", true);
                     addAction("重试读取", this::loadPromptPreferences);
-                    addAction("本次使用内置默认", () -> {
+                    addAction("本次手动填写", () -> {
                         sessionPrompt = PromptOptions.DEFAULT;
                         promptLoaded = true;
-                        showSelection();
+                        showPromptEditor(sessionPrompt, PromptPreferences.Scope.SESSION, null);
                     });
                 });
             }
@@ -1519,23 +1520,10 @@ public final class GroupSummarySheet {
         if (closed || !checkAccountOwner()) return;
         cancelWork();
         clearContent();
-        addText("总结方向", true);
-        addText("保持话题、结论、待办。补充要求只改变关注点，不会排除所选范围中的消息。", false);
-        RadioGroup templates = new RadioGroup(context);
-        templates.setOrientation(RadioGroup.VERTICAL);
-        int defaultTemplateId = 0;
-        for (String template : new String[] {PromptOptions.GENERAL, PromptOptions.PROJECT,
-                PromptOptions.DECISIONS, PromptOptions.TODOS}) {
-            RadioButton option = radio(PromptOptions.templateLabel(template));
-            option.setId(View.generateViewId());
-            option.setTag(template);
-            templates.addView(option, new RadioGroup.LayoutParams(-1, dp(44)));
-            if (PromptOptions.GENERAL.equals(template)) defaultTemplateId = option.getId();
-            if (draft.templateId.equals(template)) templates.check(option.getId());
-        }
-        content.addView(templates, LayoutHelper.createLinear(-1, -2, 0, 4, 0, 4));
-        addText("补充要求（最多 " + PromptOptions.MAX_CUSTOM_CODE_POINTS + " 个 Unicode 字符）", true);
-        EditTextBoldCursor custom = edit("例如：重点整理发布阻塞、已确认决定和仍有分歧的问题。",
+        addText("核心总结要求", true);
+        addText("手动填写你希望模型如何总结所选消息。开始总结前需要填写；可以清空并保存。", false);
+        addText("最多 " + PromptOptions.MAX_CUSTOM_CODE_POINTS + " 个 Unicode 字符", false);
+        EditTextBoldCursor custom = edit("请输入核心总结要求",
                 draft.customInstructions, InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE);
         custom.setSingleLine(false);
         custom.setMinLines(4);
@@ -1560,7 +1548,6 @@ public final class GroupSummarySheet {
         addText("应用范围", true);
         RadioGroup scopes = new RadioGroup(context);
         scopes.setOrientation(RadioGroup.VERTICAL);
-        int sessionScopeId = 0;
         for (PromptPreferences.Scope scope : new PromptPreferences.Scope[] {PromptPreferences.Scope.SESSION,
                 PromptPreferences.Scope.CHAT, PromptPreferences.Scope.ACCOUNT}) {
             String label = scope == PromptPreferences.Scope.SESSION ? "仅本次面板，不保存"
@@ -1570,7 +1557,6 @@ public final class GroupSummarySheet {
             option.setId(View.generateViewId());
             option.setTag(scope);
             scopes.addView(option, new RadioGroup.LayoutParams(-1, dp(44)));
-            if (scope == PromptPreferences.Scope.SESSION) sessionScopeId = option.getId();
             if (scope == selectedScope) scopes.check(option.getId());
         }
         content.addView(scopes, LayoutHelper.createLinear(-1, -2, 0, 4, 0, 4));
@@ -1578,11 +1564,10 @@ public final class GroupSummarySheet {
         TextView validation = addText(error == null ? "" : error, false);
         validation.setTextColor(color(Theme.key_text_RedRegular));
         validation.setVisibility(error == null ? View.GONE : View.VISIBLE);
-        addAction("应用总结方向", () -> {
-            RadioButton template = templates.findViewById(templates.getCheckedRadioButtonId());
+        addAction("应用核心总结要求", () -> {
             RadioButton scope = scopes.findViewById(scopes.getCheckedRadioButtonId());
             try {
-                PromptOptions options = new PromptOptions((String) template.getTag(), custom.getText().toString());
+                PromptOptions options = new PromptOptions(PromptOptions.GENERAL, custom.getText().toString());
                 savePromptOptions(options, (PromptPreferences.Scope) scope.getTag());
             } catch (IllegalArgumentException exception) {
                 validation.setText(exception.getMessage());
@@ -1590,12 +1575,8 @@ public final class GroupSummarySheet {
                 custom.requestFocus();
             }
         });
-        final int resetTemplateId = defaultTemplateId;
-        final int resetScopeId = sessionScopeId;
-        addAction("恢复默认填写", () -> {
-            templates.check(resetTemplateId);
+        addAction("清空填写", () -> {
             custom.setText("");
-            scopes.check(resetScopeId);
             validation.setVisibility(View.GONE);
         });
         if (sessionPrompt != null) {
@@ -1622,12 +1603,12 @@ public final class GroupSummarySheet {
         if (closed || !checkAccountOwner()) return;
         if (scope == PromptPreferences.Scope.SESSION) {
             sessionPrompt = options;
-            promptNotice = "总结方向仅用于本次面板，关闭后不保留。";
+            promptNotice = "核心总结要求仅用于本次面板，关闭后不保留。";
             showSelection();
             return;
         }
         changePromptPreferences(() -> PromptPreferences.save(account, ownerId, dialogId, topicId, scope, options),
-                "总结方向已保存。", scope,
+                "核心总结要求已保存。", scope,
                 () -> showPromptEditor(options, scope, "保存失败，请重试。"));
     }
 
@@ -1637,7 +1618,7 @@ public final class GroupSummarySheet {
         cancelWork();
         final int generation = operation;
         clearContent();
-        addText("正在更新总结方向…", true);
+        addText("正在更新核心总结要求…", true);
         Utilities.globalQueue.postRunnable(() -> {
             if (!sameAccountOwner()) {
                 AndroidUtilities.runOnUIThread(this::dismiss);
@@ -1724,7 +1705,7 @@ public final class GroupSummarySheet {
         addText("上下文字符预算（2048–" + AiSummarySettings.MAX_INPUT_CHARACTER_BUDGET + "）", true);
         EditTextBoldCursor contextBudget = edit("6000", Integer.toString(config.inputCharacterBudget),
                 InputType.TYPE_CLASS_NUMBER);
-        addText("这是保守的字符估计，不是模型 token 数。输出按每 token 预留 4 字符，此外还需容纳规则、补充要求和聊天内容。", false);
+        addText("这是保守的字符估计，不是模型 token 数。输出按每 token 预留 4 字符，此外还需容纳核心总结要求、输入说明和聊天内容。", false);
         addText("常用搭配（最大输出 / 字符预算）：512 / 6000、1024 / 12000、2048 / 16000。较大预算可能增加手机内存及耗时。", false);
         CheckBox streaming = new CheckBox(context);
         streaming.setText("流式显示（需要服务支持）");
@@ -1936,6 +1917,7 @@ public final class GroupSummarySheet {
                 ? new RangeRequest(request.mode, request.count, request.expectedCursor, request.lower, request.upper,
                     request.initialize, request.replayHistory, request.replayMessages, filterOptions) : request;
         final PromptOptions prompt = effectivePrompt().withFocusSelf(snapshot.filters.mode == SummaryFilter.Mode.FOCUS_SELF);
+        if (!requireCoreSummaryInstructions(prompt)) return;
         summaryRange = snapshot;
         summaryHistory = null;
         sourceMessages = null;
@@ -1946,6 +1928,7 @@ public final class GroupSummarySheet {
 
     private void startSummary(AiSummarySettings.Config config, PromptOptions prompt, RangeRequest request) {
         if (closed || fragment.isFinished || !checkAccountOwner()) return;
+        if (!requireCoreSummaryInstructions(prompt)) return;
         if (isSummaryAccessRevoked()) {
             showSelection();
             return;
@@ -2011,6 +1994,13 @@ public final class GroupSummarySheet {
         loadRange(historyLoader, request, callback);
     }
 
+    private boolean requireCoreSummaryInstructions(PromptOptions prompt) {
+        if (prompt != null && !prompt.customInstructions.trim().isEmpty()) return true;
+        showPromptEditor(prompt == null ? PromptOptions.DEFAULT : prompt, PromptPreferences.Scope.SESSION,
+                "请先填写核心总结要求，再开始总结。");
+        return false;
+    }
+
     private void loadRange(SummaryHistoryLoader loader, RangeRequest request, SummaryHistoryLoader.Callback callback) {
         if (request.mode == RangeMode.TODAY) {
             loader.loadToday(callback);
@@ -2059,7 +2049,7 @@ public final class GroupSummarySheet {
             return;
         }
         clearContent();
-        progressStatus = addText("正在生成话题、结论与待办…", true);
+        progressStatus = addText("正在按核心要求生成总结…", true);
         progressElapsed = addText("已耗时 " + Math.max(0L,
                 (SystemClock.elapsedRealtime() - summaryStartedAt) / 1000) + " 秒", false);
         addText("已读取 " + sourceMessages.size() + " 条文字消息。", false);
@@ -2208,7 +2198,8 @@ public final class GroupSummarySheet {
                     : mode == RangeMode.REPLAY ? "重做已记录范围" : "最近 N 条文字消息";
             historyRecord = new SummaryHistoryStore.Record(UUID.randomUUID().toString(), dialogId, topicId,
                     System.currentTimeMillis(), title, range, coverageNote == null ? "" : coverageNote,
-                    summaryPrompt == null ? "通用总结" : PromptOptions.templateLabel(summaryPrompt.templateId),
+                    summaryPrompt == null || summaryPrompt.builtinRulesVersion >= 6 ? ""
+                            : PromptOptions.templateLabel(summaryPrompt.templateId),
                     summaryPrompt == null ? "" : summaryPrompt.customInstructions,
                     summaryConfig == null ? "" : summaryConfig.model, summary, !summaryHistory.complete, references,
                     supportsSummarySourceLinks());
@@ -2331,9 +2322,12 @@ public final class GroupSummarySheet {
         }
         addAction(topicId == 0 ? "查看本聊天的总结历史" : "查看本话题的总结历史", this::openHistory);
         if (summaryPrompt != null) {
-            addText("总结方向：" + PromptOptions.templateLabel(summaryPrompt.templateId), false);
+            if (summaryPrompt.builtinRulesVersion < 6) {
+                addText("生成时总结方向：" + PromptOptions.templateLabel(summaryPrompt.templateId), false);
+            }
             if (!summaryPrompt.customInstructions.isEmpty()) {
-                addText("生成时补充要求：" + summaryPrompt.customInstructions, false);
+                addText((summaryPrompt.builtinRulesVersion >= 6 ? "生成时核心总结要求：" : "生成时填写的要求：")
+                        + summaryPrompt.customInstructions, false);
             }
         }
         if (summaryRange != null && summaryRange.filters != null) {
@@ -2370,7 +2364,7 @@ public final class GroupSummarySheet {
             final RangeRequest regenerate = new RangeRequest(RangeMode.REPLAY, recentCount,
                     summaryRange.expectedCursor, summaryHistory.lowerExclusiveId, summaryHistory.coveredThroughId,
                     false, summaryHistory, summaryHistory.messages);
-            addAction("按当前设置和方向重新生成", () -> startSummary(regenerate));
+            addAction("按当前设置和要求重新生成", () -> startSummary(regenerate));
             addText("重新调用模型，使用生成时范围的原始文字快照，并应用当前筛选；若需最新消息，请重新选择范围。", false);
         }
         addAction("重新选择范围", this::showSelection);

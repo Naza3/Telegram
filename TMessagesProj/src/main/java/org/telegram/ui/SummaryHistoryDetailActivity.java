@@ -209,8 +209,8 @@ public final class SummaryHistoryDetailActivity extends BaseFragment implements 
                 + (record.sourceLinks ? "点击引用后才联网重新核验。" : ""), false);
         text(content, record.rangeLabel + (record.partial ? " · 部分覆盖" : ""), true);
         if (!record.coverageNote.isEmpty()) text(content, record.coverageNote, false);
-        if (!record.templateLabel.isEmpty()) text(content, "总结方向：" + record.templateLabel, false);
-        if (!record.customInstructions.isEmpty()) text(content, "生成时补充要求：" + record.customInstructions, false);
+        if (!record.templateLabel.isEmpty()) text(content, "生成时总结方向：" + record.templateLabel, false);
+        if (!record.customInstructions.isEmpty()) text(content, "生成时填写的要求：" + record.customInstructions, false);
         text(content, "请求模型：" + (record.model.isEmpty() ? "服务当前模型（未指定名称）" : record.model)
                 + "。此名称不是实际模型版本的核验证明。", false);
         if (transientNotice != null) text(content, transientNotice, true);

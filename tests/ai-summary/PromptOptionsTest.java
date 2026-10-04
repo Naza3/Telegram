@@ -11,6 +11,7 @@ public final class PromptOptionsTest {
     public static void main(String[] args) {
         unicodeAndSnapshots();
         preferences();
+        emptyCorePreferences();
         priorRulesVersionKeepsSavedDirection();
         System.out.println("PromptOptionsTest: " + assertions + " assertions passed");
     }
@@ -105,6 +106,22 @@ public final class PromptOptionsTest {
         UserConfig.getInstance(account).setClientUserId(1000);
     }
 
+    private static void emptyCorePreferences() {
+        int account = 2;
+        long owner = 5004;
+        UserConfig.getInstance(account).setClientUserId(owner);
+        PromptPreferences.clearOwner(account, owner);
+        for (String template : Arrays.asList(PromptOptions.GENERAL, PromptOptions.TODOS)) {
+            PromptOptions empty = new PromptOptions(template, " \t\n");
+            PromptPreferences.save(account, owner, -10, 0, PromptPreferences.Scope.CHAT, empty);
+            PromptPreferences.Resolved restored = PromptPreferences.load(account, owner, -10, 0);
+            check(restored.scope == PromptPreferences.Scope.CHAT && restored.options.equals(empty), "empty manual core remains a valid saved configuration");
+            check(restored.options.customInstructions.isEmpty(), "restoring an empty configuration never substitutes built-in or template instructions");
+        }
+        PromptPreferences.clearOwner(account, owner);
+        UserConfig.getInstance(account).setClientUserId(1002);
+    }
+
     private static void priorRulesVersionKeepsSavedDirection() {
         int account = 3;
         long owner = 5003;
@@ -114,13 +131,13 @@ public final class PromptOptionsTest {
         PromptPreferences.save(account, owner, -10, 0, PromptPreferences.Scope.CHAT, saved);
         String key = "local_ai_prompt_" + owner + "_chat_-10_topic_0";
         org.json.JSONObject record = new org.json.JSONObject(MessagesController.getMainSettings(account).getString(key, ""));
-        check(record.getInt("rules_version") == 5, "new saved directions identify the concise prompt rules version");
-        for (int priorVersion : new int[] {1, 2, 3, 4}) {
+        check(record.getInt("rules_version") == 6, "new saved directions identify the manual system-core rules version");
+        for (int priorVersion : new int[] {1, 2, 3, 4, 5}) {
             record.put("rules_version", priorVersion);
             MessagesController.getMainSettings(account).edit().putString(key, record.toString()).commit();
             PromptPreferences.Resolved loaded = PromptPreferences.load(account, owner, -10, 0);
             check(loaded.scope == PromptPreferences.Scope.CHAT && loaded.options.equals(saved), "prior saved template and custom direction remain usable after the rule update");
-            check(loaded.options.builtinRulesVersion == 5, "a new request snapshots current rules rather than claiming to run old rules");
+            check(loaded.options.builtinRulesVersion == 6, "a new request snapshots current rules rather than claiming to run old rules");
         }
         PromptPreferences.clearOwner(account, owner);
         UserConfig.getInstance(account).setClientUserId(1003);

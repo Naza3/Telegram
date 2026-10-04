@@ -1,0 +1,1 @@
+package android.app; import java.util.*; public class Notification {public static final int VISIBILITY_PRIVATE=0;public String title,text;public PendingIntent content;public final List<PendingIntent> actions=new ArrayList<>();public boolean ongoing; public int progress,max; }

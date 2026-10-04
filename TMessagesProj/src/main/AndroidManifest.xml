@@ -466,6 +466,12 @@
             android:foregroundServiceType="dataSync"
         />
         <service
+            android:name=".SummaryForegroundService"
+            android:exported="false"
+            android:stopWithTask="false"
+            android:foregroundServiceType="dataSync"
+        />
+        <service
             android:name=".BringAppForegroundService"
             android:enabled="true"
             android:exported="true"

@@ -64,6 +64,8 @@ jobs:
           python3 -B -m unittest discover -s tests/build-config -p 'test_*.py'
           bash tests/ai-summary/bootstrap-tools.sh
           bash tests/ai-summary/run.sh
+          bash tests/ai-summary-controller/run.sh
+          bash tests/ai-summary-foreground/run.sh
           python3 tests/ai-summary/fixtures/validate_fixtures.py
 
       - name: Install the Android toolchain

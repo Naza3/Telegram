@@ -1,0 +1,1 @@
+package org.telegram.messenger;public final class FileLog {public static String last;public static void e(String s){last=s;}}

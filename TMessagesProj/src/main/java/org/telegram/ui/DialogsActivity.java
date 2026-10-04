@@ -13515,8 +13515,8 @@ public class DialogsActivity extends BaseFragment implements NotificationCenter.
         if (initialDialogsType == DIALOGS_TYPE_DEFAULT && !onlySelect
                 && folderId == 0 && communityId == 0 && TextUtils.isEmpty(searchString)
                 && !searchIsShowed && !inPreviewMode && !actionBar.isActionModeShowed()) {
-            io.add(R.drawable.msg_recent, "AI 总结历史",
-                    () -> presentFragment(new SummaryHistoryActivity(currentAccount)));
+            io.add(R.drawable.msg_recent, "AI 总结",
+                    () -> presentFragment(new SummaryCenterActivity(currentAccount)));
         }
         if (ApplicationLoader.applicationLoaderInstance != null) {
             ApplicationLoader.applicationLoaderInstance.addItemOptions(io);

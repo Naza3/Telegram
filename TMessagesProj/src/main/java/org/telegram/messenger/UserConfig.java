@@ -469,7 +469,23 @@ public class UserConfig extends BaseController {
         org.telegram.messenger.ai.PromptPreferences.clearOwner(currentAccount, summaryOwnerId);
         org.telegram.messenger.ai.SummaryStateStore.clearOwner(currentAccount, summaryOwnerId);
         org.telegram.messenger.ai.SummaryResultCache.getInstance().clearOwner(currentAccount, summaryOwnerId);
+        org.telegram.messenger.ai.SummaryTaskCheckpoint.clearOwner(currentAccount, summaryOwnerId);
+        AndroidUtilities.runOnUIThread(() -> {
+            org.telegram.ui.Components.SummaryTaskController.clearOwner(currentAccount, summaryOwnerId);
+            org.telegram.ui.Components.SummaryPublishHelper.clearOwner(currentAccount, summaryOwnerId);
+            SummaryForegroundService.stopOwner(currentAccount, summaryOwnerId);
+        });
         Utilities.globalQueue.postRunnable(() -> {
+            try {
+                org.telegram.messenger.ai.SummaryPublishStore.clearOwner(currentAccount, summaryOwnerId);
+            } catch (RuntimeException error) {
+                FileLog.e(error);
+            }
+            try {
+                org.telegram.messenger.ai.SavedSummaryPrompts.clearOwner(currentAccount, summaryOwnerId);
+            } catch (RuntimeException error) {
+                FileLog.e(error);
+            }
             try {
                 org.telegram.messenger.ai.SummaryHistoryStore.clearOwner(currentAccount, summaryOwnerId);
             } catch (RuntimeException error) {

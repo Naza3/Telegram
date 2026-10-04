@@ -1,0 +1,1 @@
+package android.widget;import android.content.Context;public final class Toast {public static final int LENGTH_LONG=1;public static String text;public static Toast makeText(Context c,String t,int duration){text=t;return new Toast();}public void show(){} }

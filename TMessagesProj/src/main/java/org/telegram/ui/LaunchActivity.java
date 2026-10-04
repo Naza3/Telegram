@@ -132,6 +132,7 @@ import org.telegram.messenger.R;
 import org.telegram.messenger.SendMessagesHelper;
 import org.telegram.messenger.SharedConfig;
 import org.telegram.messenger.SharedPrefsHelper;
+import org.telegram.messenger.SummaryForegroundService;
 import org.telegram.messenger.TopicsController;
 import org.telegram.messenger.UserConfig;
 import org.telegram.messenger.UserObject;
@@ -1527,8 +1528,17 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
             webviewShareAPIDoneListener = null;
         }
         int flags = intent.getFlags();
-        String action = intent.getAction();
         final int[] intentAccount = new int[]{intent.getIntExtra("currentAccount", UserConfig.selectedAccount)};
+        if (SummaryForegroundService.ACTION_OPEN_CENTER.equals(intent.getAction())
+                && (intentAccount[0] < 0 || intentAccount[0] >= UserConfig.MAX_ACCOUNT_COUNT
+                || intent.getLongExtra(SummaryForegroundService.EXTRA_OWNER, 0) <= 0
+                || UserConfig.getInstance(intentAccount[0]).getClientUserId()
+                != intent.getLongExtra(SummaryForegroundService.EXTRA_OWNER, 0))) {
+            // A notification from a logged-out owner must not open a replacement account's center.
+            intentAccount[0] = UserConfig.selectedAccount;
+            intent.setAction(null);
+        }
+        String action = intent.getAction();
         switchToAccount(intentAccount[0], true);
         final boolean isVoipIntent = action != null && action.equals("voip");
         final boolean isVoipAnswerIntent = action != null && action.equals("voip_answer");
@@ -1561,6 +1571,7 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
         boolean showDialogsList = false;
         boolean showPlayer = false;
         boolean showLocations = false;
+        boolean showSummaryCenter = false;
         boolean showGroupVoip = false;
         boolean showCallLog = false;
         boolean audioCallUser = false;
@@ -2951,6 +2962,8 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
                     showPlayer = true;
                 } else if (intent.getAction().equals("org.tmessages.openlocations")) {
                     showLocations = true;
+                } else if (SummaryForegroundService.ACTION_OPEN_CENTER.equals(action)) {
+                    showSummaryCenter = true;
                 } else if (action.equals("voip_chat")) {
                     showGroupVoip = true;
                 }
@@ -2973,7 +2986,11 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
                 }
             }
 
-            if (push_story_id > 0) {
+            if (showSummaryCenter) {
+                getActionBarLayout().presentFragment(new INavigationLayout.NavigationParams(
+                        new SummaryCenterActivity(intentAccount[0])).setNoAnimation(true));
+                pushOpened = true;
+            } else if (push_story_id > 0) {
                 NotificationsController.getInstance(intentAccount[0]).processSeenStoryReactions(UserConfig.getInstance(intentAccount[0]).getClientUserId(), push_story_id);
                 long storyDialogId = UserConfig.getInstance(currentAccount).getClientUserId();
                 if (push_user_id != 0) {

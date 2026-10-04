@@ -52,6 +52,7 @@ import androidx.collection.LongSparseArray;
 import androidx.core.view.inputmethod.InputContentInfoCompat;
 
 import org.json.JSONObject;
+import org.telegram.messenger.ai.SummaryPublishStore;
 import org.telegram.messenger.audioinfo.AudioInfo;
 import org.telegram.messenger.support.SparseLongArray;
 import org.telegram.messenger.utils.EphemeralMessagesHelper;
@@ -7932,6 +7933,12 @@ public class SendMessagesHelper extends BaseController implements NotificationCe
             return;
         }
 
+        final boolean summaryTextRequest = req instanceof TLRPC.TL_messages_sendMessage
+                || req instanceof TLRPC.TL_messages_sendMedia && newMsgObj.media instanceof TLRPC.TL_messageMediaWebPage;
+        if (summaryTextRequest) {
+            SummaryPublishStore.trackQueued(currentAccount, newMsgObj.params, newMsgObj.dialog_id,
+                    msgObj.getTopicId(), newMsgObj.id, newMsgObj.random_id, newMsgObj.message);
+        }
         newMsgObj.reqId = getConnectionsManager().sendRequest(req, (response, error) -> {
             if (error != null && (req instanceof TLRPC.TL_messages_sendMedia || req instanceof TL_ephemeral.TL_sendMessage || req instanceof TLRPC.TL_messages_editMessage || req instanceof TLRPC.TL_messages_addPollAnswer) && FileRefController.isFileRefError(error.text)) {
                 if (FileRefController.isFileRefErrorCover(error.text)) {
@@ -8301,6 +8308,12 @@ public class SendMessagesHelper extends BaseController implements NotificationCe
 
                         if (!isSentError) {
                             getStatsController().incrementSentItemsCount(ApplicationLoader.getCurrentNetworkType(), StatsController.TYPE_MESSAGES, 1);
+                            if (summaryTextRequest) {
+                                // Only this full server response owns a positive message ID. QuickAck is not sent.
+                                SummaryPublishStore.trackConfirmed(currentAccount, newMsgObj.params, newMsgObj.dialog_id,
+                                        msgObj.getTopicId(), oldId, newMsgObj.random_id,
+                                        newMsgObj.id, currentSchedule);
+                            }
                             newMsgObj.send_state = MessageObject.MESSAGE_SEND_STATE_SENT;
                             newMsgObj.errorNewPriceStars = 0;
                             newMsgObj.errorAllowedPriceStars = 0;
@@ -8359,6 +8372,10 @@ public class SendMessagesHelper extends BaseController implements NotificationCe
                     if (isSentError) {
                         getMessagesStorage().markMessageAsSendError(newMsgObj, scheduled ? 1 : 0);
                         newMsgObj.send_state = MessageObject.MESSAGE_SEND_STATE_SEND_ERROR;
+                        if (summaryTextRequest) {
+                            SummaryPublishStore.trackFailed(currentAccount, newMsgObj.params, newMsgObj.dialog_id,
+                                    msgObj.getTopicId(), newMsgObj.id, newMsgObj.random_id);
+                        }
                         if (error != null && error.text != null && error.text.startsWith("ALLOW_PAYMENT_REQUIRED_")) {
                             newMsgObj.errorAllowedPriceStars = StarsController.getInstance(currentAccount).getAllowedPaidStars(req);
                             newMsgObj.errorNewPriceStars = Long.parseLong(error.text.substring("ALLOW_PAYMENT_REQUIRED_".length()));

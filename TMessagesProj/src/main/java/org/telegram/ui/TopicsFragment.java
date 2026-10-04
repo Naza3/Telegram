@@ -2553,22 +2553,7 @@ public class TopicsFragment extends BaseFragment implements NotificationCenter.N
 
     private void showGroupSummary() {
         if (isFinished || getParentActivity() == null || !canSummarizeGroup()) return;
-        if (groupSummarySheet != null) groupSummarySheet.dismiss();
-        final int summaryAccount = currentAccount;
-        final long summaryOwner = getUserConfig().getClientUserId();
-        // This screen has no snapshot of the whole forum's pre-entry unread boundary.
-        groupSummarySheet = GroupSummarySheet.show(this, summaryAccount, -chatId, 0, -1, -1,
-                (sourceDialogId, messageId) -> {
-                    if (isFinished || getParentActivity() == null || getParentActivity().isFinishing()
-                            || currentAccount != summaryAccount || sourceDialogId != -chatId || messageId <= 0
-                            || getUserConfig().getClientUserId() != summaryOwner || !canSummarizeGroup()) return;
-                    Bundle args = new Bundle();
-                    args.putLong("chat_id", chatId);
-                    args.putInt("message_id", messageId);
-                    ChatActivity chatActivity = new ChatActivity(args);
-                    chatActivity.setCurrentAccount(summaryAccount);
-                    presentFragment(chatActivity);
-                });
+        presentFragment(new SummaryCenterActivity(currentAccount, -chatId, 0, -1, -1, false));
     }
 
     private void updateChatInfo() {

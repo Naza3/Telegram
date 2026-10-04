@@ -1,0 +1,1 @@
+package android.app;public class NotificationChannel {public NotificationChannel(String a,String b,int c){}public void setDescription(String s){}public void setSound(Object a,Object b){}public void enableVibration(boolean v){}public void setShowBadge(boolean v){}public void setLockscreenVisibility(int v){} }

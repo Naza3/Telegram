@@ -874,6 +874,7 @@ public class ChatActivity extends BaseFragment implements
     private LongSparseArray<MessageObject> conversionMessages = new LongSparseArray<>();
     public ArrayList<MessageObject> messages = new ArrayList<>();
     private GroupSummarySheet groupSummarySheet;
+    private SummaryPublishHelper.Draft pendingSummaryPublishDraft;
     private long summaryUnreadTopicId = -1;
     private int summaryUnreadLowerId = -1;
     private int summaryUnreadUpperId = -1;
@@ -3407,6 +3408,7 @@ public class ChatActivity extends BaseFragment implements
 
     @Override
     public void onFragmentDestroy() {
+        pendingSummaryPublishDraft = null;
         if (groupSummarySheet != null) {
             groupSummarySheet.dismiss();
             groupSummarySheet = null;
@@ -3773,13 +3775,9 @@ public class ChatActivity extends BaseFragment implements
                             groupSummarySheet.dismiss();
                         }
                         final long summaryTopicId = getTopicId();
-                        groupSummarySheet = GroupSummarySheet.show(ChatActivity.this, currentAccount, dialog_id, summaryTopicId,
+                        presentFragment(new SummaryCenterActivity(currentAccount, dialog_id, summaryTopicId,
                             summaryUnreadTopicId == summaryTopicId ? summaryUnreadLowerId : -1,
-                            summaryUnreadTopicId == summaryTopicId ? summaryUnreadUpperId : -1, (sourceDialogId, messageId) -> {
-                            if (!isFinished && summaryTopicId == getTopicId() && sourceDialogId == dialog_id) {
-                                scrollToMessageId(messageId, 0, true, 0, true, 0);
-                            }
-                        });
+                            summaryUnreadTopicId == summaryTopicId ? summaryUnreadUpperId : -1, true));
                     }
                 } else if (id == view_as_topics) {
                     if (getUserConfig().getClientUserId() == dialog_id) {
@@ -13844,6 +13842,71 @@ public class ChatActivity extends BaseFragment implements
 
     public ChatActivityEnterView getChatActivityEnterView() {
         return chatActivityEnterView;
+    }
+
+    /** A one-shot handoff, applied only after Telegram has restored its own draft. */
+    public void setSummaryPublishDraft(SummaryPublishHelper.Draft draft) {
+        pendingSummaryPublishDraft = draft;
+    }
+
+    public String getSummaryPublishConflict() {
+        if (chatActivityEnterView != null && chatActivityEnterView.hasText()) {
+            return "原聊天已有草稿，请先处理后再填入总结。";
+        }
+        return getSummaryPublishNonTextConflict();
+    }
+
+    private String getSummaryPublishNonTextConflict() {
+        if (chatMode != MODE_DEFAULT || editingMessageObject != null
+                || chatActivityEnterView != null && chatActivityEnterView.hasSummaryPublishNonTextContent()
+                || messagePreviewParams != null && messagePreviewParams.forwardMessages != null
+                    && !messagePreviewParams.forwardMessages.messages.isEmpty()
+                || replyingQuote != null || replyingMessageObject != null
+                    && !(isTopic && replyingMessageObject == threadMessageObject)
+                || chatAttachAlert != null && (chatAttachAlert.isShowing()
+                    || chatAttachAlert.getCurrentAttachLayout() != null
+                    && chatAttachAlert.getCurrentAttachLayout().getSelectedItemsCount() > 0)) {
+            return "原聊天已有草稿、回复或待发送内容，请先处理后再填入总结。";
+        }
+        return null;
+    }
+
+    public String getSummaryPublishSendError(SummaryPublishHelper.Draft draft) {
+        String error = SummaryPublishHelper.targetError(draft);
+        if (error != null) return error;
+        if (isFinished || currentAccount != draft.account || dialog_id != draft.record.dialogId
+                || getTopicId() != draft.topicId) return "来源聊天已变化，请重新打开总结记录。";
+        return getSummaryPublishNonTextConflict();
+    }
+
+    private void applySummaryPublishDraft() {
+        SummaryPublishHelper.Draft draft = pendingSummaryPublishDraft;
+        if (draft == null || chatActivityEnterView == null || isFinished || paused) return;
+        pendingSummaryPublishDraft = null;
+        String error = SummaryPublishHelper.targetError(draft);
+        if (error == null && (currentAccount != draft.account || dialog_id != draft.record.dialogId
+                || getTopicId() != draft.topicId)) {
+            error = "来源聊天已变化，请重新打开总结记录。";
+        }
+        if (error == null) error = SummaryPublishHelper.savedDraftError(draft);
+        if (error == null) error = getSummaryPublishConflict();
+        if (error != null) {
+            SummaryPublishHelper.showError(this, error);
+            return;
+        }
+        chatActivityEnterView.setFieldText(draft.record.summary);
+        chatActivityEnterView.setSummaryPublishOrigin(draft);
+        chatActivityEnterView.setFieldFocused(true);
+        chatActivityEnterView.openKeyboard();
+    }
+
+    public void clearSummaryPublishDraft(int account, long ownerId) {
+        if (pendingSummaryPublishDraft != null && pendingSummaryPublishDraft.account == account
+                && pendingSummaryPublishDraft.ownerId == ownerId) pendingSummaryPublishDraft = null;
+        if (chatActivityEnterView != null && chatActivityEnterView.hasSummaryPublishOrigin(account, ownerId)) {
+            chatActivityEnterView.clearSummaryPublishOrigin();
+            chatActivityEnterView.setFieldText("");
+        }
     }
 
     public boolean isKeyboardVisible() {
@@ -27171,6 +27234,7 @@ public class ChatActivity extends BaseFragment implements
     public void onBecomeFullyVisible() {
         isFullyVisible = true;
         super.onBecomeFullyVisible();
+        applySummaryPublishDraft();
         if (showCloseChatDialogLater) {
             showDialog(closeChatDialog);
         }
@@ -30009,6 +30073,7 @@ public class ChatActivity extends BaseFragment implements
         fixLayout();
         applyDraftMaybe(false);
         applyChatLinkMessageMaybe();
+        if (isFullyVisible) applySummaryPublishDraft();
         if (bottomChannelButtonsLayout != null && bottomChannelButtonsLayout.getVisibility() != View.VISIBLE && !actionBar.isSearchFieldVisible() && chatMode != MODE_SEARCH && !BaseFragment.hasSheets(this)) {
             chatActivityEnterView.setFieldFocused(true);
         }

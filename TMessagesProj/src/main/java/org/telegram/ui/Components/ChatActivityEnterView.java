@@ -66,6 +66,8 @@ import android.text.TextPaint;
 import android.text.TextUtils;
 import android.text.TextWatcher;
 import android.text.style.ImageSpan;
+import android.text.style.ReplacementSpan;
+import android.text.style.URLSpan;
 import android.util.Property;
 import android.util.TypedValue;
 import android.view.ActionMode;
@@ -150,6 +152,8 @@ import org.telegram.messenger.UserConfig;
 import org.telegram.messenger.UserObject;
 import org.telegram.messenger.Utilities;
 import org.telegram.messenger.VideoEditedInfo;
+import org.telegram.messenger.ai.SummaryPublishStore;
+import org.telegram.messenger.ai.SummaryTextSplitter;
 import org.telegram.messenger.browser.Browser;
 import org.telegram.messenger.camera.CameraController;
 import org.telegram.messenger.utils.DrawableUtils;
@@ -438,6 +442,12 @@ public class ChatActivityEnterView extends FrameLayout implements
     private final static int POPUP_CONTENT_BOT_KEYBOARD = 1;
 
     private int currentAccount = UserConfig.selectedAccount;
+    private SummaryPublishHelper.Draft summaryPublishOrigin;
+    private boolean preparingSummaryPublish;
+    private boolean summaryPublishSubmitted;
+    private long summaryPublishGeneration;
+    private SummaryPublishStore.Attempt preparedSummaryAttempt;
+    private List<String> preparedSummaryParts;
     private AccountInstance accountInstance = AccountInstance.getInstance(UserConfig.selectedAccount);
 
     private boolean isInitLineCount;
@@ -3652,10 +3662,15 @@ public class ChatActivityEnterView extends FrameLayout implements
             count += parentFragment.messagePreviewParams.getForwardedMessagesCount();
         }
         if (messageEditText != null && !TextUtils.isEmpty(messageEditText.getText())) {
-            String textFinal = SendMessagesHelper.getTrimmedString(messageEditText.getText().toString());
+            CharSequence textFinal = normalizeNativeSendingText(messageEditText.getTextToUse());
             final int limit = accountInstance.getMessagesController().getMaxMessageLength();
             if (textFinal.length() != 0) {
-                count += (int) Math.ceil(textFinal.length() / (float) limit);
+                try {
+                    count += SummaryTextSplitter.splitRanges(textFinal, limit).size();
+                } catch (IllegalArgumentException e) {
+                    // Actual sending validates the complete split and rejects it before enqueue.
+                    count += (int) Math.ceil(textFinal.length() / (float) limit);
+                }
             } else {
                 count++;
             }
@@ -5977,6 +5992,7 @@ public class ChatActivityEnterView extends FrameLayout implements
 
             @Override
             public void afterTextChanged(Editable editable) {
+                if (editable.length() == 0 && summaryPublishOrigin != null) clearSummaryPublishOrigin();
                 if (ignorePrevTextChange) {
                     return;
                 }
@@ -6493,6 +6509,7 @@ public class ChatActivityEnterView extends FrameLayout implements
     }
 
     public void onDestroy() {
+        clearSummaryPublishOrigin();
         if (audioTimelineView != null) {
             audioTimelineView.destroy();
         }
@@ -6614,6 +6631,7 @@ public class ChatActivityEnterView extends FrameLayout implements
     private Runnable hideKeyboardRunnable;
 
     public void onPause() {
+        cancelSummaryPublishPreparation();
         isPaused = true;
         if (senderSelectPopupWindow != null) {
             senderSelectPopupWindow.setPauseNotifications(false);
@@ -6669,6 +6687,7 @@ public class ChatActivityEnterView extends FrameLayout implements
     }
 
     public void setDialogId(long id, int account) {
+        if (dialog_id != id || currentAccount != account) clearSummaryPublishOrigin();
         dialog_id = id;
         if (currentAccount != account) {
             notificationsLocker.unlock();
@@ -7274,6 +7293,14 @@ public class ChatActivityEnterView extends FrameLayout implements
     }
 
     protected boolean sendMessageInternal(boolean notify, int scheduleDate, int scheduleRepeatPeriod, long payStars, boolean allowConfirm) {
+        if (preparingSummaryPublish || summaryPublishSubmitted) return false;
+        if (summaryPublishOrigin != null) {
+            String error = summaryPublishSendError(scheduleDate);
+            if (error != null) {
+                SummaryPublishHelper.showError(parentFragment, error);
+                return false;
+            }
+        }
         final boolean allowConfirmFinal = allowConfirm && !animatorEphemeralMessageVisibility.getValue();
 
         final Runnable send = () -> {
@@ -7767,66 +7794,51 @@ public class ChatActivityEnterView extends FrameLayout implements
     }
 
     public boolean processSendingText(CharSequence text, boolean notify, int scheduleDate, int scheduleRepeatPeriod, long payStars) {
+        if (preparingSummaryPublish || summaryPublishSubmitted) return false;
         if (replyingQuote != null && parentFragment != null && replyingQuote.outdated) {
             parentFragment.showQuoteMessageUpdate();
             return false;
         }
-        int[] emojiOnly = new int[1];
-        Emoji.parseEmojis(text, emojiOnly);
-        boolean hasOnlyEmoji = emojiOnly[0] > 0;
-        if (!hasOnlyEmoji) {
-            text = AndroidUtilities.getTrimmedString(text);
-        }
-        boolean supportsNewEntities = supportsSendingNewEntities();
-        int maxLength = accountInstance.getMessagesController().getMaxMessageLength();
+        text = normalizeNativeSendingText(text);
         if (text.length() != 0) {
+            final ArrayList<NativeTextPart> parts;
+            try {
+                parts = prepareNativeTextParts(text);
+            } catch (IllegalArgumentException e) {
+                SummaryPublishHelper.showError(parentFragment, "单个字符组合或格式片段超过消息长度上限，请调整正文后重试。");
+                return false;
+            }
+            final SummaryPublishStore.Attempt publishAttempt;
+            if (summaryPublishOrigin != null) {
+                String error = summaryPublishSendError(scheduleDate);
+                if (error == null && parts.size() != 1) error = summaryPublishLengthError();
+                if (error != null) {
+                    SummaryPublishHelper.showError(parentFragment, error);
+                    return false;
+                }
+                ArrayList<String> actualParts = new ArrayList<>();
+                for (NativeTextPart part : parts) actualParts.add(part.text);
+                if (preparedSummaryAttempt != null && !actualParts.equals(preparedSummaryParts)) {
+                    cancelSummaryPublishPreparation();
+                    SummaryPublishHelper.showError(parentFragment, "正文或分段限制已变化，尚未发送。请检查后重新点击发送。");
+                    return false;
+                }
+                if (preparedSummaryAttempt == null) {
+                    prepareSummaryPublish(actualParts, notify, scheduleDate, scheduleRepeatPeriod, payStars);
+                    return false;
+                }
+                publishAttempt = preparedSummaryAttempt;
+                preparedSummaryAttempt = null;
+                preparedSummaryParts = null;
+                summaryPublishSubmitted = true;
+            } else {
+                publishAttempt = null;
+            }
             if (delegate != null && parentFragment != null && (scheduleDate != 0) == parentFragment.isInScheduleMode()) {
                 delegate.prepareMessageSending();
             }
-            int end;
-            int start = 0;
-            do {
-                int whitespaceIndex = -1;
-                int dotIndex = -1;
-                int tabIndex = -1;
-                int enterIndex = -1;
-                if (text.length() > start + maxLength) {
-                    int i = start + maxLength - 1;
-                    int k = 0;
-                    while (i > start && k < 300) {
-                        char c = text.charAt(i);
-                        char c2 = i > 0 ? text.charAt(i - 1) : ' ';
-                        if (c == '\n' && c2 == '\n') {
-                            tabIndex = i;
-                            break;
-                        } else if (c == '\n') {
-                            enterIndex = i;
-                        } else if (dotIndex < 0 && Character.isWhitespace(c) && c2 == '.') {
-                            dotIndex = i;
-                        } else if (whitespaceIndex < 0 && Character.isWhitespace(c)) {
-                            whitespaceIndex = i;
-                        }
-                        i--;
-                        k++;
-                    }
-                }
-                end = Math.min(start + maxLength, text.length());
-                if (tabIndex > 0) {
-                    end = tabIndex;
-                } else if (enterIndex > 0) {
-                    end = enterIndex;
-                } else if (dotIndex > 0) {
-                    end = dotIndex;
-                } else if (whitespaceIndex > 0) {
-                    end = whitespaceIndex;
-                }
-
-                CharSequence part = text.subSequence(start, end);
-                if (!hasOnlyEmoji) {
-                    part = AndroidUtilities.getTrimmedString(part);
-                }
-                CharSequence[] message = new CharSequence[]{ part };
-                ArrayList<TLRPC.MessageEntity> entities = MediaDataController.getInstance(currentAccount).getEntities(message, supportsNewEntities);
+            for (int partIndex = 0; partIndex < parts.size(); partIndex++) {
+                NativeTextPart part = parts.get(partIndex);
                 MessageObject.SendAnimationData sendAnimationData = null;
 
                 if (!delegate.hasForwardingMessages()) {
@@ -7853,7 +7865,8 @@ public class ChatActivityEnterView extends FrameLayout implements
                 if (replyToTopMsg == null && replyingTopMessage != null) {
                     replyToTopMsg = replyingTopMessage;
                 }
-                SendMessagesHelper.SendMessageParams params = SendMessagesHelper.SendMessageParams.of(message[0].toString(), dialog_id, replyingMessageObject, replyToTopMsg, messageWebPage, messageWebPageSearch, entities, null, null, notify, scheduleDate, scheduleRepeatPeriod, sendAnimationData, updateStickersOrder);
+                SendMessagesHelper.SendMessageParams params = SendMessagesHelper.SendMessageParams.of(part.text, dialog_id, replyingMessageObject, replyToTopMsg, messageWebPage, messageWebPageSearch, part.entities, null, null, notify, scheduleDate, scheduleRepeatPeriod, sendAnimationData, updateStickersOrder);
+                if (publishAttempt != null) params.params = SummaryPublishStore.partParams(publishAttempt, partIndex, params.params);
                 params.sendMessageChatArguments = parentFragment != null ? parentFragment.getMessageChatSendParams() : null;
                 params.effect_id = effectId;
                 params.payStars = payStars;
@@ -7884,8 +7897,7 @@ public class ChatActivityEnterView extends FrameLayout implements
                     parentFragment.fallbackFieldPanel();
                 }
                 SendMessagesHelper.getInstance(currentAccount).sendMessage(params);
-                start = end + 1;
-            } while (end != text.length());
+            }
             return true;
         }
         return false;
@@ -7893,6 +7905,110 @@ public class ChatActivityEnterView extends FrameLayout implements
 
     public long getSendMonoForumPeerId() {
         return parentFragment != null ? parentFragment.getSendMonoForumPeerId() : 0;
+    }
+
+    private static final class NativeTextPart {
+        final String text;
+        final ArrayList<TLRPC.MessageEntity> entities;
+
+        NativeTextPart(String text, ArrayList<TLRPC.MessageEntity> entities) {
+            this.text = text;
+            this.entities = entities;
+        }
+    }
+
+    private CharSequence normalizeNativeSendingText(CharSequence text) {
+        if (text == null) return "";
+        int[] emojiOnly = new int[1];
+        Emoji.parseEmojis(text, emojiOnly);
+        return emojiOnly[0] > 0 ? text : AndroidUtilities.getTrimmedString(text);
+    }
+
+    /** Build every part before enqueuing anything; no delimiter or UTF-16 code unit is skipped. */
+    private ArrayList<NativeTextPart> prepareNativeTextParts(CharSequence text) {
+        int limit = accountInstance.getMessagesController().getMaxMessageLength();
+        List<SummaryTextSplitter.Range> ranges = SummaryTextSplitter.splitRanges(text, limit);
+        ArrayList<NativeTextPart> parts = new ArrayList<>();
+        for (SummaryTextSplitter.Range range : ranges) {
+            if (summaryPublishOrigin != null && text instanceof Spanned && range.end < text.length()) {
+                Spanned styled = (Spanned) text;
+                for (Object span : styled.getSpans(range.end - 1, range.end, Object.class)) {
+                    if ((span instanceof URLSpan || span instanceof ReplacementSpan)
+                            && styled.getSpanStart(span) < range.end && styled.getSpanEnd(span) > range.end) {
+                        throw new IllegalArgumentException("Atomic text entity crosses a message boundary");
+                    }
+                }
+            }
+            CharSequence[] message = {text.subSequence(range.start, range.end)};
+            ArrayList<TLRPC.MessageEntity> entities = MediaDataController.getInstance(currentAccount)
+                    .getEntities(message, supportsSendingNewEntities());
+            if (message[0] == null || message[0].length() == 0 || message[0].length() > limit) {
+                throw new IllegalArgumentException("Invalid native message part");
+            }
+            parts.add(new NativeTextPart(message[0].toString(), entities));
+        }
+        return parts;
+    }
+
+    private String summaryPublishSendError(int scheduleDate) {
+        if (summaryPublishOrigin == null) return null;
+        if (scheduleDate != 0) return "总结发回暂不支持定时发送，请保留正文并使用普通发送。";
+        if (parentFragment == null || destroyed || isPaused) return "聊天页面已关闭，请重新打开总结记录。";
+        // Multi-part text/entity previews need separate Android validation before enabling publishing.
+        if (messageEditText != null && normalizeNativeSendingText(messageEditText.getTextToUse()).length()
+                > accountInstance.getMessagesController().getMaxMessageLength()) return summaryPublishLengthError();
+        return parentFragment.getSummaryPublishSendError(summaryPublishOrigin);
+    }
+
+    private String summaryPublishLengthError() {
+        return "总结发回目前支持单条消息（上限 " + accountInstance.getMessagesController().getMaxMessageLength()
+                + " 字符）。请缩短正文后发送；长内容可复制或导出。";
+    }
+
+    private void prepareSummaryPublish(List<String> finalParts, boolean notify, int scheduleDate,
+                                       int scheduleRepeatPeriod, long payStars) {
+        if (preparingSummaryPublish || summaryPublishOrigin == null || messageEditText == null) return;
+        cancelSummaryPublishPreparation();
+        final SummaryPublishHelper.Draft origin = summaryPublishOrigin;
+        final long generation = ++summaryPublishGeneration;
+        final String editorText = messageEditText.getTextToUse().toString();
+        final ArrayList<String> snapshot = new ArrayList<>(finalParts);
+        preparingSummaryPublish = true;
+        messageEditText.setEnabled(false);
+        Utilities.globalQueue.postRunnable(() -> {
+            SummaryPublishStore.Attempt prepared = null;
+            String error = null;
+            try {
+                prepared = SummaryPublishStore.prepare(origin.account, origin.ownerId, origin.record.id,
+                        origin.record.dialogId, origin.topicId, snapshot);
+            } catch (RuntimeException e) {
+                error = "无法保存发送记录，尚未发送。请确认总结仍存在或缩短正文后重试。";
+            }
+            final SummaryPublishStore.Attempt attempt = prepared;
+            final String failure = error;
+            AndroidUtilities.runOnUIThread(() -> {
+                if (generation != summaryPublishGeneration || summaryPublishOrigin != origin
+                        || destroyed || isPaused || messageEditText == null
+                        || !TextUtils.equals(editorText, messageEditText.getTextToUse())) {
+                    abandonSummaryAttempt(origin.account, attempt);
+                    if (generation == summaryPublishGeneration) cancelSummaryPublishPreparation();
+                    return;
+                }
+                preparingSummaryPublish = false;
+                messageEditText.setEnabled(true);
+                String guard = summaryPublishSendError(scheduleDate);
+                if (failure != null || guard != null) {
+                    abandonSummaryAttempt(origin.account, attempt);
+                    SummaryPublishHelper.showError(parentFragment, failure != null ? failure : guard);
+                    return;
+                }
+                preparedSummaryAttempt = attempt;
+                preparedSummaryParts = snapshot;
+                // The same explicit native send action already passed its confirmation/paid gate.
+                // Recheck normal slow-mode/permissions; no background retry or alternate target.
+                sendMessageInternal(notify, scheduleDate, scheduleRepeatPeriod, payStars, false);
+            });
+        });
     }
 
     public MessageSuggestionParams getSendMessageSuggestionParams() {
@@ -10447,6 +10563,7 @@ public class ChatActivityEnterView extends FrameLayout implements
     }
 
     public void setFieldText(CharSequence text, boolean ignoreChange, boolean fromDraft) {
+        clearSummaryPublishOrigin();
         if (messageEditText == null) {
             return;
         }
@@ -10591,6 +10708,55 @@ public class ChatActivityEnterView extends FrameLayout implements
 
     public boolean hasText() {
         return messageEditText != null && messageEditText.length() > 0;
+    }
+
+    public boolean hasSummaryPublishConflict() {
+        return hasText() || hasSummaryPublishNonTextContent();
+    }
+
+    public boolean hasSummaryPublishNonTextContent() {
+        return isEditingMessage() || isRecordingAudioVideo() || audioToSend != null
+                || videoToSendMessageObject != null || isRichDraftActive()
+                || forceShowSendButton
+                || delegate != null && delegate.hasForwardingMessages();
+    }
+
+    public void setSummaryPublishOrigin(SummaryPublishHelper.Draft draft) {
+        clearSummaryPublishOrigin();
+        if (SummaryPublishHelper.sameOwner(draft) && currentAccount == draft.account
+                && dialog_id == draft.record.dialogId) summaryPublishOrigin = draft;
+    }
+
+    public boolean hasSummaryPublishOrigin(int account, long ownerId) {
+        return summaryPublishOrigin != null && summaryPublishOrigin.account == account
+                && summaryPublishOrigin.ownerId == ownerId;
+    }
+
+    public void clearSummaryPublishOrigin() {
+        cancelSummaryPublishPreparation();
+        summaryPublishSubmitted = false;
+        summaryPublishOrigin = null;
+    }
+
+    private void cancelSummaryPublishPreparation() {
+        summaryPublishGeneration++;
+        if (preparingSummaryPublish && messageEditText != null) messageEditText.setEnabled(true);
+        preparingSummaryPublish = false;
+        SummaryPublishStore.Attempt abandoned = preparedSummaryAttempt;
+        preparedSummaryAttempt = null;
+        preparedSummaryParts = null;
+        abandonSummaryAttempt(currentAccount, abandoned);
+    }
+
+    private static void abandonSummaryAttempt(int account, SummaryPublishStore.Attempt attempt) {
+        if (attempt == null) return;
+        Utilities.globalQueue.postRunnable(() -> {
+            try {
+                SummaryPublishStore.abandonPrepared(account, attempt.ownerId, attempt.id);
+            } catch (RuntimeException ignored) {
+                // A missing/deleted/account-invalid receipt never authorizes another send.
+            }
+        });
     }
 
     @Nullable

@@ -2,14 +2,12 @@
 package org.telegram.ui;
 
 import android.content.Context;
-import android.graphics.Typeface;
 import android.os.Bundle;
 import android.text.SpannableStringBuilder;
 import android.text.Spanned;
 import android.text.TextPaint;
 import android.text.method.LinkMovementMethod;
 import android.text.style.ClickableSpan;
-import android.text.style.StyleSpan;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.LinearLayout;
@@ -29,6 +27,7 @@ import org.telegram.messenger.Utilities;
 import org.telegram.messenger.ai.SummaryHistoryLoader;
 import org.telegram.messenger.ai.SummaryHistoryStore;
 import org.telegram.messenger.ai.SummaryMessage;
+import org.telegram.messenger.ai.SummaryPublishStore;
 import org.telegram.messenger.ai.SummarySourceReference;
 import org.telegram.messenger.ai.SummarySourceVerifier;
 import org.telegram.tgnet.TLRPC;
@@ -38,11 +37,15 @@ import org.telegram.ui.ActionBar.BackDrawable;
 import org.telegram.ui.ActionBar.BaseFragment;
 import org.telegram.ui.ActionBar.Theme;
 import org.telegram.ui.Components.LayoutHelper;
+import org.telegram.ui.Components.SummaryPublishHelper;
+import org.telegram.ui.Components.SummaryPublishStatusText;
+import org.telegram.ui.Components.SummaryTextFormatter;
 
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.Locale;
+import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -50,7 +53,6 @@ import java.util.regex.Pattern;
 public final class SummaryHistoryDetailActivity extends BaseFragment implements NotificationCenter.NotificationCenterDelegate {
     private static final int COPY = 1;
     private static final Pattern REFERENCE = Pattern.compile("\\[m([0-9]+)\\]");
-    private static final Pattern HEADING = Pattern.compile("(?m)^(?:#{1,6}\\s*)?(?:\\*\\*)?【?(话题|结论|待办)】?(?:\\*\\*)?[：:]?\\s*$");
     private final int account;
     private final long ownerId;
     private final String recordId;
@@ -66,6 +68,9 @@ public final class SummaryHistoryDetailActivity extends BaseFragment implements 
     private SummarySourceVerifier verifier;
     private SummarySourceReference previewReference;
     private String transientNotice;
+    private boolean detailsExpanded;
+    private final ArrayList<SummaryPublishStore.Attempt> publishAttempts = new ArrayList<>();
+    private String publishNotice;
 
     public SummaryHistoryDetailActivity(int account, String recordId) {
         if (account < 0 || account >= UserConfig.MAX_ACCOUNT_COUNT || recordId == null || recordId.isEmpty()) {
@@ -139,6 +144,7 @@ public final class SummaryHistoryDetailActivity extends BaseFragment implements 
         operation++;
         closePreview();
         record = null;
+        publishAttempts.clear();
         if (content != null) content.removeAllViews();
         NotificationCenter.getGlobalInstance().removeObserver(this, NotificationCenter.activeAccountChanged);
         getNotificationCenter().removeObserver(this, NotificationCenter.appDidLogout);
@@ -169,6 +175,8 @@ public final class SummaryHistoryDetailActivity extends BaseFragment implements 
         operation++;
         closePreview();
         record = null;
+        publishAttempts.clear();
+        publishNotice = null;
         transientNotice = null;
         showStatus("账号已切换或退出，请从当前账号重新打开总结历史。", false);
     }
@@ -178,15 +186,27 @@ public final class SummaryHistoryDetailActivity extends BaseFragment implements 
         final int request = ++operation;
         closePreview();
         record = null;
+        publishAttempts.clear();
+        publishNotice = null;
         transientNotice = null;
         showStatus("正在读取总结…", false);
         Utilities.globalQueue.postRunnable(() -> {
             if (!sameOwner()) return;
             try {
                 SummaryHistoryStore.Record loaded = SummaryHistoryStore.get(account, ownerId, recordId);
+                List<SummaryPublishStore.Attempt> attempts = new ArrayList<>();
+                String notice = null;
+                if (loaded != null) {
+                    try { attempts = SummaryPublishStore.listForRecord(account, ownerId, recordId); }
+                    catch (RuntimeException failure) { notice = "发送记录暂不可用，原总结仍可查看；请在聊天中核对发送结果。"; }
+                }
+                final List<SummaryPublishStore.Attempt> loadedAttempts = attempts;
+                final String loadedNotice = notice;
                 AndroidUtilities.runOnUIThread(() -> {
                     if (request != operation || !active()) return;
                     record = loaded;
+                    publishAttempts.addAll(loadedAttempts);
+                    publishNotice = loadedNotice;
                     if (loaded == null) showStatus("这条总结已删除或已超过历史保留上限。请返回列表刷新。", false);
                     else showRecord();
                 });
@@ -203,30 +223,62 @@ public final class SummaryHistoryDetailActivity extends BaseFragment implements 
         if (content == null || record == null || !active()) return;
         content.removeAllViews();
         text(content, SummaryHistoryActivity.chatLabel(record), true);
-        text(content, "生成于 " + SummaryHistoryActivity.formatTime(record.generatedAtMillis)
-                + " · " + record.sources.size() + " 条原文", false);
-        text(content, "这是生成当时保存的结果，不代表当前最新消息或模型。原消息可能已修改或删除。"
-                + (record.sourceLinks ? "点击引用后才联网重新核验。" : ""), false);
-        text(content, record.rangeLabel + (record.partial ? " · 部分覆盖" : ""), true);
-        if (!record.coverageNote.isEmpty()) text(content, record.coverageNote, false);
-        if (!record.templateLabel.isEmpty()) text(content, "生成时总结方向：" + record.templateLabel, false);
-        if (!record.customInstructions.isEmpty()) text(content, "生成时填写的要求：" + record.customInstructions, false);
-        text(content, "请求模型：" + (record.model.isEmpty() ? "服务当前模型（未指定名称）" : record.model)
-                + "。此名称不是实际模型版本的核验证明。", false);
+        text(content, record.rangeLabel + " · " + record.sources.size() + " 条文字 · 已保存"
+                + (record.partial ? " · 部分覆盖" : ""), false);
+        if (record.partial && !record.coverageNote.isEmpty()) text(content, record.coverageNote, false);
         if (transientNotice != null) text(content, transientNotice, true);
         TextView summary = text(content, linkSources(record), false);
-        summary.setTextSize(16);
+        summary.setTextSize(17);
         summary.setTextColor(getThemedColor(Theme.key_windowBackgroundWhiteBlackText));
+        summary.setTextIsSelectable(true);
         if (record.sourceLinks) summary.setMovementMethod(LinkMovementMethod.getInstance());
         summary.setLinksClickable(record.sourceLinks);
-        text(content, "本机仅保存摘要和来源校验信息，不保存原消息正文。", false);
+        boolean hasPublishedAttempt = !publishAttempts.isEmpty();
+        action(content, hasPublishedAttempt ? "再次编辑并发回" : "编辑并发回本群", () -> {
+            if (record != null) SummaryPublishHelper.open(this, account, ownerId, record);
+        });
+        if (publishNotice != null) text(content, publishNotice, false);
+        else if (hasPublishedAttempt) {
+            SummaryPublishStore.Attempt latest = publishAttempts.get(0);
+            text(content, SummaryPublishStatusText.label(latest), false);
+            if (latest.status == SummaryPublishStore.Status.FAILED || latest.status == SummaryPublishStore.Status.PARTIAL) {
+                text(content, "请在原群或原话题中重试失败的那条消息；再次编辑发送会创建新消息，已经成功的内容也可能重复。", false);
+            } else {
+                text(content, "再次编辑发送会创建新消息，不会修改或重试已有消息。", false);
+            }
+        }
+        action(content, "复制总结", () -> {
+            transientNotice = AndroidUtilities.addToClipboard(record.summary) ? "总结文本已复制。" : "复制失败，请重试。";
+            showRecord();
+        });
+        action(content, detailsExpanded ? "收起范围和生成详情 ▴" : "查看范围和生成详情 ▾", () -> {
+            detailsExpanded = !detailsExpanded;
+            showRecord();
+        });
+        if (detailsExpanded) {
+            text(content, "生成于 " + SummaryHistoryActivity.formatTime(record.generatedAtMillis), false);
+            text(content, "这是生成当时保存的结果，不代表当前最新消息或模型。原消息可能已修改或删除。"
+                    + (record.sourceLinks ? "点击旧记录中的引用后才联网核验。" : ""), false);
+            if (!record.coverageNote.isEmpty()) text(content, record.coverageNote, false);
+            if (!record.templateLabel.isEmpty()) text(content, "生成时的要求来源：" + record.templateLabel, false);
+            if (!record.customInstructions.isEmpty()) text(content, "生成时填写的要求：\n" + record.customInstructions, false);
+            text(content, "请求模型：" + (record.model.isEmpty() ? "服务当前模型（未指定名称）" : record.model)
+                    + "。此名称不是实际模型版本的核验证明。", false);
+            text(content, "本机只保存总结与来源校验信息，没有保存原消息正文或完整请求输入。", false);
+            if (!publishAttempts.isEmpty()) {
+                text(content, "发送记录", true);
+                text(content, "这里保留提交给原生发送队列时的文字，后续在聊天中编辑或删除消息不修改这份记录。失败请通过聊天中的原消息重试。", false);
+                for (SummaryPublishStore.Attempt attempt : publishAttempts) {
+                    text(content, SummaryHistoryActivity.formatTime(attempt.createdAtMillis) + " · " + SummaryPublishStatusText.label(attempt), false);
+                    text(content, "当时的发送稿：\n" + attempt.editedSummary, false).setTextIsSelectable(true);
+                }
+            }
+        }
     }
 
     private CharSequence linkSources(SummaryHistoryStore.Record snapshot) {
         final int request = operation;
-        SpannableStringBuilder linked = new SpannableStringBuilder(snapshot.summary);
-        Matcher headings = HEADING.matcher(snapshot.summary);
-        while (headings.find()) linked.setSpan(new StyleSpan(Typeface.BOLD), headings.start(), headings.end(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        SpannableStringBuilder linked = SummaryTextFormatter.format(snapshot.summary);
         if (!snapshot.sourceLinks) return linked;
         Matcher references = REFERENCE.matcher(snapshot.summary);
         while (references.find()) {

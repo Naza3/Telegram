@@ -1,0 +1,1 @@
+package org.telegram.messenger;import android.content.Context;public final class ApplicationLoader {public static boolean mainInterfacePaused; public static Context applicationContext=new Context();}

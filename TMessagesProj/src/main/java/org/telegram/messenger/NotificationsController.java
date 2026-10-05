@@ -4248,19 +4248,19 @@ public class NotificationsController extends BaseController implements Notificat
             if (DialogObject.isEncryptedDialog(dialog_id) || allowSummary && pushDialogs.size() > 1 || passcode) {
                 if (passcode) {
                     if (chatId != 0) {
-                        name = LocaleController.getString(R.string.NotificationHiddenChatName);
+                        name = ApplicationLoader.applicationContext.getString(R.string.AppDisplayName);
                     } else {
-                        name = LocaleController.getString(R.string.NotificationHiddenName);
+                        name = ApplicationLoader.applicationContext.getString(R.string.AppDisplayName);
                     }
                 } else {
-                    name = LocaleController.getString(R.string.AppName);
+                    name = ApplicationLoader.applicationContext.getString(R.string.AppDisplayName);
                 }
                 replace = false;
             } else {
                 name = chatName;
             }
             if (lastMessageObject != null && (lastMessageObject.isReactionPush || lastMessageObject.isStoryReactionPush) && !preferences.getBoolean("EnableReactionsPreview", true)) {
-                name = LocaleController.getString(R.string.NotificationHiddenName);
+                name = ApplicationLoader.applicationContext.getString(R.string.AppDisplayName);
             }
 
             String detailText;
@@ -5089,15 +5089,15 @@ public class NotificationsController extends BaseController implements Notificat
             }
             if (lastMessageObject != null && lastMessageObject.isStoryReactionPush && !preferences.getBoolean("EnableReactionsPreview", true)) {
                 canReply = false;
-                name = LocaleController.getString(R.string.NotificationHiddenChatName);
+                name = ApplicationLoader.applicationContext.getString(R.string.AppDisplayName);
                 photoPath = null;
             }
 
             if (waitingForPasscode) {
                 if (DialogObject.isChatDialog(dialogId)) {
-                    name = LocaleController.getString(R.string.NotificationHiddenChatName);
+                    name = ApplicationLoader.applicationContext.getString(R.string.AppDisplayName);
                 } else {
-                    name = LocaleController.getString(R.string.NotificationHiddenName);
+                    name = ApplicationLoader.applicationContext.getString(R.string.AppDisplayName);
                 }
                 photoPath = null;
                 canReply = false;
@@ -5317,13 +5317,13 @@ public class NotificationsController extends BaseController implements Notificat
                             if (DialogObject.isChatDialog(dialogId)) {
                                 if (isChannel) {
                                     if (Build.VERSION.SDK_INT > Build.VERSION_CODES.O_MR1) {
-                                        personName = LocaleController.getString(R.string.NotificationHiddenChatName);
+                                        personName = ApplicationLoader.applicationContext.getString(R.string.AppDisplayName);
                                     }
                                 } else {
                                     personName = LocaleController.getString(R.string.NotificationHiddenChatUserName);
                                 }
                             } else if (Build.VERSION.SDK_INT > Build.VERSION_CODES.O_MR1) {
-                                personName = LocaleController.getString(R.string.NotificationHiddenName);
+                                personName = ApplicationLoader.applicationContext.getString(R.string.AppDisplayName);
                             }
                         }
                     } else {

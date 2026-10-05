@@ -1,0 +1,110 @@
+// Dedicated arm64 AfatRelease; never use the repository's placeholder signing configuration.
+def releaseName = System.getenv('MNN_RELEASE_VERSION_NAME')
+def releaseCodeText = System.getenv('MNN_RELEASE_VERSION_CODE')
+def component = '(?:0|[1-9][0-9]{0,5})'
+if (releaseCodeText == null || !(releaseCodeText ==~ /[1-9][0-9]{0,8}/)
+        || Long.parseLong(releaseCodeText) > 209999999L
+        || releaseName == null || !(releaseName ==~ /${component}\.${component}\.${component}-mnn\.${releaseCodeText}/)) {
+    throw new GradleException('Set matching MNN_RELEASE_VERSION_NAME and MNN_RELEASE_VERSION_CODE release values.')
+}
+def releaseCode = Integer.parseInt(releaseCodeText)
+def apkCode = releaseCode * 10 + 9
+gradle.settingsEvaluated { settings ->
+    if (settings.gradle.parent != null) return // buildSrc and included builds do not own the app version.
+    def source = new Properties()
+    settings.rootDir.toPath().resolve('gradle.properties').toFile().withInputStream { source.load(it) }
+    if (releaseCodeText != source.getProperty('APP_VERSION_CODE')
+            || releaseName != source.getProperty('APP_VERSION_NAME') + '-mnn.' + releaseCodeText) {
+        throw new GradleException('Release version values must match APP_VERSION_NAME and APP_VERSION_CODE in gradle.properties.')
+    }
+}
+def keyPath = System.getenv('ANDROID_SIGNING_KEYSTORE_PATH')
+def keyFile = keyPath == null ? null : new File(keyPath)
+if (keyFile == null || !keyFile.isAbsolute() || !keyFile.isFile() || !keyFile.canRead() || keyFile.length() == 0) {
+    throw new GradleException('Set ANDROID_SIGNING_KEYSTORE_PATH to the original, prepared signing key (absolute path).')
+}
+def signingValues = ['ANDROID_KEYSTORE_PASSWORD', 'ANDROID_KEY_ALIAS', 'ANDROID_KEY_PASSWORD'].collectEntries { name ->
+    def value = System.getenv(name)
+    if (value == null || value.isEmpty()) throw new GradleException('Missing signing setting: ' + name)
+    [(name): value]
+}
+
+gradle.beforeProject { target ->
+    if (!(target.path in [':TMessagesProj', ':TMessagesProj_App'])) return
+    // Set properties before the project's build script generates library BuildConfig fields.
+    target.extensions.extraProperties.set('APP_VERSION_NAME', releaseName)
+    target.extensions.extraProperties.set('APP_VERSION_CODE', releaseCodeText)
+    ['com.android.application', 'com.android.library'].each { pluginId ->
+        target.pluginManager.withPlugin(pluginId) {
+            def components = target.extensions.getByName('androidComponents')
+            if (target.path == ':TMessagesProj_App') {
+                components.beforeVariants(components.selector().all()) { variant ->
+                    variant.enable = variant.name == 'afatRelease'
+                }
+            }
+            components.finalizeDsl { android ->
+                if (target.property('APP_PACKAGE') != 'org.telegram.messenger') {
+                    throw new GradleException('MNN release requires the original APP_PACKAGE; only the release suffix may change.')
+                }
+                android.defaultConfig.ndk.abiFilters.clear()
+                android.defaultConfig.ndk.abiFilters.add('arm64-v8a')
+                android.productFlavors.each { flavor ->
+                    flavor.ndk.abiFilters.clear()
+                    flavor.ndk.abiFilters.add('arm64-v8a')
+                }
+                def release = android.buildTypes.getByName('release')
+                release.jniDebuggable = false
+                if (target.path == ':TMessagesProj') {
+                    release.buildConfigField('String', 'BUILD_VERSION_STRING', '"' + releaseName + '"')
+                } else {
+                    android.defaultConfig.applicationId = 'org.telegram.messenger'
+                    android.defaultConfig.versionName = releaseName
+                    android.defaultConfig.versionCode = releaseCode
+                    release.applicationIdSuffix = '.beta'
+                    release.debuggable = false
+                    release.minifyEnabled = true
+                    release.shrinkResources = true
+                    def signing = android.signingConfigs.maybeCreate('mnnRelease')
+                    signing.storeFile = keyFile
+                    signing.storePassword = signingValues['ANDROID_KEYSTORE_PASSWORD']
+                    signing.keyAlias = signingValues['ANDROID_KEY_ALIAS']
+                    signing.keyPassword = signingValues['ANDROID_KEY_PASSWORD']
+                    release.signingConfig = signing
+                }
+            }
+            if (target.path == ':TMessagesProj_App') {
+                def verify = {
+                    def android = target.extensions.getByName('android')
+                    def release = android.buildTypes.getByName('release')
+                    def variant = android.applicationVariants.find { it.name == 'afatRelease' }
+                    def library = target.project(':TMessagesProj').extensions.getByName('android')
+                    def libraryRelease = library.buildTypes.getByName('release')
+                    if (variant == null || variant.applicationId != 'org.telegram.messenger.beta'
+                            || variant.versionName != releaseName || variant.outputs.any { it.versionCodeOverride != apkCode }
+                            || release.debuggable || release.jniDebuggable || !release.minifyEnabled || !release.shrinkResources
+                            || libraryRelease.jniDebuggable || libraryRelease.buildConfigFields['BUILD_VERSION_STRING'].value != '"' + releaseName + '"'
+                            || android.defaultConfig.ndk.abiFilters != (['arm64-v8a'] as Set)
+                            || android.productFlavors.getByName('afat').ndk.abiFilters != (['arm64-v8a'] as Set)
+                            || library.defaultConfig.ndk.abiFilters != (['arm64-v8a'] as Set)
+                            || release.signingConfig.name != 'mnnRelease'
+                            || release.signingConfig.storeFile.canonicalFile != keyFile.canonicalFile
+                            || release.signingConfig.storePassword != signingValues['ANDROID_KEYSTORE_PASSWORD']
+                            || release.signingConfig.keyAlias != signingValues['ANDROID_KEY_ALIAS']
+                            || release.signingConfig.keyPassword != signingValues['ANDROID_KEY_PASSWORD']) {
+                        throw new GradleException('Effective MNN release configuration does not match the required identity, ABI, signing or optimization settings.')
+                    }
+                }
+                def verification = target.tasks.register('verifyMnnReleaseConfiguration') {
+                    group = 'verification'
+                    description = 'Verify the effective MNN release DSL without compiling or signing an APK.'
+                    doLast {
+                        verify()
+                        logger.lifecycle('MNN AfatRelease configuration verified: org.telegram.messenger.beta, arm64-v8a, ' + releaseName + ', versionCode ' + apkCode + '.')
+                    }
+                }
+                target.tasks.matching { it.name == 'preAfatReleaseBuild' }.configureEach { dependsOn(verification) }
+                gradle.taskGraph.whenReady { verify() }
+            }
+        }
+    }
+}

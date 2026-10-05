@@ -1,0 +1,343 @@
+name: Build and publish MNN release APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Trial build tag, matching gradle.properties (example: mnn-v12.10.6-7113); does not publish'
+        required: true
+        type: string
+  push:
+    tags:
+      - 'mnn-v*'
+    branches:
+      - feature/mnn-group-summary
+    paths:
+      - .github/workflows/mnn-release-apk.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mnn-release-apk-${{ github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref || 'publish' }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Verified Android ARM64 release APK
+    if: >-
+      github.repository == 'Naza3/Telegram' &&
+      (github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/mnn-v')))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    outputs:
+      release_tag: ${{ steps.version.outputs.MNN_RELEASE_TAG }}
+      version_name: ${{ steps.version.outputs.MNN_RELEASE_VERSION_NAME }}
+      source_sha: ${{ steps.source.outputs.sha }}
+      artifact_id: ${{ steps.upload-apk.outputs.artifact-id }}
+    env:
+      MNN_BUILD_DIR: ${{ github.workspace }}/.local-build
+      GRADLE_USER_HOME: ${{ github.workspace }}/.local-build/gradle-user
+      ANDROID_USER_HOME: ${{ github.workspace }}/.local-build/android-user
+      MNN_BUILD_ABI: arm64-v8a
+      MNN_BUILD_WORKERS: '2'
+      CMAKE_BUILD_PARALLEL_LEVEL: '2'
+      TLRPC_CLASSES_JAR: ${{ github.workspace }}/TMessagesProj/build/intermediates/compile_library_classes_jar/release/bundleLibCompileToJarRelease/classes.jar
+
+    steps:
+      - name: Make room for native sources and build outputs
+        shell: bash
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          df -h "$GITHUB_WORKSPACE"
+          free -h
+          printf 'ANDROID_SIGNING_KEYSTORE_PATH=%s\n' "$RUNNER_TEMP/mnn-release-signing/current.keystore" >> "$GITHUB_ENV"
+
+      - name: Check out source, all release tags and pinned submodules
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Validate release tag and source versions
+        id: version
+        shell: bash
+        env:
+          MNN_RELEASE_TAG_INPUT: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || github.ref_name }}
+        run: |
+          git tag --list 'mnn-v*' > "$RUNNER_TEMP/mnn-release-tags.txt"
+          python3 tools/check-release-tag.py \
+            --tags-file "$RUNNER_TEMP/mnn-release-tags.txt" \
+            --github-env "$GITHUB_ENV" --github-output "$GITHUB_OUTPUT"
+
+      - name: Record and verify the exact source commit
+        id: source
+        shell: bash
+        run: |
+          source_sha="$(git rev-parse HEAD)"
+          if [[ "$GITHUB_EVENT_NAME" == 'push' ]]; then
+            tag_sha="$(git rev-parse "refs/tags/$MNN_RELEASE_TAG^{commit}")"
+            [[ "$source_sha" == "$tag_sha" ]]
+          fi
+          printf 'sha=%s\n' "$source_sha" >> "$GITHUB_OUTPUT"
+          printf 'MNN_RELEASE_SOURCE_SHA=%s\n' "$source_sha" >> "$GITHUB_ENV"
+
+      - name: Validate Telegram API secrets
+        shell: bash
+        env:
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+        run: python3 tools/check-telegram-api.py
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Test version, signing and API configuration with synthetic inputs
+        shell: bash
+        run: python3 -B -m unittest discover -s tests/build-config -p 'test_*.py'
+
+      - name: Run AI summary regression tests and fixture validation
+        timeout-minutes: 10
+        shell: bash
+        env:
+          AI_SUMMARY_TOOLS_DIR: ${{ env.MNN_BUILD_DIR }}/ai-summary-tools
+        run: |
+          bash tests/ai-summary/bootstrap-tools.sh
+          bash tests/ai-summary/run.sh
+          bash tests/ai-summary-controller/run.sh
+          bash tests/ai-summary-foreground/run.sh
+          python3 tests/ai-summary/fixtures/validate_fixtures.py
+
+      - name: Install the Android toolchain
+        shell: bash
+        run: |
+          sdk_root="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          sdkmanager="$sdk_root/cmdline-tools/latest/bin/sdkmanager"
+          test -x "$sdkmanager"
+          mkdir -p "$ANDROID_USER_HOME"
+          printf 'ANDROID_HOME=%s\nANDROID_SDK_ROOT=%s\n' "$sdk_root" "$sdk_root" >> "$GITHUB_ENV"
+          set +e
+          yes | "$sdkmanager" --sdk_root="$sdk_root" --licenses > /dev/null
+          license_status=${PIPESTATUS[1]}
+          set -e
+          if [[ "$license_status" -ne 0 ]]; then exit "$license_status"; fi
+          "$sdkmanager" --sdk_root="$sdk_root" \
+            'platforms;android-36' 'build-tools;36.0.0' \
+            'ndk;27.2.12479018' 'cmake;3.22.1'
+          "$sdkmanager" --sdk_root="$sdk_root" --list_installed
+
+      - name: Cache Gradle downloads
+        uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: |
+            ${{ env.GRADLE_USER_HOME }}/caches/modules-2
+            ${{ env.GRADLE_USER_HOME }}/wrapper/dists
+          key: mnn-gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle', '**/*.gradle.kts', 'gradle.properties', 'gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            mnn-gradle-${{ runner.os }}-
+
+      - name: Restore and verify the original signing key from Secrets
+        shell: bash
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          python3 tools/prepare-android-signing.py --output "$ANDROID_SIGNING_KEYSTORE_PATH" \
+            --expected-sha256 c8715ba0c50510b9c1cc4d52b0fd2b0aed82dd55675f89c4f48d68978b7df313
+
+      - name: Build the ARM64 AfatRelease APK
+        shell: bash
+        env:
+          TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          bash tools/build-mnn-release.sh \
+            '-Dorg.gradle.jvmargs=-Xmx6g -XX:MaxMetaspaceSize=1g -Dfile.encoding=UTF-8' \
+            -Dorg.gradle.parallel=false --stacktrace
+
+      - name: Verify native Telegram publish entities
+        run: bash tests/ai-summary/run-publish-entities.sh
+
+      - name: Verify group filtering and local deleted-message records
+        env:
+          AI_SUMMARY_TOOLS_DIR: ${{ env.MNN_BUILD_DIR }}/ai-summary-tools
+        run: |
+          bash tests/group-messages/run-filter.sh
+          bash tests/group-messages/run-settings.sh
+          bash tests/group-messages-store/run.sh
+          bash tests/group-messages/run-revoked.sh
+          bash tests/group-messages/run-revoked-boundary.sh
+
+      - name: Verify signature, manifest, ARM64 and 16 KiB alignment
+        shell: bash
+        run: |
+          apk='TMessagesProj_App/build/outputs/apk/afat/release/app.apk'
+          build_tools="$ANDROID_HOME/build-tools/36.0.0"
+          test -s "$apk"
+          "$build_tools/apksigner" verify --verbose --print-certs "$apk" > "$RUNNER_TEMP/mnn-release-signature.txt"
+          cat "$RUNNER_TEMP/mnn-release-signature.txt"
+          "$build_tools/zipalign" -c -P 16 4 "$apk"
+          "$build_tools/aapt" dump badging "$apk" > "$RUNNER_TEMP/mnn-release-badging.txt"
+          mkdir -p artifacts/release
+          python3 - "$apk" "$RUNNER_TEMP/mnn-release-signature.txt" "$RUNNER_TEMP/mnn-release-badging.txt" <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import shutil
+          import sys
+          import zipfile
+
+          apk, signature_path, badging_path = map(Path, sys.argv[1:])
+          expected = 'c8715ba0c50510b9c1cc4d52b0fd2b0aed82dd55675f89c4f48d68978b7df313'
+          signature = signature_path.read_text()
+          signers = re.findall(r'^Signer #\d+ certificate SHA-256 digest: ([0-9a-fA-F]+)$', signature, re.MULTILINE)
+          if [value.lower() for value in signers] != [expected]:
+              raise SystemExit('Release APK does not use the original Telegram signing certificate')
+          for scheme in ('v1', 'v2'):
+              if not re.search(r'^Verified using ' + scheme + r' scheme .*: true$', signature, re.MULTILINE):
+                  raise SystemExit('Release APK is missing a required verified signing scheme')
+          badging = badging_path.read_text()
+          package = re.search(r"^package: name='([^']+)' versionCode='([0-9]+)' versionName='([^']+)'", badging, re.MULTILINE)
+          if not package or package.groups() != ('org.telegram.messenger.beta', os.environ['MNN_RELEASE_APK_VERSION_CODE'], os.environ['MNN_RELEASE_VERSION_NAME']):
+              raise SystemExit('Release APK package or version differs from the validated tag')
+          if re.search(r'^application-debuggable(?:\s|$)', badging, re.MULTILINE):
+              raise SystemExit('Release APK must not be debuggable')
+          with zipfile.ZipFile(apk) as archive:
+              abis = {name.split('/')[1] for name in archive.namelist() if name.startswith('lib/') and name.endswith('.so')}
+          if abis != {'arm64-v8a'}:
+              raise SystemExit('Release APK must contain only ARM64 native libraries')
+          name = 'Telegram-MNN-' + os.environ['MNN_RELEASE_TAG'] + '-arm64-release.apk'
+          target = Path('artifacts/release') / name
+          shutil.copyfile(apk, target)
+          with target.open('rb') as stream:
+              digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+          target.with_suffix('.apk.sha256').write_text(digest + '  ' + name + '\n')
+          metadata = {
+              'tag': os.environ['MNN_RELEASE_TAG'], 'source_sha': os.environ['MNN_RELEASE_SOURCE_SHA'],
+              'package': package.group(1), 'version_name': package.group(3),
+              'version_code': int(package.group(2)), 'base_version_code': int(os.environ['MNN_RELEASE_VERSION_CODE']),
+              'debuggable': False, 'abis': sorted(abis), 'certificate_sha256': expected,
+              'apk_sha256': digest, 'apk_bytes': target.stat().st_size,
+              'signature_schemes_verified': ['v1', 'v2'], 'zipalign_page_kib': 16,
+              'workflow_run_id': os.environ['GITHUB_RUN_ID'], 'workflow_run_attempt': os.environ['GITHUB_RUN_ATTEMPT'],
+          }
+          Path('artifacts/release/release-metadata.json').write_text(json.dumps(metadata, indent=2, sort_keys=True) + '\n')
+          print(json.dumps(metadata, indent=2, sort_keys=True))
+          PY
+
+      - name: Upload verified release APK, checksum and public metadata
+        id: upload-apk
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: Telegram-MNN-release-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            artifacts/release/*.apk
+            artifacts/release/*.apk.sha256
+            artifacts/release/release-metadata.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+      - name: Link the verified build in the summary
+        env:
+          APK_ARTIFACT_URL: ${{ steps.upload-apk.outputs.artifact-url }}
+        shell: bash
+        run: |
+          {
+            echo '### Verified ARM64 release APK'
+            printf 'Version: %s (Android versionCode %s).\n' "$MNN_RELEASE_VERSION_NAME" "$MNN_RELEASE_APK_VERSION_CODE"
+            printf 'Source: `%s`. Package: `org.telegram.messenger.beta`. Debuggable: false.\n' "$MNN_RELEASE_SOURCE_SHA"
+            printf '\n[Download the APK, SHA-256 and public build metadata](%s)\n' "$APK_ARTIFACT_URL"
+            if [[ "$GITHUB_EVENT_NAME" == 'workflow_dispatch' ]]; then
+              echo 'Manual trial only: no tag or GitHub Release was created.'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove the temporary signing key
+        if: always()
+        shell: bash
+        run: rm -f -- "${ANDROID_SIGNING_KEYSTORE_PATH:-$RUNNER_TEMP/mnn-release-signing/current.keystore}"
+
+      - name: Report remaining disk and memory
+        if: always()
+        shell: bash
+        run: |
+          df -h "$GITHUB_WORKSPACE"
+          free -h
+
+  publish:
+    name: Publish a new tagged GitHub Release
+    needs: build
+    if: >-
+      github.repository == 'Naza3/Telegram' && github.event_name == 'push' &&
+      startsWith(github.ref, 'refs/tags/mnn-v') && needs.build.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    env:
+      GH_REPO: Naza3/Telegram
+      MNN_RELEASE_TAG: ${{ needs.build.outputs.release_tag }}
+      MNN_RELEASE_VERSION_NAME: ${{ needs.build.outputs.version_name }}
+      MNN_RELEASE_SOURCE_SHA: ${{ needs.build.outputs.source_sha }}
+    steps:
+      - name: Download this run's verified build artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact_id }}
+          path: release-assets
+          merge-multiple: true
+
+      - name: Recheck downloaded checksum and refuse an existing Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd release-assets
+          sha256sum --check --strict ./*.apk.sha256
+          gh api --paginate "repos/$GH_REPO/releases?per_page=100" --jq '.[].tag_name' > "$RUNNER_TEMP/mnn-existing-releases.txt"
+          git ls-remote "https://github.com/$GH_REPO.git" "refs/tags/$MNN_RELEASE_TAG" "refs/tags/$MNN_RELEASE_TAG^{}" > "$RUNNER_TEMP/mnn-remote-tag.txt"
+          python3 - "$RUNNER_TEMP/mnn-existing-releases.txt" "$RUNNER_TEMP/mnn-remote-tag.txt" <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import sys
+          tag = os.environ['MNN_RELEASE_TAG']
+          if tag in Path(sys.argv[1]).read_text().splitlines():
+              raise SystemExit('A Release already exists for this tag; nothing will be overwritten')
+          refs = dict(line.split()[::-1] for line in Path(sys.argv[2]).read_text().splitlines())
+          source = refs.get('refs/tags/' + tag + '^{}', refs.get('refs/tags/' + tag))
+          metadata = json.loads(Path('release-metadata.json').read_text())
+          if source != os.environ['MNN_RELEASE_SOURCE_SHA'] or metadata['source_sha'] != source or metadata['tag'] != tag:
+              raise SystemExit('The remote tag or downloaded metadata no longer matches the built source')
+          PY
+
+      - name: Create a new Release with verified assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes="$RUNNER_TEMP/mnn-release-notes.md"
+          {
+            printf 'Android ARM64 release build `%s`.\n\n' "$MNN_RELEASE_VERSION_NAME"
+            printf 'Source commit: `%s`.\n\n' "$MNN_RELEASE_SOURCE_SHA"
+            echo 'Package: `org.telegram.messenger.beta`; debuggable: false.'
+            echo 'Signed with the existing Telegram MNN certificate; no replacement key is generated.'
+            echo 'The APK, SHA-256 checksum and public build metadata are attached.'
+          } > "$notes"
+          # No --clobber, release edit or upload-to-existing path. A conflict fails the job.
+          gh release create "$MNN_RELEASE_TAG" --repo "$GH_REPO" --verify-tag \
+            --target "$MNN_RELEASE_SOURCE_SHA" --title "Telegram MNN $MNN_RELEASE_VERSION_NAME" \
+            --notes-file "$notes" release-assets/*.apk release-assets/*.apk.sha256 release-assets/release-metadata.json

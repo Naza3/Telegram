@@ -45,7 +45,7 @@ Windows PowerShell：
 
 仅添加或修改 Secrets 不会触发构建。首次需要对包含本次迁移改动的提交启动构建；重跑旧提交仍会执行旧的缓存签名流程。正式切换成功以新工作流通过并核对 APK 证书为准。
 
-手动触发可使用已登录的 GitHub CLI：`gh workflow run mnn-debug-apk.yml --repo Naza3/Telegram --ref feature/mnn-group-summary`，运行结果在 [Build MNN debug APK](https://github.com/Naza3/Telegram/actions/workflows/mnn-debug-apk.yml) 页面查看。推送到该分支也会触发构建，带 `[skip ci]` 的提交除外。当前仍构建 `AfatDebug`，尚未配置 Release 或 tag 触发发布。
+手动触发 Debug 构建可使用已登录的 GitHub CLI：`gh workflow run mnn-debug-apk.yml --repo Naza3/Telegram --ref feature/mnn-group-summary`，运行结果在 [Build MNN debug APK](https://github.com/Naza3/Telegram/actions/workflows/mnn-debug-apk.yml) 页面查看。推送到该分支也会触发构建，带 `[skip ci]` 的提交除外。另已配置沿用相同 Secrets 的 `AfatRelease` 工作流，支持手动试构建与 `mnn-v*` 标签触发发布，详见 [Android Release 构建与发布](android-release.zh-CN.md)。
 
 ## 验证结果
 

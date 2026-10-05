@@ -6,7 +6,7 @@
 - `workflow_dispatch`：使用输入的 `release_tag` 试构建，只上传 Actions artifact，不创建标签或 GitHub Release。
 - 功能分支只修改此工作流时可产生注册运行；构建 job 明确排除分支 push。
 
-应用显示名称为“拾页”，图标见[品牌资源说明](branding/shiye/README.md)。工作流核对 APK 内各语言的显示名称，不覆盖源码品牌资源。已完成一次手动 Release 试构建，尚未创建正式发布标签或 GitHub Release。
+应用显示名称为“拾页”，图标见[品牌资源说明](branding/shiye/README.md)。工作流核对 APK 内各语言的显示名称，不覆盖源码品牌资源。已完成手动 Release 试构建，尚未创建正式发布标签或 GitHub Release。
 
 ## 版本规则
 
@@ -48,6 +48,7 @@ APP_VERSION_CODE=7114
 
 | 检查 | 必须值 |
 | --- | --- |
+| 应用显示名 | `拾页`（核对 APK 中各语言） |
 | 包名 | `org.telegram.messenger.beta` |
 | 证书 SHA-256 | `c8715ba0c50510b9c1cc4d52b0fd2b0aed82dd55675f89c4f48d68978b7df313` |
 | 构建变体 | `AfatRelease` |
@@ -106,16 +107,19 @@ python3 -B -m unittest discover -s tests/build-config -p test_release_tag.py -v
 
 本地及云端均通过 35 项版本、签名和 API 配置测试，其中 6 个标签校验测试方法覆盖正常版本、Afat 上界、无效/注入输入、源码不匹配、旧标签回退/复用和 Actions 输出安全。工作流已通过 `actionlint` 静态检查。
 
-2026-10-05 的 [手动试构建 37252179371](https://github.com/Naza3/Telegram/actions/runs/37252179371) 已成功，发布 job 按预期跳过：
+2026-10-05 的 [拾页 Release 试构建 37255141670](https://github.com/Naza3/Telegram/actions/runs/37255141670) 已成功，发布 job 按预期跳过：
 
 | 项目 | 验证结果 |
 | --- | --- |
-| 源码 commit | `43710c8da0684c3920562cfd644e763b87c889b2` |
-| APK | `12.10.6-mnn.7113`，`71139`，36,626,144 字节 |
-| APK SHA-256 | `6e6d6e3dbdd71d6ddc79c3a39e93d8ca1631d4e2e41afad659492b7721c0889c` |
-| R8 / 资源压缩 | 实际执行 `minifyAfatReleaseWithR8` / `optimizeAfatReleaseResources` 并成功 |
+| 源码 commit | `d72139efc6a2026e82a179f79f2766672dae3cb6` |
+| 显示名称 | `拾页`，已核对最终 APK 的全部应用标签 |
+| APK | `12.10.6-mnn.7114`，`71149`，36,800,568 字节 |
+| APK SHA-256 | `7ac14d09ef1b74ce50a996b47af41b6d9513105d51ad33c051a96c6c15f5098a` |
+| R8 / 资源压缩 | 实际执行 `minifyAfatReleaseWithR8` / `optimizeAfatReleaseResources` 并成功；Gradle 耗时 21 分 54 秒 |
 | APK 验收 | 上表中的原证书、v1/v2、包名、版本、非调试、ARM64 和 16 KiB ZIP 对齐全部通过 |
 | 功能回归 | AI 核心、controller、后台服务、fixtures、真实 TL 序列化及群消息测试全部通过 |
-| 下载 | [APK、校验和与公开构建信息](https://github.com/Naza3/Telegram/actions/runs/37252179371/artifacts/11321508082)，artifact 于 2026-10-19 01:58 UTC 过期 |
+| 下载 | [拾页 APK、校验和与公开构建信息](https://github.com/Naza3/Telegram/actions/runs/37255141670/artifacts/11322459304)，artifact 于北京时间 2026-10-19 10:48 过期 |
+
+首次未改外观的 [7113 构建](https://github.com/Naza3/Telegram/actions/runs/37252179371) 也已通过，用于验证原签名和 Release 工作流；下载安装新外观应选择上面的 7114 构建。
 
 手机上的覆盖安装、交互和后台行为仍需实际设备验证。手动试构建不等于已验证 tag 推送后的发布 job；正式发布路径目前完成的是静态检查与版本规则测试。

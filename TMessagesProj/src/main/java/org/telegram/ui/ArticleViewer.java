@@ -5510,6 +5510,7 @@ public class ArticleViewer extends IArticleViewer implements NotificationCenter.
     }
 
     private boolean open(final MessageObject messageObject, TLRPC.WebPage webpage, String url, String webUrl, Browser.Progress progress) {
+        if (!org.telegram.messenger.NotesGate.isUnlocked()) return false;
         if (parentActivity == null || sheet == null && isVisible && !collapsed) {
             return false;
         }
@@ -15679,6 +15680,7 @@ public class ArticleViewer extends IArticleViewer implements NotificationCenter.
         }
 
         public void attachInternal(BaseFragment fragment) {
+            if (!org.telegram.messenger.NotesGate.isUnlocked()) return;
             this.released = false;
             this.fragment = fragment;
             this.resourcesProvider = fragment.getResourceProvider();
@@ -15726,6 +15728,7 @@ public class ArticleViewer extends IArticleViewer implements NotificationCenter.
         }
 
         public void show() {
+            if (!org.telegram.messenger.NotesGate.isUnlocked()) return;
             if (dismissing) return;
             attachInternal(fragment);
             animateOpen(true, true, null);

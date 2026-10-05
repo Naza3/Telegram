@@ -112,6 +112,7 @@ public class LiveStoryPipOverlay implements NotificationCenter.NotificationCente
     private View consumingChild;
     private boolean isShowingControls;
     private ValueAnimator scaleAnimator;
+    private AnimatorSet dismissAnimator;
 
     private int pipWidth, pipHeight;
     private PipSource pipSource;
@@ -189,8 +190,27 @@ public class LiveStoryPipOverlay implements NotificationCenter.NotificationCente
         instance.dismissInternal(destroyPlayer);
     }
 
+    /** Hide and remove the separate video window without waiting for its exit animation. */
+    public static void dismissForNotesLock() {
+        if (instance.contentView != null) {
+            instance.contentView.setVisibility(View.INVISIBLE);
+            instance.contentView.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
+        }
+        instance.dismissInternal(true, true);
+    }
+
     private void dismissInternal(boolean destroyPlayer) {
+        dismissInternal(destroyPlayer, false);
+    }
+
+    private void dismissInternal(boolean destroyPlayer, boolean immediate) {
         if (!isVisible) {
+            if (immediate && dismissAnimator != null) {
+                dismissAnimator.removeAllListeners();
+                dismissAnimator.cancel();
+                dismissAnimator = null;
+                finishDismiss(destroyPlayer);
+            }
             return;
         }
         isVisible = false;
@@ -207,7 +227,18 @@ public class LiveStoryPipOverlay implements NotificationCenter.NotificationCente
             postedDismissControls = false;
         }
 
-        AnimatorSet set = new AnimatorSet();
+        if (pipXSpring != null) pipXSpring.cancel();
+        if (pipYSpring != null) pipYSpring.cancel();
+        if (pipSource != null) {
+            pipSource.destroy();
+            pipSource = null;
+        }
+        if (immediate) {
+            finishDismiss(destroyPlayer);
+            return;
+        }
+
+        AnimatorSet set = dismissAnimator = new AnimatorSet();
         set.setDuration(250);
         set.setInterpolator(CubicBezierInterpolator.DEFAULT);
         set.playTogether(
@@ -218,28 +249,30 @@ public class LiveStoryPipOverlay implements NotificationCenter.NotificationCente
         set.addListener(new AnimatorListenerAdapter() {
             @Override
             public void onAnimationEnd(Animator animation) {
-                windowManager.removeViewImmediate(contentView);
-
-                textureView.release();
-                if (destroyPlayer && livePlayer != null && livePlayer != LivePlayer.recording) {
-                    livePlayer.destroy();
-                }
-                livePlayer = null;
-
-                placeholderShown = true;
-                firstFrameRendered = false;
-                consumingChild = null;
-                isScrolling = false;
+                dismissAnimator = null;
+                finishDismiss(destroyPlayer);
             }
         });
         set.start();
-        if (pipSource != null) {
-            pipSource.destroy();
-            pipSource = null;
+    }
+
+    private void finishDismiss(boolean destroyPlayer) {
+        if (contentView != null && contentView.getParent() != null) {
+            windowManager.removeViewImmediate(contentView);
         }
+        if (textureView != null) textureView.release();
+        if (destroyPlayer && livePlayer != null && livePlayer != LivePlayer.recording) {
+            livePlayer.destroy();
+        }
+        livePlayer = null;
+        placeholderShown = true;
+        firstFrameRendered = false;
+        consumingChild = null;
+        isScrolling = false;
     }
 
     public static void show(Activity activity, LivePlayer livePlayer) {
+        if (!org.telegram.messenger.NotesGate.isUnlocked()) return;
         instance.showInternal(activity, livePlayer);
     }
 
@@ -763,7 +796,13 @@ public class LiveStoryPipOverlay implements NotificationCenter.NotificationCente
     private boolean windowViewSkipRender;
 
     @Override
+    public boolean pipIsAvailable() {
+        return org.telegram.messenger.NotesGate.isUnlocked() && isVisible;
+    }
+
+    @Override
     public Bitmap pipCreatePrimaryWindowViewBitmap() {
+        if (!org.telegram.messenger.NotesGate.isUnlocked()) return null;
         if (textureView == null || !textureView.isAvailable()) {
             return null;
         }
@@ -793,6 +832,7 @@ public class LiveStoryPipOverlay implements NotificationCenter.NotificationCente
 
     @Override
     public Bitmap pipCreatePictureInPictureViewBitmap() {
+        if (!org.telegram.messenger.NotesGate.isUnlocked()) return null;
         if (pipTextureView == null || !pipTextureView.isAvailable()) {
             return null;
         }
@@ -802,6 +842,7 @@ public class LiveStoryPipOverlay implements NotificationCenter.NotificationCente
 
     @Override
     public void pipShowPrimaryWindowView(Runnable firstFrameCallback) {
+        if (!org.telegram.messenger.NotesGate.isUnlocked()) return;
         this.firstFrameCallback = firstFrameCallback;
 
         if (pipSource != null && pipSource.params.isValid()) {
@@ -820,4 +861,3 @@ public class LiveStoryPipOverlay implements NotificationCenter.NotificationCente
         bindTextureView(true);
     }
 }
-

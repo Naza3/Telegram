@@ -108,6 +108,7 @@ public class RTMPStreamPipOverlay implements NotificationCenter.NotificationCent
     private View consumingChild;
     private boolean isShowingControls;
     private ValueAnimator scaleAnimator;
+    private AnimatorSet dismissAnimator;
 
     private int pipWidth, pipHeight;
     private PipSource pipSource;
@@ -175,8 +176,27 @@ public class RTMPStreamPipOverlay implements NotificationCenter.NotificationCent
         instance.dismissInternal();
     }
 
+    /** Remove the window before another application or the lock screen can become visible. */
+    public static void dismissForNotesLock() {
+        if (instance.contentView != null) {
+            instance.contentView.setVisibility(View.INVISIBLE);
+            instance.contentView.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
+        }
+        instance.dismissInternal(true);
+    }
+
     private void dismissInternal() {
+        dismissInternal(false);
+    }
+
+    private void dismissInternal(boolean immediate) {
         if (!isVisible) {
+            if (immediate && dismissAnimator != null) {
+                dismissAnimator.removeAllListeners();
+                dismissAnimator.cancel();
+                dismissAnimator = null;
+                finishDismiss();
+            }
             return;
         }
         isVisible = false;
@@ -195,7 +215,18 @@ public class RTMPStreamPipOverlay implements NotificationCenter.NotificationCent
             postedDismissControls = false;
         }
 
-        AnimatorSet set = new AnimatorSet();
+        if (pipXSpring != null) pipXSpring.cancel();
+        if (pipYSpring != null) pipYSpring.cancel();
+        if (pipSource != null) {
+            pipSource.destroy();
+            pipSource = null;
+        }
+        if (immediate) {
+            finishDismiss();
+            return;
+        }
+
+        AnimatorSet set = dismissAnimator = new AnimatorSet();
         set.setDuration(250);
         set.setInterpolator(CubicBezierInterpolator.DEFAULT);
         set.playTogether(
@@ -206,25 +237,27 @@ public class RTMPStreamPipOverlay implements NotificationCenter.NotificationCent
         set.addListener(new AnimatorListenerAdapter() {
             @Override
             public void onAnimationEnd(Animator animation) {
-                windowManager.removeViewImmediate(contentView);
-
-                textureView.renderer.release();
-
-                boundParticipant = null;
-                placeholderShown = true;
-                firstFrameRendered = false;
-                consumingChild = null;
-                isScrolling = false;
+                dismissAnimator = null;
+                finishDismiss();
             }
         });
         set.start();
-        if (pipSource != null) {
-            pipSource.destroy();
-            pipSource = null;
+    }
+
+    private void finishDismiss() {
+        if (contentView != null && contentView.getParent() != null) {
+            windowManager.removeViewImmediate(contentView);
         }
+        if (textureView != null) textureView.renderer.release();
+        boundParticipant = null;
+        placeholderShown = true;
+        firstFrameRendered = false;
+        consumingChild = null;
+        isScrolling = false;
     }
 
     public static void show(Activity activity) {
+        if (!org.telegram.messenger.NotesGate.isUnlocked()) return;
         instance.showInternal(activity);
     }
 
@@ -778,7 +811,13 @@ public class RTMPStreamPipOverlay implements NotificationCenter.NotificationCent
     private boolean windowViewSkipRender;
 
     @Override
+    public boolean pipIsAvailable() {
+        return org.telegram.messenger.NotesGate.isUnlocked() && isVisible;
+    }
+
+    @Override
     public Bitmap pipCreatePrimaryWindowViewBitmap() {
+        if (!org.telegram.messenger.NotesGate.isUnlocked()) return null;
         if (textureView == null || !textureView.renderer.isAvailable()) {
             return null;
         }
@@ -830,6 +869,7 @@ public class RTMPStreamPipOverlay implements NotificationCenter.NotificationCent
 
     @Override
     public Bitmap pipCreatePictureInPictureViewBitmap() {
+        if (!org.telegram.messenger.NotesGate.isUnlocked()) return null;
         if (pipTextureView == null || !pipTextureView.renderer.isAvailable()) {
             return null;
         }
@@ -839,6 +879,7 @@ public class RTMPStreamPipOverlay implements NotificationCenter.NotificationCent
 
     @Override
     public void pipShowPrimaryWindowView(Runnable firstFrameCallback) {
+        if (!org.telegram.messenger.NotesGate.isUnlocked()) return;
         this.firstFrameCallback = firstFrameCallback;
 
         if (pipSource != null && pipSource.params.isValid()) {
@@ -857,4 +898,3 @@ public class RTMPStreamPipOverlay implements NotificationCenter.NotificationCent
         bindTextureView(true);
     }
 }
-

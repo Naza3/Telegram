@@ -11,6 +11,8 @@ package org.telegram.ui;
 import android.content.Intent;
 import android.os.Bundle;
 import android.os.SystemClock;
+import android.view.KeyEvent;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
@@ -24,6 +26,7 @@ import org.telegram.messenger.ApplicationLoader;
 import org.telegram.messenger.BuildVars;
 import org.telegram.messenger.FileLog;
 import org.telegram.messenger.NotificationCenter;
+import org.telegram.messenger.NotesGate;
 import org.telegram.messenger.R;
 import org.telegram.messenger.SharedConfig;
 import org.telegram.messenger.UserConfig;
@@ -43,6 +46,9 @@ public class BubbleActivity extends BasePermissionsActivity implements INavigati
     public static BubbleActivity instance;
 
     private boolean finished;
+    private boolean notesGateInitialized;
+    private boolean notesGatePasscodeAccepted;
+    private final ArrayList<Runnable> notesGatePendingResults = new ArrayList<>();
     private final ArrayList<BaseFragment> mainFragmentsStack = new ArrayList<>();
 
     private PasscodeView passcodeView;
@@ -74,6 +80,9 @@ public class BubbleActivity extends BasePermissionsActivity implements INavigati
         }
 
         super.onCreate(savedInstanceState);
+        if (NotesGate.guardActivity(this, savedInstanceState)) {
+            return;
+        }
 
         if (!SharedConfig.passcodeHash.isEmpty() && SharedConfig.appLocked) {
             SharedConfig.lastPauseTime = (int) (SystemClock.elapsedRealtime() / 1000);
@@ -106,14 +115,42 @@ public class BubbleActivity extends BasePermissionsActivity implements INavigati
 
         actionBarLayout.removeAllFragments();
 
+        notesGateInitialized = true;
         handleIntent(getIntent(), false, savedInstanceState != null, false, UserConfig.selectedAccount, 0);
         instance = this;
     }
 
+    private boolean canAccessSensitiveUi() {
+        return notesGateInitialized && !isFinishing() && !isDestroyed() && NotesGate.isUnlocked();
+    }
+
+    private boolean isTelegramPasscodePending() {
+        return SharedConfig.isWaitingForPasscodeEnter
+                || !SharedConfig.passcodeHash.isEmpty() && SharedConfig.appLocked
+                || passcodeView != null && passcodeView.getVisibility() == View.VISIBLE && !notesGatePasscodeAccepted;
+    }
+
+    private void drainNotesGateResults() {
+        while (canAccessSensitiveUi() && !isTelegramPasscodePending() && !notesGatePendingResults.isEmpty()) {
+            notesGatePendingResults.remove(0).run();
+        }
+    }
+
+    @Override
+    public boolean dispatchTouchEvent(MotionEvent event) {
+        return !canAccessSensitiveUi() || super.dispatchTouchEvent(event);
+    }
+
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        return !canAccessSensitiveUi() || super.dispatchKeyEvent(event);
+    }
+
     private void showPasscodeActivity() {
-        if (passcodeView == null) {
+        if (!canAccessSensitiveUi() || passcodeView == null) {
             return;
         }
+        notesGatePasscodeAccepted = false;
         SharedConfig.appLocked = true;
         if (SecretMediaViewer.hasInstance() && SecretMediaViewer.getInstance().isVisible()) {
             SecretMediaViewer.getInstance().closePhoto(false, false);
@@ -125,7 +162,12 @@ public class BubbleActivity extends BasePermissionsActivity implements INavigati
         passcodeView.onShow(true, false);
         SharedConfig.isWaitingForPasscodeEnter = true;
         passcodeView.setDelegate(view -> {
+            if (!canAccessSensitiveUi()) {
+                return;
+            }
             SharedConfig.isWaitingForPasscodeEnter = false;
+            // The legitimate success delegate runs before the passcode exit animation ends.
+            notesGatePasscodeAccepted = true;
             if (passcodeSaveIntent != null) {
                 handleIntent(passcodeSaveIntent, passcodeSaveIntentIsNew, passcodeSaveIntentIsRestore, true, passcodeSaveIntentAccount, passcodeSaveIntentState);
                 passcodeSaveIntent = null;
@@ -133,10 +175,14 @@ public class BubbleActivity extends BasePermissionsActivity implements INavigati
             actionBarLayout.showLastFragment();
 
             NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.passcodeDismissed, view);
+            drainNotesGateResults();
         });
     }
 
     private boolean handleIntent(final Intent intent, final boolean isNew, final boolean restore, final boolean fromPassword, final int intentAccount, int state) {
+        if (!canAccessSensitiveUi() || intent == null) {
+            return false;
+        }
         if (!fromPassword && (AndroidUtilities.needShowPasscode(true) || SharedConfig.isWaitingForPasscodeEnter)) {
             showPasscodeActivity();
             passcodeSaveIntent = intent;
@@ -185,6 +231,10 @@ public class BubbleActivity extends BasePermissionsActivity implements INavigati
     @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
+        setIntent(intent);
+        if (!notesGateInitialized || isFinishing() || NotesGate.deferIntent(this, intent)) {
+            return;
+        }
         handleIntent(intent, true, false, false, UserConfig.selectedAccount, 0);
     }
 
@@ -197,42 +247,64 @@ public class BubbleActivity extends BasePermissionsActivity implements INavigati
             lockRunnable = null;
         }
         finished = true;
-        instance = null;
+        if (instance == this) {
+            instance = null;
+        }
     }
 
     public void presentFragment(BaseFragment fragment) {
+        if (!canAccessSensitiveUi()) {
+            return;
+        }
         actionBarLayout.presentFragment(fragment);
     }
 
     public boolean presentFragment(final BaseFragment fragment, final boolean removeLast, boolean forceWithoutAnimation) {
-        return actionBarLayout.presentFragment(fragment, removeLast, forceWithoutAnimation, true, false);
+        return canAccessSensitiveUi() && actionBarLayout.presentFragment(fragment, removeLast, forceWithoutAnimation, true, false);
     }
 
     @Override
     protected void onPause() {
         super.onPause();
+        if (!notesGateInitialized) {
+            return;
+        }
         actionBarLayout.onPause();
         ApplicationLoader.externalInterfacePaused = true;
         onPasscodePause();
         if (passcodeView != null) {
             passcodeView.onPause();
         }
-        instance = null;
+        if (instance == this) {
+            instance = null;
+        }
     }
 
     @Override
     protected void onDestroy() {
+        notesGatePendingResults.clear();
         super.onDestroy();
+        if (!notesGateInitialized) {
+            return;
+        }
         if (currentAccount != -1) {
             AccountInstance.getInstance(currentAccount).getNotificationsController().setOpenedInBubble(dialogId, false);
             AccountInstance.getInstance(currentAccount).getConnectionsManager().setAppPaused(false, false);
         }
         onFinish();
-        instance = null;
+        notesGateInitialized = false;
     }
 
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        if (!notesGateInitialized || isFinishing() || isDestroyed()) {
+            return;
+        }
+        if (!NotesGate.isUnlocked() || isTelegramPasscodePending()) {
+            final Intent pendingData = data == null ? null : new Intent(data);
+            notesGatePendingResults.add(() -> onActivityResult(requestCode, resultCode, pendingData));
+            return;
+        }
         super.onActivityResult(requestCode, resultCode, data);
         ThemeEditorView editorView = ThemeEditorView.getInstance();
         if (editorView != null) {
@@ -246,6 +318,15 @@ public class BubbleActivity extends BasePermissionsActivity implements INavigati
 
     @Override
     public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
+        if (!notesGateInitialized || isFinishing() || isDestroyed()) {
+            return;
+        }
+        if (!NotesGate.isUnlocked() || isTelegramPasscodePending()) {
+            final String[] pendingPermissions = permissions.clone();
+            final int[] pendingGrants = grantResults.clone();
+            notesGatePendingResults.add(() -> onRequestPermissionsResult(requestCode, pendingPermissions, pendingGrants));
+            return;
+        }
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (!checkPermissionsResult(requestCode, permissions, grantResults)) return;
 
@@ -260,6 +341,9 @@ public class BubbleActivity extends BasePermissionsActivity implements INavigati
     @Override
     protected void onResume() {
         super.onResume();
+        if (!notesGateInitialized || isFinishing() || NotesGate.guardResume(this)) {
+            return;
+        }
         actionBarLayout.onResume();
         ApplicationLoader.externalInterfacePaused = false;
         onPasscodeResume();
@@ -270,6 +354,7 @@ public class BubbleActivity extends BasePermissionsActivity implements INavigati
             passcodeView.onResume();
         }
         instance = this;
+        drainNotesGateResults();
     }
 
     private void onPasscodePause() {
@@ -331,6 +416,9 @@ public class BubbleActivity extends BasePermissionsActivity implements INavigati
 
     @Override
     public void onBackPressed() {
+        if (!notesGateInitialized || isFinishing() || NotesGate.guardResume(this)) {
+            return;
+        }
         if (mainFragmentsStack.size() == 1) {
             super.onBackPressed();
             return;
@@ -349,11 +437,27 @@ public class BubbleActivity extends BasePermissionsActivity implements INavigati
     @Override
     public void onLowMemory() {
         super.onLowMemory();
+        if (!notesGateInitialized) {
+            return;
+        }
         actionBarLayout.onLowMemory();
     }
 
     @Override
+    public boolean needPresentFragment(BaseFragment fragment, boolean removeLast, boolean forceWithoutAnimation, INavigationLayout layout) {
+        return canAccessSensitiveUi();
+    }
+
+    @Override
+    public boolean needAddFragmentToStack(BaseFragment fragment, INavigationLayout layout) {
+        return canAccessSensitiveUi();
+    }
+
+    @Override
     public boolean needCloseLastFragment(INavigationLayout layout) {
+        if (!canAccessSensitiveUi()) {
+            return false;
+        }
         if (layout.getFragmentStack().size() <= 1) {
             onFinish();
             finish();

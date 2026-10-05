@@ -84,6 +84,7 @@ public class PipRoundVideoView implements NotificationCenter.NotificationCenterD
     }
 
     public void show(Activity activity, Runnable closeRunnable) {
+        if (!org.telegram.messenger.NotesGate.isUnlocked()) return;
         if (activity == null) {
             return;
         }
@@ -386,6 +387,7 @@ public class PipRoundVideoView implements NotificationCenter.NotificationCenterD
     }
 
     public void showTemporary(boolean show) {
+        if (show && !org.telegram.messenger.NotesGate.isUnlocked()) return;
         if (hideShowAnimation != null) {
             hideShowAnimation.cancel();
         }

@@ -113,6 +113,7 @@ import org.telegram.messenger.DialogObject;
 import org.telegram.messenger.FileLoader;
 import org.telegram.messenger.FileLog;
 import org.telegram.messenger.FingerprintController;
+import org.telegram.messenger.NotesGate;
 import org.telegram.messenger.FlagSecureReason;
 import org.telegram.messenger.GenericProvider;
 import org.telegram.messenger.GiftAuctionController;
@@ -390,10 +391,19 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
     }
 
     private FrameMetricsOverlayView frameMetricsOverlayView;
+    // A redirected cold start must never initialize or restore the messaging UI.
+    private boolean notesGateRedirected;
+    private final ArrayList<Runnable> notesGatePendingResults = new ArrayList<>();
     // private RefreshRateController refreshRateController;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        if (!NotesGate.isUnlocked()) {
+            notesGateRedirected = true;
+            super.onCreate(savedInstanceState);
+            NotesGate.guardActivity(this, savedInstanceState);
+            return;
+        }
         isActive = true;
         activeInstanceCount++;
         if (BuildVars.DEBUG_VERSION) {
@@ -1375,6 +1385,9 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
     }
 
     private void showUpdateActivity(int account, TLRPC.TL_help_appUpdate update, boolean check) {
+        if (!NotesGate.isUnlocked()) {
+            return;
+        }
         if (blockingUpdateView == null) {
             blockingUpdateView = new BlockingUpdateView(LaunchActivity.this);
             drawerLayoutContainer.addView(blockingUpdateView, LayoutHelper.createFrame(LayoutHelper.MATCH_PARENT, LayoutHelper.MATCH_PARENT));
@@ -1383,6 +1396,9 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
     }
 
     private void showTosActivity(int account, TLRPC.TL_help_termsOfService tos) {
+        if (!NotesGate.isUnlocked()) {
+            return;
+        }
         if (termsOfServiceView == null) {
             termsOfServiceView = new TermsOfServiceView(this);
             termsOfServiceView.setAlpha(0f);
@@ -1419,7 +1435,7 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
     }
 
     public void showPasscodeActivity(boolean fingerprint, boolean animated, int x, int y, Runnable onShow, Runnable onStart) {
-        if (drawerLayoutContainer == null || isFinishing()) {
+        if (!NotesGate.isUnlocked() || drawerLayoutContainer == null || isFinishing()) {
             return;
         }
         if (passcodeDialog == null) {
@@ -1441,6 +1457,9 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
         MessageObject messageObject = MediaController.getInstance().getPlayingMessageObject();
         if (messageObject != null && messageObject.isRoundVideo()) {
             MediaController.getInstance().cleanupPlayer(true, true);
+        }
+        if (passcodeDialog.getWindow() != null) {
+            passcodeDialog.getWindow().getDecorView().setVisibility(View.VISIBLE);
         }
         passcodeDialog.show();
         passcodeDialog.passcodeView.onShow(overlayPasscodeViews.isEmpty() && fingerprint, animated, x, y, () -> {
@@ -1485,6 +1504,7 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
             } catch (Exception e) {
                 FileLog.e(e);
             }
+            drainNotesGateResults();
         };
         passcodeDialog.passcodeView.setDelegate(delegate);
         for (PasscodeView overlay : overlayPasscodeViews) {
@@ -1498,6 +1518,9 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
     }
 
     public boolean allowShowFingerprintDialog(PasscodeView passcodeView) {
+        if (!NotesGate.isUnlocked()) {
+            return false;
+        }
         return overlayPasscodeViews.isEmpty() && this.passcodeDialog != null ? passcodeView == this.passcodeDialog.passcodeView : overlayPasscodeViews.get(overlayPasscodeViews.size() - 1) == passcodeView;
     }
 
@@ -1507,6 +1530,9 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
 
     @SuppressLint("Range")
     private boolean handleIntent(Intent intent, boolean isNew, boolean restore, boolean fromPassword, Browser.Progress progress, boolean rebuildFragments, boolean openedTelegram) {
+        if (NotesGate.deferIntent(this, intent)) {
+            return false;
+        }
         if (GiftInfoBottomSheet.handleIntent(intent, progress)) {
             return true;
         }
@@ -5973,6 +5999,10 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
 
     private boolean firstAppUpdateCheck = true;
     public void checkAppUpdate(boolean force, Browser.Progress progress) {
+        if (!NotesGate.isUnlocked()) {
+            if (progress != null) progress.end();
+            return;
+        }
         if (!ApplicationLoader.isStandaloneBuild() && !ApplicationLoader.isBetaBuild()) {
             return;
         }
@@ -5984,6 +6014,10 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
             final boolean first = firstAppUpdateCheck;
             firstAppUpdateCheck = false;
             ApplicationLoader.applicationLoaderInstance.checkUpdate(force, () -> {
+                if (!NotesGate.isUnlocked()) {
+                    if (progress != null) progress.end();
+                    return;
+                }
                 final BetaUpdate pendingUpdate = ApplicationLoader.applicationLoaderInstance.getUpdate();
                 if (progress != null) {
                     progress.end();
@@ -6024,16 +6058,18 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
                     }
                     final boolean newVersionAvailable = SharedConfig.setNewAppVersionAvailable(res);
                     if (newVersionAvailable) {
-                        if (res.can_not_skip) {
-                            showUpdateActivity(accountNum, res, false);
-                        } else if (ApplicationLoader.isStandaloneBuild() || BuildVars.DEBUG_VERSION) {
-                            ApplicationLoader.applicationLoaderInstance.showUpdateAppPopup(LaunchActivity.this, res, accountNum);
+                        if (NotesGate.isUnlocked()) {
+                            if (res.can_not_skip) {
+                                showUpdateActivity(accountNum, res, false);
+                            } else if (ApplicationLoader.isStandaloneBuild() || BuildVars.DEBUG_VERSION) {
+                                ApplicationLoader.applicationLoaderInstance.showUpdateAppPopup(LaunchActivity.this, res, accountNum);
+                            }
                         }
                         NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.appUpdateAvailable);
                     }
                     if (progress != null) {
                         progress.end();
-                        if (!newVersionAvailable) {
+                        if (!newVersionAvailable && NotesGate.isUnlocked()) {
                             BaseFragment fragment = getLastFragment();
                             if (fragment != null) {
                                 BulletinFactory.of(fragment).createSimpleBulletin(R.raw.chats_infotip, LocaleController.getString(R.string.YourVersionIsLatest)).show();
@@ -6045,6 +6081,7 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
                 AndroidUtilities.runOnUIThread(() -> {
                     if (progress != null) {
                         progress.end();
+                        if (!NotesGate.isUnlocked()) return;
                         BaseFragment fragment = getLastFragment();
                         if (fragment != null) {
                             BulletinFactory.of(fragment).createSimpleBulletin(R.raw.chats_infotip, LocaleController.getString(R.string.YourVersionIsLatest)).show();
@@ -6055,6 +6092,7 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
                 AndroidUtilities.runOnUIThread(() -> {
                     if (progress != null) {
                         progress.end();
+                        if (!NotesGate.isUnlocked()) return;
                         BaseFragment fragment = getLastFragment();
                         if (fragment != null) {
                             BulletinFactory.of(fragment).showForError(error);
@@ -6070,10 +6108,19 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
     }
 
     public Dialog showAlertDialog(AlertDialog.Builder builder) {
+        if (notesGateRedirected || !NotesGate.isUnlocked() || isFinishing()) {
+            return null;
+        }
         try {
             AlertDialog dialog = builder.show();
             dialog.setCanceledOnTouchOutside(true);
             dialog.setOnDismissListener(d -> {
+                if (!NotesGate.isUnlocked()) {
+                    if (dialog == localeDialog) localeDialog = null;
+                    if (dialog == proxyErrorDialog) proxyErrorDialog = null;
+                    visibleDialogs.remove(dialog);
+                    return;
+                }
                 if (dialog != null) {
                     if (dialog == localeDialog) {
                         BaseFragment fragment = actionBarLayout == null ? null : actionBarLayout.getLastFragment();
@@ -6139,11 +6186,19 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
     @Override
     public void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
+        if (notesGateRedirected) {
+            NotesGate.deferIntent(this, intent);
+            return;
+        }
         handleIntent(intent, true, false, false, null, true, true);
     }
 
     public void onNewIntent(Intent intent, Browser.Progress progress) {
         super.onNewIntent(intent);
+        if (notesGateRedirected) {
+            NotesGate.deferIntent(this, intent);
+            return;
+        }
         handleIntent(intent, true, false, false, progress, true, false);
     }
 
@@ -6604,14 +6659,23 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
     }
 
     public void presentFragment(INavigationLayout.NavigationParams params) {
+        if (notesGateRedirected || !NotesGate.isUnlocked()) {
+            return;
+        }
         getActionBarLayout().presentFragment(params);
     }
 
     public void presentFragment(BaseFragment fragment) {
+        if (notesGateRedirected || !NotesGate.isUnlocked()) {
+            return;
+        }
         getActionBarLayout().presentFragment(fragment);
     }
 
     public boolean presentFragment(final BaseFragment fragment, final boolean removeLast, boolean forceWithoutAnimation) {
+        if (notesGateRedirected || !NotesGate.isUnlocked()) {
+            return false;
+        }
         return getActionBarLayout().presentFragment(fragment, removeLast, forceWithoutAnimation, true, false);
     }
 
@@ -6631,8 +6695,39 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
         return rightActionBarLayout;
     }
 
+    private boolean canDispatchNotesGateResults() {
+        if (!NotesGate.isUnlocked() || SharedConfig.isWaitingForPasscodeEnter) {
+            return false;
+        }
+        if (!SharedConfig.passcodeHash.isEmpty()) {
+            int uptime = (int) (SystemClock.elapsedRealtime() / 1000);
+            if (SharedConfig.appLocked
+                    || SharedConfig.autoLockIn != 0 && SharedConfig.lastPauseTime != 0
+                    && (SharedConfig.lastPauseTime + SharedConfig.autoLockIn) <= uptime
+                    || uptime + 5 < SharedConfig.lastPauseTime) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private void drainNotesGateResults() {
+        while (canDispatchNotesGateResults() && !notesGatePendingResults.isEmpty()) {
+            notesGatePendingResults.remove(0).run();
+        }
+    }
+
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        if (notesGateRedirected) {
+            super.onActivityResult(requestCode, resultCode, data);
+            return;
+        }
+        if (!canDispatchNotesGateResults()) {
+            final Intent resultData = data == null ? null : new Intent(data);
+            notesGatePendingResults.add(() -> onActivityResult(requestCode, resultCode, resultData));
+            return;
+        }
         if (SharedConfig.passcodeHash.length() != 0 && SharedConfig.lastPauseTime != 0) {
             SharedConfig.lastPauseTime = 0;
             if (BuildVars.LOGS_ENABLED) {
@@ -6647,6 +6742,9 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
                         GroupCallActivity.groupCallInstance.dismissInternal();
                     }
                     AndroidUtilities.runOnUIThread(() -> {
+                        if (!NotesGate.isUnlocked()) {
+                            return;
+                        }
                         GroupCallPip.clearForce();
                         GroupCallPip.updateVisibility(LaunchActivity.this);
                     }, 200);
@@ -6703,6 +6801,16 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
 
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        if (notesGateRedirected) {
+            super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+            return;
+        }
+        if (!canDispatchNotesGateResults()) {
+            final String[] pendingPermissions = permissions.clone();
+            final int[] pendingGrants = grantResults.clone();
+            notesGatePendingResults.add(() -> onRequestPermissionsResult(requestCode, pendingPermissions, pendingGrants));
+            return;
+        }
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (!checkPermissionsResult(requestCode, permissions, grantResults)) return;
         if (ApplicationLoader.applicationLoaderInstance != null && ApplicationLoader.applicationLoaderInstance.checkRequestPermissionResult(requestCode, permissions, grantResults)) return;
@@ -6741,9 +6849,115 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
         voipLaunchedInBackground = false;
     }
 
+    /** Remove separate UI windows before the notes gate takes focus. No Telegram lock state changes. */
+    public void onNotesGateLocked() {
+        if (notesGateRedirected) {
+            return;
+        }
+        closeForNotesGate(() -> AndroidUtilities.hideKeyboard(getCurrentFocus()));
+        closeForNotesGate(this::hideVisibleActionMode);
+        closeForNotesGate(() -> {
+            if (passcodeDialog != null) {
+                passcodeDialog.passcodeView.onPause();
+                dismissForNotesGate(passcodeDialog);
+            }
+            for (PasscodeView overlay : overlayPasscodeViews) {
+                overlay.onPause();
+            }
+        });
+        closeForNotesGate(() -> {
+            if (actionBarLayout != null) actionBarLayout.dismissDialogs();
+            if (rightActionBarLayout != null) rightActionBarLayout.dismissDialogs();
+            if (layersActionBarLayout != null) layersActionBarLayout.dismissDialogs();
+        });
+        for (Dialog dialog : new ArrayList<>(visibleDialogs)) {
+            closeForNotesGate(() -> dismissForNotesGate(dialog));
+        }
+        closeForNotesGate(() -> {
+            if (selectAnimatedEmojiDialog != null) {
+                selectAnimatedEmojiDialog.dismiss();
+                selectAnimatedEmojiDialog = null;
+            }
+            dismissForNotesGate(loadingThemeProgressDialog);
+        });
+        closeForNotesGate(() -> {
+            if (SecretMediaViewer.hasInstance()) SecretMediaViewer.getInstance().closePhoto(false, false);
+        });
+        closeForNotesGate(() -> {
+            if (PhotoViewer.hasInstance()) PhotoViewer.getInstance().closePhoto(false, true);
+            if (PhotoViewer.getPipInstance() != null) PhotoViewer.getPipInstance().destroyPhotoViewer();
+        });
+        closeForNotesGate(() -> {
+            if (ArticleViewer.hasInstance()) ArticleViewer.getInstance().close(false, true);
+        });
+        closeForNotesGate(() -> {
+            if (ContentPreviewViewer.hasInstance()) ContentPreviewViewer.getInstance().closeWithMenu();
+        });
+        closeForNotesGate(StoryRecorder::destroyInstance);
+        ArrayList<BaseFragment> fragments = new ArrayList<>(mainFragmentsStack);
+        fragments.addAll(rightFragmentsStack);
+        fragments.addAll(layerFragmentsStack);
+        for (INavigationLayout sheet : new ArrayList<>(sheetFragmentsStack)) {
+            fragments.addAll(sheet.getFragmentStack());
+        }
+        for (BaseFragment fragment : fragments) {
+            closeForNotesGate(() -> {
+                if (fragment.getLastStoryViewer() != null) fragment.getLastStoryViewer().close(false);
+                fragment.clearSheets();
+                fragment.dismissCurrentDialog();
+            });
+        }
+        closeForNotesGate(() -> {
+            MessageObject playing = MediaController.getInstance().getPlayingMessageObject();
+            if (playing != null && playing.isRoundVideo()) MediaController.getInstance().cleanupPlayer(true, true);
+            if (PipRoundVideoView.getInstance() != null) PipRoundVideoView.getInstance().close(false);
+        });
+        closeForNotesGate(RTMPStreamPipOverlay::dismissForNotesLock);
+        closeForNotesGate(LiveStoryPipOverlay::dismissForNotesLock);
+        closeForNotesGate(PipVideoOverlay::dismissForNotesLock);
+        closeForNotesGate(GroupCallPip::dismissForNotesLock);
+        closeForNotesGate(() -> {
+            if (GroupCallActivity.groupCallInstance != null) GroupCallActivity.groupCallInstance.dismissInternal();
+        });
+        closeForNotesGate(VoIPFragment::dismissForNotesLock);
+        closeForNotesGate(org.telegram.ui.Components.voip.VoIPPiPView::dismissForNotesLock);
+        closeForNotesGate(() -> {
+            if (EmbedBottomSheet.getInstance() != null) EmbedBottomSheet.getInstance().destroy();
+            if (ThemeEditorView.getInstance() != null) ThemeEditorView.getInstance().destroy();
+        });
+        if (Build.VERSION.SDK_INT >= 31) {
+            closeForNotesGate(() -> super.setPictureInPictureParams(new PictureInPictureParams.Builder().setAutoEnterEnabled(false).build()));
+        }
+    }
+
+    private void closeForNotesGate(Runnable close) {
+        try {
+            close.run();
+        } catch (Exception e) {
+            FileLog.e(e);
+        }
+    }
+
+    private void dismissForNotesGate(Dialog dialog) {
+        if (dialog == null) {
+            return;
+        }
+        Window window = dialog.getWindow();
+        if (window != null) {
+            window.getDecorView().setVisibility(View.INVISIBLE);
+        }
+        dialog.dismiss();
+    }
+
     @Override
     protected void onPause() {
+        if (!notesGateRedirected) {
+            NotesGate.onProtectedPause(this);
+        }
         super.onPause();
+        if (notesGateRedirected) {
+            return;
+        }
         isResumed = false;
         pipActivityHandler.onPause();
         NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.stopAllHeavyOperations, 4096);
@@ -6782,7 +6996,7 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
         }
         StoryRecorder.onPause();
 
-        if (VoIPFragment.getInstance() != null) {
+        if (NotesGate.isUnlocked() && VoIPFragment.getInstance() != null) {
             VoIPFragment.onPause();
         }
         SpoilerEffect2.pause(true);
@@ -6796,6 +7010,16 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
     @Override
     protected void onStart() {
         super.onStart();
+        if (notesGateRedirected || !NotesGate.isUnlocked()) {
+            return;
+        }
+        startProtectedUi();
+    }
+
+    private void startProtectedUi() {
+        if (isStarted) {
+            return;
+        }
         isStarted = true;
         pipActivityHandler.onStart();
         Browser.bindCustomTabsService(this);
@@ -6809,11 +7033,16 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
     @Override
     protected void onStop() {
         super.onStop();
+        if (notesGateRedirected || !isStarted) {
+            return;
+        }
         isStarted = false;
         pipActivityHandler.onStop();
         Browser.unbindCustomTabsService(this);
         ApplicationLoader.mainInterfaceStopped = true;
-        GroupCallPip.updateVisibility(this);
+        if (NotesGate.isUnlocked()) {
+            GroupCallPip.updateVisibility(this);
+        }
         if (GroupCallActivity.groupCallInstance != null) {
             GroupCallActivity.groupCallInstance.onPause();
         }
@@ -6821,12 +7050,21 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
 
     @Override
     public boolean onPictureInPictureRequested() {
+        if (notesGateRedirected || !NotesGate.isUnlocked()) {
+            return false;
+        }
         pipActivityHandler.onPictureInPictureRequested();
         return super.onPictureInPictureRequested();
     }
 
     @Override
     public void setPictureInPictureParams(@NonNull PictureInPictureParams params) {
+        if (notesGateRedirected || !NotesGate.isUnlocked()) {
+            if (Build.VERSION.SDK_INT >= 31) {
+                super.setPictureInPictureParams(new PictureInPictureParams.Builder().setAutoEnterEnabled(false).build());
+            }
+            return;
+        }
         super.setPictureInPictureParams(params);
         pipActivityHandler.setPictureInPictureParams(params);
     }
@@ -6834,6 +7072,9 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
     @Override
     public void onPictureInPictureUiStateChanged(@NonNull PictureInPictureUiState pipState) {
         super.onPictureInPictureUiStateChanged(pipState);
+        if (notesGateRedirected || !NotesGate.isUnlocked()) {
+            return;
+        }
         pipActivityHandler.onPictureInPictureUiStateChanged(pipState);
     }
 
@@ -6841,6 +7082,9 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
     @Override
     public void onPictureInPictureModeChanged(boolean isInPictureInPictureMode, @NonNull Configuration newConfig) {
         super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig);
+        if (notesGateRedirected || !NotesGate.isUnlocked()) {
+            return;
+        }
         pipActivityHandler.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig);
 
         if (!isInPictureInPictureMode && !isStarted) {
@@ -6869,6 +7113,11 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
 
     @Override
     protected void onDestroy() {
+        notesGatePendingResults.clear();
+        if (notesGateRedirected) {
+            super.onDestroy();
+            return;
+        }
         isActive = false;
         activeInstanceCount--;
         unregisterReceiver(batteryReceiver);
@@ -6966,6 +7215,13 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
 
     @Override
     protected void onUserLeaveHint() {
+        if (!notesGateRedirected) {
+            // Cover before Android can capture a recent-task or PiP frame.
+            NotesGate.onProtectedPause(this);
+        }
+        if (notesGateRedirected || !NotesGate.isUnlocked()) {
+            return;
+        }
         pipActivityHandler.onUserLeaveHint();
         for (Runnable callback : onUserLeaveHintListeners) {
             callback.run();
@@ -6980,6 +7236,11 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
     @Override
     protected void onResume() {
         super.onResume();
+        if (notesGateRedirected || NotesGate.guardResume(this)) {
+            return;
+        }
+        NotesGate.onProtectedResume(this);
+        startProtectedUi();
         isResumed = true;
         pipActivityHandler.onResume();
         if (onResumeStaticCallback != null) {
@@ -7070,6 +7331,7 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
             // Re-check if the user updated their email from another client
             MessagesController.getInstance(currentAccount).checkPromoInfo(true);
         }
+        drainNotesGateResults();
         //if (refreshRateController != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
         //    refreshRateController.start();
         //}
@@ -7132,6 +7394,10 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
 
     @Override
     public void onConfigurationChanged(Configuration newConfig) {
+        if (notesGateRedirected) {
+            super.onConfigurationChanged(newConfig);
+            return;
+        }
         AndroidUtilities.checkDisplaySize(this, newConfig);
         AndroidUtilities.setPreferredMaxRefreshRate(getWindow());
         super.onConfigurationChanged(newConfig);
@@ -7166,6 +7432,10 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
 
     @Override
     public void onMultiWindowModeChanged(boolean isInMultiWindowMode) {
+        if (notesGateRedirected) {
+            super.onMultiWindowModeChanged(isInMultiWindowMode);
+            return;
+        }
         AndroidUtilities.isInMultiwindow = isInMultiWindowMode;
         checkLayout();
         super.onMultiWindowModeChanged(isInMultiWindowMode);
@@ -7174,6 +7444,26 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
     @Override
     @SuppressWarnings("unchecked")
     public void didReceivedNotification(int id, final int account, Object... args) {
+        if (notesGateRedirected) {
+            return;
+        }
+        if (!NotesGate.isUnlocked() && (id == NotificationCenter.openBoostForUsersDialog
+                || id == NotificationCenter.needShowAlert
+                || id == NotificationCenter.wasUnableToFindCurrentLocation
+                || id == NotificationCenter.openArticle
+                || id == NotificationCenter.hasNewContactsToImport
+                || id == NotificationCenter.needShowPlayServicesAlert
+                || id == NotificationCenter.historyImportProgressChanged
+                || id == NotificationCenter.billingConfirmPurchaseError
+                || id == NotificationCenter.stickersImportComplete
+                || id == NotificationCenter.showBulletin
+                || id == NotificationCenter.currentUserShowLimitReachedDialog
+                || id == NotificationCenter.requestPermissions
+                || id == NotificationCenter.tlSchemeParseException
+                || id == NotificationCenter.memoryLeakFoundException
+                || id == NotificationCenter.guardBotDecisionResult)) {
+            return;
+        }
         if (id == NotificationCenter.appDidLogout) {
             switchToAvailableAccountOrLogout();
         } else if (id == NotificationCenter.openBoostForUsersDialog) {
@@ -7549,6 +7839,12 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
                 onThemeLoadFinish();
             }
         } else if (id == NotificationCenter.screenStateChanged) {
+            if (!ApplicationLoader.isScreenOn) {
+                NotesGate.onProtectedPause(this);
+            }
+            if (!NotesGate.isUnlocked()) {
+                return;
+            }
             if (ApplicationLoader.mainInterfacePaused) {
                 return;
             }
@@ -7764,7 +8060,7 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
                 bulletin = null;
             }
             AndroidUtilities.runOnUIThread(() -> {
-                if (!finished && isResumed) {
+                if (!finished && isResumed && NotesGate.isUnlocked()) {
                     bulletin.show();
                 }
             }, 400);
@@ -7914,16 +8210,18 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
                         }
                         preferences.edit().putLong("last_space_check", System.currentTimeMillis()).commit();
                         AndroidUtilities.runOnUIThread(() -> {
-                            if (checkFreeDiscSpaceShown) {
+                            if (checkFreeDiscSpaceShown || !NotesGate.isUnlocked()) {
                                 return;
                             }
                             try {
                                 Dialog dialog = AlertsCreator.createFreeSpaceDialog(LaunchActivity.this);
                                 dialog.setOnDismissListener(di -> {
                                     checkFreeDiscSpaceShown = false;
+                                    visibleDialogs.remove(dialog);
                                 });
                                 checkFreeDiscSpaceShown = true;
                                 dialog.show();
+                                visibleDialogs.add(dialog);
                             } catch (Throwable ignore) {
 
                             }
@@ -7942,6 +8240,9 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
     }
 
     private void showLanguageAlertInternal(LocaleController.LocaleInfo systemInfo, LocaleController.LocaleInfo englishInfo, String systemLang) {
+        if (!NotesGate.isUnlocked()) {
+            return;
+        }
         try {
             loadingLocaleDialog = false;
             boolean firstSystem = systemInfo.builtIn || LocaleController.getInstance().isCurrentLocalLocale();
@@ -8021,6 +8322,9 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
     }
 
     private void showLanguageAlert(boolean force) {
+        if (!NotesGate.isUnlocked()) {
+            return;
+        }
         if (!UserConfig.getInstance(currentAccount).isClientActivated()) {
             return;
         }
@@ -8252,6 +8556,10 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
 
     @Override
     protected void onSaveInstanceState(Bundle outState) {
+        if (notesGateRedirected) {
+            super.onSaveInstanceState(outState);
+            return;
+        }
         try {
             super.onSaveInstanceState(outState);
             BaseFragment lastFragment = null;
@@ -8324,6 +8632,12 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
     }
 
     public boolean onBackPressed(boolean invoked) {
+        if (notesGateRedirected || !NotesGate.isUnlocked()) {
+            if (invoked && !notesGateRedirected) {
+                NotesGate.guardResume(this);
+            }
+            return false;
+        }
         if (FloatingDebugController.onBackPressed(invoked)) {
             return false;
         }
@@ -8372,6 +8686,10 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
     @Override
     public void onActionModeStarted(ActionMode mode) {
         super.onActionModeStarted(mode);
+        if (notesGateRedirected || !NotesGate.isUnlocked()) {
+            mode.finish();
+            return;
+        }
         visibleActionMode = mode;
         try {
             Menu menu = mode.getMenu();
@@ -8400,6 +8718,9 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
     @Override
     public void onActionModeFinished(ActionMode mode) {
         super.onActionModeFinished(mode);
+        if (notesGateRedirected) {
+            return;
+        }
         if (visibleActionMode == mode) {
             visibleActionMode = null;
         }
@@ -8415,6 +8736,9 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
 
     @Override
     public boolean onPreIme() {
+        if (notesGateRedirected || !NotesGate.isUnlocked()) {
+            return true;
+        }
         if (SecretMediaViewer.hasInstance() && SecretMediaViewer.getInstance().isVisible()) {
             SecretMediaViewer.getInstance().closePhoto(true, false);
             return true;
@@ -8429,7 +8753,21 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
     }
 
     @Override
+    public boolean dispatchTouchEvent(MotionEvent event) {
+        return notesGateRedirected || !NotesGate.isUnlocked() || super.dispatchTouchEvent(event);
+    }
+
+    @Override
+    public boolean dispatchGenericMotionEvent(MotionEvent event) {
+        return notesGateRedirected || !NotesGate.isUnlocked() || super.dispatchGenericMotionEvent(event);
+    }
+
+    @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
+        if (notesGateRedirected || !NotesGate.isUnlocked()) {
+            // Keep volume handling with Android; never dispatch keys to hidden chat views.
+            return event.getKeyCode() != KeyEvent.KEYCODE_VOLUME_UP && event.getKeyCode() != KeyEvent.KEYCODE_VOLUME_DOWN;
+        }
         int keyCode = event.getKeyCode();
         if (event.getKeyCode() == KeyEvent.KEYCODE_VOLUME_UP || event.getKeyCode() == KeyEvent.KEYCODE_VOLUME_DOWN) {
             BaseFragment baseFragment = getLastFragment();
@@ -8477,6 +8815,9 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
 
     @Override
     public boolean onKeyUp(int keyCode, KeyEvent event) {
+        if (notesGateRedirected || !NotesGate.isUnlocked()) {
+            return super.onKeyUp(keyCode, event);
+        }
         if (keyCode == KeyEvent.KEYCODE_MENU && !SharedConfig.isWaitingForPasscodeEnter) {
             if (PhotoViewer.hasInstance() && PhotoViewer.getInstance().isVisible()) {
                 return super.onKeyUp(keyCode, event);
@@ -8500,6 +8841,9 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
 
     @Override
     public boolean needPresentFragment(INavigationLayout layout, INavigationLayout.NavigationParams params) {
+        if (notesGateRedirected || !NotesGate.isUnlocked()) {
+            return false;
+        }
         BaseFragment fragment = params.fragment;
         boolean removeLast = params.removeLast;
         boolean forceWithoutAnimation = params.noAnimation;
@@ -8624,6 +8968,9 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
 
     @Override
     public boolean needAddFragmentToStack(BaseFragment fragment, INavigationLayout layout) {
+        if (notesGateRedirected || !NotesGate.isUnlocked()) {
+            return false;
+        }
         if (AndroidUtilities.isTablet()) {
             if (fragment instanceof DialogsActivity || fragment instanceof MainTabsActivity) {
                 boolean needReplace = layout != actionBarLayout;
@@ -8697,6 +9044,9 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
 
     @Override
     public boolean needCloseLastFragment(INavigationLayout layout) {
+        if (notesGateRedirected || !NotesGate.isUnlocked()) {
+            return false;
+        }
         if (AndroidUtilities.isTablet()) {
             if (layout == actionBarLayout && layout.getFragmentStack().size() <= 1 && !switchingAccount) {
                 onFinish();

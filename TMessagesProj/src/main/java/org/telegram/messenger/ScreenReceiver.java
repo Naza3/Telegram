@@ -19,6 +19,7 @@ public class ScreenReceiver extends BroadcastReceiver {
     @Override
     public void onReceive(Context context, Intent intent) {
         if (intent.getAction().equals(Intent.ACTION_SCREEN_OFF)) {
+            NotesGate.lock();
             if (BuildVars.LOGS_ENABLED) {
                 FileLog.d("screen off");
             }
@@ -30,6 +31,7 @@ public class ScreenReceiver extends BroadcastReceiver {
             }
             ConnectionsManager.getInstance(UserConfig.selectedAccount).setAppPaused(false, true);
             ApplicationLoader.isScreenOn = true;
+            NotesGate.onScreenOn();
         }
         NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.screenStateChanged);
     }

@@ -313,6 +313,7 @@ public class VoIPFragment implements
     /* === pinch to zoom === */
 
     public static void show(Activity activity, int account) {
+        if (!org.telegram.messenger.NotesGate.isUnlocked()) return;
         if (instance != null && instance.windowView.getParent() == null) {
             if (instance != null) {
                 instance.callingUserTextureView.renderer.release();
@@ -471,6 +472,19 @@ public class VoIPFragment implements
 
     public void finish() {
         windowView.finish();
+    }
+
+    /** Hide the call UI immediately; the call service and its audio remain active. */
+    public static void dismissForNotesLock() {
+        VoIPFragment current = instance;
+        if (current == null) return;
+        if (current.windowView != null) {
+            current.windowView.setVisibility(View.INVISIBLE);
+            current.windowView.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
+            current.windowView.animate().cancel();
+            current.windowView.finishImmediate();
+        }
+        clearInstance();
     }
 
     public static void clearInstance() {
@@ -3109,7 +3123,13 @@ public class VoIPFragment implements
     private boolean windowViewSkipRender;
 
     @Override
+    public boolean pipIsAvailable() {
+        return org.telegram.messenger.NotesGate.isUnlocked() && instance == this && !isFinished;
+    }
+
+    @Override
     public Bitmap pipCreatePrimaryWindowViewBitmap() {
+        if (!org.telegram.messenger.NotesGate.isUnlocked()) return null;
         if (callingUserTextureView == null || !callingUserTextureView.renderer.isAvailable()) {
             return null;
         }
@@ -3167,6 +3187,7 @@ public class VoIPFragment implements
 
     @Override
     public Bitmap pipCreatePictureInPictureViewBitmap() {
+        if (!org.telegram.messenger.NotesGate.isUnlocked()) return null;
         if (pipTextureView == null || !pipTextureView.renderer.isAvailable()) {
             return null;
         }
@@ -3176,6 +3197,7 @@ public class VoIPFragment implements
 
     @Override
     public void pipShowPrimaryWindowView(Runnable firstFrameCallback) {
+        if (!org.telegram.messenger.NotesGate.isUnlocked()) return;
         this.firstFrameCallback = firstFrameCallback;
         WindowManager wm = (WindowManager) activity.getSystemService(Context.WINDOW_SERVICE);
         wm.addView(windowView, windowView.createWindowLayoutParams());

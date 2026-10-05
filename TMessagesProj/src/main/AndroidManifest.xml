@@ -116,10 +116,20 @@
     >
         <!-- usesCleartextTraffic for browser supporting opening http:// links -->
 
+        <activity
+            android:name="org.telegram.ui.ShiyeNotesActivity"
+            android:theme="@style/Theme.Shiye.Notes"
+            android:exported="false"
+            android:resizeableActivity="true"
+            android:allowEmbedded="true"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|screenLayout|uiMode"
+            android:windowSoftInputMode="adjustResize"
+            android:enableOnBackInvokedCallback="false" />
+
         <activity-alias
             android:enabled="true"
             android:name="org.telegram.messenger.DefaultIcon"
-            android:targetActivity="org.telegram.ui.LaunchActivity"
+            android:targetActivity="org.telegram.ui.ShiyeNotesActivity"
             android:icon="@mipmap/ic_launcher"
             android:roundIcon="@mipmap/ic_launcher_round"
             android:exported="true">
@@ -135,7 +145,7 @@
         <activity-alias
             android:enabled="false"
             android:name="org.telegram.messenger.VintageIcon"
-            android:targetActivity="org.telegram.ui.LaunchActivity"
+            android:targetActivity="org.telegram.ui.ShiyeNotesActivity"
             android:icon="@mipmap/ic_launcher"
             android:roundIcon="@mipmap/ic_launcher_round"
             android:exported="true">
@@ -151,7 +161,7 @@
         <activity-alias
             android:enabled="false"
             android:name="org.telegram.messenger.AquaIcon"
-            android:targetActivity="org.telegram.ui.LaunchActivity"
+            android:targetActivity="org.telegram.ui.ShiyeNotesActivity"
             android:icon="@mipmap/ic_launcher"
             android:roundIcon="@mipmap/ic_launcher_round"
             android:exported="true">
@@ -167,7 +177,7 @@
         <activity-alias
             android:enabled="false"
             android:name="org.telegram.messenger.PremiumIcon"
-            android:targetActivity="org.telegram.ui.LaunchActivity"
+            android:targetActivity="org.telegram.ui.ShiyeNotesActivity"
             android:icon="@mipmap/ic_launcher"
             android:roundIcon="@mipmap/ic_launcher_round"
             android:exported="true">
@@ -183,7 +193,7 @@
         <activity-alias
             android:enabled="false"
             android:name="org.telegram.messenger.TurboIcon"
-            android:targetActivity="org.telegram.ui.LaunchActivity"
+            android:targetActivity="org.telegram.ui.ShiyeNotesActivity"
             android:icon="@mipmap/ic_launcher"
             android:roundIcon="@mipmap/ic_launcher_round"
             android:exported="true">
@@ -199,7 +209,7 @@
         <activity-alias
             android:enabled="false"
             android:name="org.telegram.messenger.NoxIcon"
-            android:targetActivity="org.telegram.ui.LaunchActivity"
+            android:targetActivity="org.telegram.ui.ShiyeNotesActivity"
             android:icon="@mipmap/ic_launcher"
             android:roundIcon="@mipmap/ic_launcher_round"
             android:exported="true">

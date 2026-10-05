@@ -824,6 +824,7 @@ public abstract class BaseFragment {
     }
 
     public Dialog showDialog(Dialog dialog, boolean allowInTransition, final Dialog.OnDismissListener onDismissListener) {
+        if (!org.telegram.messenger.NotesGate.canShowContent(getParentActivity())) return null;
         if (dialog == null || parentLayout == null || parentLayout.isTransitionAnimationInProgress() || parentLayout.isSwipeInProgress() || !allowInTransition && parentLayout.checkTransitionAnimation()) {
             return null;
         }
@@ -857,6 +858,7 @@ public abstract class BaseFragment {
                 }
             });
             visibleDialog.show();
+            org.telegram.messenger.NotesGate.onDialogShown(visibleDialog);
             return visibleDialog;
         } catch (Exception e) {
             FileLog.e(e);

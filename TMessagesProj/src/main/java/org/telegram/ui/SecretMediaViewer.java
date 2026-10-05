@@ -1370,6 +1370,7 @@ public class SecretMediaViewer implements NotificationCenter.NotificationCenterD
     private boolean ignoreDelete;
 
     public void openMedia(MessageObject messageObject, PhotoViewer.PhotoViewerProvider provider, Runnable onOpen, Runnable onClose) {
+        if (!org.telegram.messenger.NotesGate.isUnlocked()) return;
         if (parentActivity == null || messageObject == null || !messageObject.needDrawBluredPreview() || provider == null) {
             return;
         }

@@ -323,9 +323,11 @@ public class AlertDialog extends Dialog implements Drawable.Callback, Notificati
 
     @Override
     public void show() {
+        if (!org.telegram.messenger.NotesGate.canShowContent(getContext())) return;
         if (!AndroidUtilities.isSafeToShow(getContext())) return;
         dismissed = false;
         super.show();
+        org.telegram.messenger.NotesGate.onDialogShown(this);
         if (progressViewContainer != null && progressViewStyle == ALERT_TYPE_SPINNER) {
             progressViewContainer.setScaleX(0);
             progressViewContainer.setScaleY(0);

@@ -1576,11 +1576,13 @@ public class BottomSheet extends Dialog implements BaseFragment.AttachedSheet {
 
     @Override
     public void show() {
+        if (!org.telegram.messenger.NotesGate.canShowContent(getContext())) return;
         if (!AndroidUtilities.isSafeToShow(getContext())) return;
         if (attachedFragment != null) {
             onCreateInternal();
         } else {
             super.show();
+            org.telegram.messenger.NotesGate.onDialogShown(this);
         }
         setShowing(true);
         if (focusable) {

@@ -105,6 +105,8 @@ public class PipVideoOverlay implements IPipSourceDelegate {
     private View consumingChild;
     private boolean isShowingControls;
     private ValueAnimator controlsAnimator;
+    private AnimatorSet dismissAnimator;
+    private final Runnable dismissCallback = this::onDismissedInternal;
 
     private PipConfig pipConfig;
     private int pipWidth, pipHeight;
@@ -348,6 +350,22 @@ public class PipVideoOverlay implements IPipSourceDelegate {
         instance.dismissInternal(animate, immediate);
     }
 
+    /** Remove the separate window synchronously, including an already-running exit animation. */
+    public static void dismissForNotesLock() {
+        if (instance.contentView != null) {
+            instance.contentView.setVisibility(View.INVISIBLE);
+            instance.contentView.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
+        }
+        if (instance.dismissAnimator != null) {
+            instance.dismissAnimator.removeAllListeners();
+            instance.dismissAnimator.cancel();
+            instance.dismissAnimator = null;
+        }
+        AndroidUtilities.cancelRunOnUIThread(instance.dismissCallback);
+        instance.isDismissing = false;
+        instance.dismissInternal(true, true);
+    }
+
     private void dismissInternal(boolean animate, boolean immediate) {
         if (isDismissing) {
             return;
@@ -373,10 +391,10 @@ public class PipVideoOverlay implements IPipSourceDelegate {
             if (immediate) {
                 onDismissedInternal();
             } else {
-                AndroidUtilities.runOnUIThread(this::onDismissedInternal, 100);
+                AndroidUtilities.runOnUIThread(dismissCallback, 100);
             }
         } else {
-            AnimatorSet set = new AnimatorSet();
+            AnimatorSet set = dismissAnimator = new AnimatorSet();
             set.setDuration(250);
             set.setInterpolator(CubicBezierInterpolator.DEFAULT);
             set.playTogether(
@@ -395,6 +413,7 @@ public class PipVideoOverlay implements IPipSourceDelegate {
     }
 
     private void onDismissedInternal() {
+        dismissAnimator = null;
         try {
             if (contentView != null && contentView.getParent() != null) {
                 windowManager.removeViewImmediate(contentView);
@@ -502,6 +521,7 @@ public class PipVideoOverlay implements IPipSourceDelegate {
     }
 
     public static void setPhotoViewer(PhotoViewer photoViewer) {
+        if (!org.telegram.messenger.NotesGate.isUnlocked()) return;
         instance.photoViewer = photoViewer;
         final VideoPlayer videoPlayer = photoViewer.getVideoPlayer();
 
@@ -566,6 +586,7 @@ public class PipVideoOverlay implements IPipSourceDelegate {
     }
 
     public static boolean show(boolean inAppOnly, Activity activity, PhotoViewerWebView viewerWebView, View pipContentView, int videoWidth, int videoHeight, boolean animate) {
+        if (!org.telegram.messenger.NotesGate.isUnlocked()) return false;
         return instance.showInternal(inAppOnly, activity, pipContentView, viewerWebView, videoWidth, videoHeight, animate);
     }
 
@@ -1274,11 +1295,12 @@ public class PipVideoOverlay implements IPipSourceDelegate {
 
     @Override
     public boolean pipIsAvailable() {
-        return photoViewer != null && photoViewer.pipIsAvailable();
+        return org.telegram.messenger.NotesGate.isUnlocked() && photoViewer != null && photoViewer.pipIsAvailable();
     }
 
     @Override
     public Bitmap pipCreatePrimaryWindowViewBitmap() {
+        if (!org.telegram.messenger.NotesGate.isUnlocked()) return null;
         if (photoViewer == null || photoViewer.changedTextureView == null || !photoViewer.changedTextureView.isAvailable()) {
             return null;
         }
@@ -1335,6 +1357,7 @@ public class PipVideoOverlay implements IPipSourceDelegate {
 
     @Override
     public Bitmap pipCreatePictureInPictureViewBitmap() {
+        if (!org.telegram.messenger.NotesGate.isUnlocked()) return null;
         if (pipTextureView == null || !pipTextureView.isAvailable()) {
             return null;
         }
@@ -1344,6 +1367,7 @@ public class PipVideoOverlay implements IPipSourceDelegate {
 
     @Override
     public void pipShowPrimaryWindowView(Runnable firstFrameCallback) {
+        if (!org.telegram.messenger.NotesGate.isUnlocked()) return;
         if (pipSource != null && pipSource.params.isValid()) {
             windowLayoutParams.width = pipWidth = pipSource.params.getWidth();
             windowLayoutParams.height = pipHeight = pipSource.params.getHeight();

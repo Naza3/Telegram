@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="ShiyeNotesLoading">正在读取笔记…</string>
+    <string name="ShiyeNotesLocalOnly">仅保存在此设备</string>
+    <string name="ShiyeNotesEmpty">还没有笔记\n点右上角的加号，记下第一条笔记</string>
+    <string name="ShiyeNotesAdd">新建笔记</string>
+    <string name="ShiyeNotesBack">返回笔记列表</string>
+    <string name="ShiyeNotesDone">完成</string>
+    <string name="ShiyeNotesUntitled">未命名笔记</string>
+    <string name="ShiyeNotesTitleHint">标题</string>
+    <string name="ShiyeNotesBodyHint">写点什么…</string>
+    <string name="ShiyeNotesSaving">正在保存…</string>
+    <string name="ShiyeNotesSaved">已保存到此设备</string>
+    <string name="ShiyeNotesDraft">编辑中</string>
+    <string name="ShiyeNotesRetry">%1$s\n点按这里重试</string>
+    <string name="ShiyeNotesSaveFailed">保存失败，编辑内容仍保留。%1$s</string>
+    <string name="ShiyeNotesDelete">删除笔记</string>
+    <string name="ShiyeNotesDeleteConfirm">删除后无法恢复。要删除这条笔记吗？</string>
+    <string name="ShiyeNotesDeleteFailed">未能删除，笔记仍保留。%1$s</string>
+    <string name="ShiyeNotesCancel">取消</string>
+    <string name="ShiyeNotesEntrySettings">拾页入口</string>
+    <string name="ShiyeNotesEntrySettingsInfo">首页验证手势</string>
+    <string name="ShiyeNotesEntryGesture">验证手势</string>
+    <string name="ShiyeNotesEntryLongPress">长按“拾页”标题 2 秒</string>
+    <string name="ShiyeNotesEntryFiveTaps">连续点按“拾页”标题 5 次</string>
+    <string name="ShiyeNotesEntryExplanation">在拾页首页或笔记编辑页使用所选手势后，需要通过设备指纹验证。切换到后台或熄屏后立即重新锁定。</string>
+    <string name="ShiyeNotesEntrySaveFailed">未能保存手势设置，请重试。</string>
+</resources>

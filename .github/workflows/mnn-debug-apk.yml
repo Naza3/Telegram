@@ -79,6 +79,7 @@ jobs:
           bash tests/ai-summary/run.sh
           bash tests/ai-summary-controller/run.sh
           bash tests/ai-summary-foreground/run.sh
+          bash tests/notes-store/run.sh
           python3 tests/ai-summary/fixtures/validate_fixtures.py
 
       - name: Install the Android toolchain
@@ -102,6 +103,13 @@ jobs:
             'platforms;android-36' 'build-tools;36.0.0' \
             'ndk;27.2.12479018' 'cmake;3.22.1'
           "$sdkmanager" --sdk_root="$sdk_root" --list_installed
+
+      - name: Verify fingerprint session and cancellation boundaries
+        shell: bash
+        run: |
+          ECJ_JAR="$MNN_BUILD_DIR/ai-summary-tools/ecj.jar" \
+          ANDROID_JAR="$ANDROID_HOME/platforms/android-36/android.jar" \
+            bash tests/notes-gate/run.sh
 
       - name: Cache Gradle downloads
         uses: actions/cache@v4

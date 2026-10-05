@@ -43,7 +43,10 @@ import static android.view.WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE;
 public class GroupCallPip implements NotificationCenter.NotificationCenterDelegate {
 
     private static GroupCallPip instance;
+    private static final java.util.WeakHashMap<GroupCallPip, Boolean> openWindows = new java.util.WeakHashMap<>();
     private static boolean forceRemoved = true;
+    private boolean notesDismissed;
+    private AnimatorSet removalAnimator;
 
     FrameLayout windowView;
     FrameLayout windowRemoveTooltipView;
@@ -110,6 +113,7 @@ public class GroupCallPip implements NotificationCenter.NotificationCenterDelega
     boolean moving;
 
     public GroupCallPip(Context context, int account) {
+        openWindows.put(this, Boolean.TRUE);
         currentAccount = account;
         float touchSlop = ViewConfiguration.get(context).getScaledTouchSlop();
         windowView = new FrameLayout(context) {
@@ -473,6 +477,7 @@ public class GroupCallPip implements NotificationCenter.NotificationCenterDelega
     }
 
     private void showAlert(boolean b) {
+        if (b && !org.telegram.messenger.NotesGate.isUnlocked()) return;
         if (b != showAlert) {
             showAlert = b;
             alertContainer.animate().setListener(null).cancel();
@@ -593,7 +598,7 @@ public class GroupCallPip implements NotificationCenter.NotificationCenterDelega
         onDestroy();
 
         instance = null;
-        AnimatorSet animatorSet = new AnimatorSet();
+        AnimatorSet animatorSet = removalAnimator = new AnimatorSet();
 
         long moveDuration = 350;
         long additionalDuration = 0;
@@ -662,6 +667,7 @@ public class GroupCallPip implements NotificationCenter.NotificationCenterDelega
             @Override
             public void onAnimationEnd(Animator animation) {
                 NotificationCenter.getInstance(currentAccount).doOnIdle(() -> {
+                    if (notesDismissed) return;
                     windowView.setVisibility(View.GONE);
                     windowRemoveTooltipView.setVisibility(View.GONE);
                     windowManager.removeView(windowView);
@@ -716,6 +722,7 @@ public class GroupCallPip implements NotificationCenter.NotificationCenterDelega
     }
 
     public static void show(Context context, int account) {
+        if (!org.telegram.messenger.NotesGate.isUnlocked()) return;
         if (instance != null) {
             return;
         }
@@ -810,6 +817,36 @@ public class GroupCallPip implements NotificationCenter.NotificationCenterDelega
             instance = null;
             NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.groupCallVisibilityChanged);
         }
+    }
+
+    /** Include windows already closing, because their instance is cleared before animations end. */
+    public static void dismissForNotesLock() {
+        java.util.ArrayList<GroupCallPip> windows = new java.util.ArrayList<>(openWindows.keySet());
+        openWindows.clear();
+        instance = null;
+        for (GroupCallPip pip : windows) {
+            if (pip == null || pip.notesDismissed) continue;
+            pip.notesDismissed = true;
+            pip.removed = true;
+            for (View view : new View[] {pip.windowView, pip.windowRemoveTooltipView, pip.windowRemoveTooltipOverlayView, pip.alertContainer}) {
+                if (view == null) continue;
+                view.setVisibility(View.INVISIBLE);
+                view.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
+                view.animate().setListener(null).cancel();
+                if (view.getParent() != null) {
+                    try { pip.windowManager.removeViewImmediate(view); }
+                    catch (RuntimeException error) { org.telegram.messenger.FileLog.e(error); }
+                }
+            }
+            for (Animator animation : new Animator[] {pip.removalAnimator, pip.showRemoveAnimator, pip.pinAnimator}) {
+                if (animation != null) {
+                    animation.removeAllListeners();
+                    animation.cancel();
+                }
+            }
+            pip.onDestroy();
+        }
+        if (!windows.isEmpty()) NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.groupCallVisibilityChanged);
     }
 
     private static WindowManager.LayoutParams createWindowLayoutParams(Context context) {
@@ -997,6 +1034,7 @@ public class GroupCallPip implements NotificationCenter.NotificationCenterDelega
     }
 
     public static void updateVisibility(Context context) {
+        if (!org.telegram.messenger.NotesGate.isUnlocked()) { dismissForNotesLock(); return; }
         VoIPService service = VoIPService.getSharedInstance();
 
         boolean groupCall = false;

@@ -14,6 +14,7 @@ import android.content.res.Configuration;
 import android.os.Bundle;
 import android.os.SystemClock;
 import android.text.TextUtils;
+import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
@@ -32,6 +33,7 @@ import org.telegram.messenger.FileLog;
 import org.telegram.messenger.LocaleController;
 import org.telegram.messenger.MessagesController;
 import org.telegram.messenger.NotificationCenter;
+import org.telegram.messenger.NotesGate;
 import org.telegram.messenger.R;
 import org.telegram.messenger.SharedConfig;
 import org.telegram.messenger.UserConfig;
@@ -53,6 +55,9 @@ import java.util.ArrayList;
 public class ExternalActionActivity extends Activity implements INavigationLayout.INavigationLayoutDelegate {
 
     private boolean finished;
+    private boolean notesGateInitialized;
+    private boolean notesGatePasscodeAccepted;
+    private final ArrayList<Runnable> notesGatePendingResults = new ArrayList<>();
     private static final ArrayList<BaseFragment> mainFragmentsStack = new ArrayList<>();
     private static final ArrayList<BaseFragment> layerFragmentsStack = new ArrayList<>();
 
@@ -85,6 +90,9 @@ public class ExternalActionActivity extends Activity implements INavigationLayou
         }
 
         super.onCreate(savedInstanceState);
+        if (NotesGate.guardActivity(this, savedInstanceState)) {
+            return;
+        }
 
         if (!SharedConfig.passcodeHash.isEmpty() && SharedConfig.appLocked) {
             SharedConfig.lastPauseTime = (int) (SystemClock.elapsedRealtime() / 1000);
@@ -196,14 +204,53 @@ public class ExternalActionActivity extends Activity implements INavigationLayou
             layersActionBarLayout.removeAllFragments();
         }
 
+        notesGateInitialized = true;
         handleIntent(getIntent(), false, savedInstanceState != null, false, UserConfig.selectedAccount, 0);
         needLayout();
     }
 
-    private void showPasscodeActivity() {
-        if (passcodeView == null) {
+    protected final boolean canAccessSensitiveUi() {
+        return notesGateInitialized && !isFinishing() && !isDestroyed() && NotesGate.isUnlocked();
+    }
+
+    private boolean isTelegramPasscodePending() {
+        return SharedConfig.isWaitingForPasscodeEnter
+                || !SharedConfig.passcodeHash.isEmpty() && SharedConfig.appLocked
+                || passcodeView != null && passcodeView.getVisibility() == View.VISIBLE && !notesGatePasscodeAccepted;
+    }
+
+    private void drainNotesGateResults() {
+        while (canAccessSensitiveUi() && !isTelegramPasscodePending() && !notesGatePendingResults.isEmpty()) {
+            notesGatePendingResults.remove(0).run();
+        }
+    }
+
+    private void runOrDeferContent(Runnable callback) {
+        if (!notesGateInitialized || isFinishing() || isDestroyed()) {
             return;
         }
+        if (NotesGate.isUnlocked() && !isTelegramPasscodePending()) {
+            callback.run();
+        } else {
+            notesGatePendingResults.add(callback);
+        }
+    }
+
+    @Override
+    public boolean dispatchTouchEvent(MotionEvent event) {
+        return !canAccessSensitiveUi() || super.dispatchTouchEvent(event);
+    }
+
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent event) {
+        return !canAccessSensitiveUi() || super.dispatchKeyEvent(event);
+    }
+
+    private void showPasscodeActivity() {
+        if (!canAccessSensitiveUi() || passcodeView == null) {
+            return;
+        }
+        notesGatePasscodeAccepted = false;
         SharedConfig.appLocked = true;
         if (SecretMediaViewer.hasInstance() && SecretMediaViewer.getInstance().isVisible()) {
             SecretMediaViewer.getInstance().closePhoto(false, false);
@@ -215,7 +262,12 @@ public class ExternalActionActivity extends Activity implements INavigationLayou
         passcodeView.onShow(true, false);
         SharedConfig.isWaitingForPasscodeEnter = true;
         passcodeView.setDelegate(view -> {
+            if (!canAccessSensitiveUi()) {
+                return;
+            }
             SharedConfig.isWaitingForPasscodeEnter = false;
+            // The legitimate success delegate runs before the passcode exit animation ends.
+            notesGatePasscodeAccepted = true;
             if (passcodeSaveIntent != null) {
                 handleIntent(passcodeSaveIntent, passcodeSaveIntentIsNew, passcodeSaveIntentIsRestore, true, passcodeSaveIntentAccount, passcodeSaveIntentState);
                 passcodeSaveIntent = null;
@@ -226,10 +278,14 @@ public class ExternalActionActivity extends Activity implements INavigationLayou
             }
 
             NotificationCenter.getGlobalInstance().postNotificationName(NotificationCenter.passcodeDismissed, view);
+            drainNotesGateResults();
         });
     }
 
     public void onFinishLogin() {
+        if (!canAccessSensitiveUi()) {
+            return;
+        }
         handleIntent(passcodeSaveIntent, passcodeSaveIntentIsNew, passcodeSaveIntentIsRestore, true, passcodeSaveIntentAccount, passcodeSaveIntentState);
         actionBarLayout.removeAllFragments();
         if (layersActionBarLayout != null) {
@@ -241,6 +297,10 @@ public class ExternalActionActivity extends Activity implements INavigationLayou
     }
 
     protected boolean checkPasscode(final Intent intent, final boolean isNew, final boolean restore, final boolean fromPassword, final int intentAccount, int state) {
+        // Also protects widget configuration subclasses before they inspect their intent.
+        if (!canAccessSensitiveUi() || intent == null) {
+            return false;
+        }
         if (!fromPassword && (AndroidUtilities.needShowPasscode(true) || SharedConfig.isWaitingForPasscodeEnter)) {
             showPasscodeActivity();
             passcodeSaveIntent = intent;
@@ -291,6 +351,9 @@ public class ExternalActionActivity extends Activity implements INavigationLayou
                     return true;
                 } else if (activatedAccountsCount >= 2) {
                     AlertDialog alertDialog = AlertsCreator.createAccountSelectDialog(this, account -> {
+                        if (!canAccessSensitiveUi()) {
+                            return;
+                        }
                         if (account != intentAccount) {
                             switchToAccount(account);
                         }
@@ -329,11 +392,14 @@ public class ExternalActionActivity extends Activity implements INavigationLayou
                 final TL_account.authorizationForm authorizationForm = (TL_account.authorizationForm) response;
                 if (authorizationForm != null) {
                     TL_account.getPassword req2 = new TL_account.getPassword();
-                    requestId[0] = ConnectionsManager.getInstance(intentAccount).sendRequest(req2, (response1, error1) -> AndroidUtilities.runOnUIThread(() -> {
+                    requestId[0] = ConnectionsManager.getInstance(intentAccount).sendRequest(req2, (response1, error1) -> AndroidUtilities.runOnUIThread(() -> runOrDeferContent(() -> {
                         try {
                             progressDialog.dismiss();
                         } catch (Exception e) {
                             FileLog.e(e);
+                        }
+                        if (!canAccessSensitiveUi()) {
+                            return;
                         }
                         if (response1 != null) {
                             TL_account.Password accountPassword = (TL_account.Password) response1;
@@ -353,11 +419,14 @@ public class ExternalActionActivity extends Activity implements INavigationLayou
                                 layersActionBarLayout.showLastFragment();
                             }
                         }
-                    }));
+                    })));
                 } else {
-                    AndroidUtilities.runOnUIThread(() -> {
+                    AndroidUtilities.runOnUIThread(() -> runOrDeferContent(() -> {
                         try {
                             progressDialog.dismiss();
+                            if (!canAccessSensitiveUi()) {
+                                return;
+                            }
                             if ("APP_VERSION_OUTDATED".equals(error.text)) {
                                 AlertDialog dialog = AlertsCreator.showUpdateAppAlert(ExternalActionActivity.this, LocaleController.getString(R.string.UpdateAppAlert), true);
                                 if (dialog != null) {
@@ -383,7 +452,7 @@ public class ExternalActionActivity extends Activity implements INavigationLayou
                         } catch (Exception e) {
                             FileLog.e(e);
                         }
-                    });
+                    }));
                 }
             }, ConnectionsManager.RequestFlagFailOnServerErrors | ConnectionsManager.RequestFlagWithoutLogin);
         } else {
@@ -409,7 +478,7 @@ public class ExternalActionActivity extends Activity implements INavigationLayou
     }
 
     public void switchToAccount(int account) {
-        if (account == UserConfig.selectedAccount) {
+        if (!canAccessSensitiveUi() || account == UserConfig.selectedAccount) {
             return;
         }
         ConnectionsManager.getInstance(UserConfig.selectedAccount).setAppPaused(true, false);
@@ -428,6 +497,10 @@ public class ExternalActionActivity extends Activity implements INavigationLayou
     @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
+        setIntent(intent);
+        if (!notesGateInitialized || isFinishing() || NotesGate.deferIntent(this, intent)) {
+            return;
+        }
         handleIntent(intent, true, false, false, UserConfig.selectedAccount, 0);
     }
 
@@ -443,14 +516,20 @@ public class ExternalActionActivity extends Activity implements INavigationLayou
     }
 
     public void presentFragment(BaseFragment fragment) {
+        if (!canAccessSensitiveUi()) {
+            return;
+        }
         actionBarLayout.presentFragment(fragment);
     }
 
     public boolean presentFragment(final BaseFragment fragment, final boolean removeLast, boolean forceWithoutAnimation) {
-        return actionBarLayout.presentFragment(fragment, removeLast, forceWithoutAnimation, true, false);
+        return canAccessSensitiveUi() && actionBarLayout.presentFragment(fragment, removeLast, forceWithoutAnimation, true, false);
     }
 
     public void needLayout() {
+        if (!canAccessSensitiveUi()) {
+            return;
+        }
         if (AndroidUtilities.isTablet()) {
             RelativeLayout.LayoutParams relativeLayoutParams = (RelativeLayout.LayoutParams) layersActionBarLayout.getView().getLayoutParams();
             relativeLayoutParams.leftMargin = (AndroidUtilities.displaySize.x - relativeLayoutParams.width) / 2;
@@ -486,7 +565,7 @@ public class ExternalActionActivity extends Activity implements INavigationLayou
     }
 
     public void fixLayout() {
-        if (!AndroidUtilities.isTablet()) {
+        if (!canAccessSensitiveUi() || !AndroidUtilities.isTablet()) {
             return;
         }
         if (actionBarLayout == null) {
@@ -506,6 +585,9 @@ public class ExternalActionActivity extends Activity implements INavigationLayou
     @Override
     protected void onPause() {
         super.onPause();
+        if (!notesGateInitialized) {
+            return;
+        }
         actionBarLayout.onPause();
         if (AndroidUtilities.isTablet()) {
             layersActionBarLayout.onPause();
@@ -519,13 +601,62 @@ public class ExternalActionActivity extends Activity implements INavigationLayou
 
     @Override
     protected void onDestroy() {
+        notesGatePendingResults.clear();
         super.onDestroy();
+        if (!notesGateInitialized) {
+            return;
+        }
         onFinish();
+        notesGateInitialized = false;
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        if (!notesGateInitialized || isFinishing() || isDestroyed()) {
+            return;
+        }
+        if (!NotesGate.isUnlocked() || isTelegramPasscodePending()) {
+            final Intent pendingData = data == null ? null : new Intent(data);
+            notesGatePendingResults.add(() -> onActivityResult(requestCode, resultCode, pendingData));
+            return;
+        }
+        super.onActivityResult(requestCode, resultCode, data);
+        BaseFragment fragment = getResultFragment();
+        if (fragment != null) {
+            fragment.onActivityResultFragment(requestCode, resultCode, data);
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions, @NonNull int[] grantResults) {
+        if (!notesGateInitialized || isFinishing() || isDestroyed()) {
+            return;
+        }
+        if (!NotesGate.isUnlocked() || isTelegramPasscodePending()) {
+            final String[] pendingPermissions = permissions.clone();
+            final int[] pendingGrants = grantResults.clone();
+            notesGatePendingResults.add(() -> onRequestPermissionsResult(requestCode, pendingPermissions, pendingGrants));
+            return;
+        }
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        BaseFragment fragment = getResultFragment();
+        if (fragment != null) {
+            fragment.onRequestPermissionsResultFragment(requestCode, permissions, grantResults);
+        }
+    }
+
+    private BaseFragment getResultFragment() {
+        INavigationLayout layout = layersActionBarLayout != null && !layersActionBarLayout.getFragmentStack().isEmpty()
+                ? layersActionBarLayout : actionBarLayout;
+        return layout.getLastFragment();
     }
 
     @Override
     protected void onResume() {
         super.onResume();
+        if (!notesGateInitialized || isFinishing() || NotesGate.guardResume(this)) {
+            return;
+        }
         actionBarLayout.onResume();
         if (AndroidUtilities.isTablet()) {
             layersActionBarLayout.onResume();
@@ -544,6 +675,7 @@ public class ExternalActionActivity extends Activity implements INavigationLayou
             }
             passcodeView.onResume();
         }
+        drainNotesGateResults();
     }
 
     private void onPasscodePause() {
@@ -606,6 +738,9 @@ public class ExternalActionActivity extends Activity implements INavigationLayou
 
     @Override
     public void onBackPressed() {
+        if (!notesGateInitialized || isFinishing() || NotesGate.guardResume(this)) {
+            return;
+        }
         if (passcodeView.getVisibility() == View.VISIBLE) {
             finish();
             return;
@@ -626,6 +761,9 @@ public class ExternalActionActivity extends Activity implements INavigationLayou
     @Override
     public void onLowMemory() {
         super.onLowMemory();
+        if (!notesGateInitialized) {
+            return;
+        }
         actionBarLayout.onLowMemory();
         if (AndroidUtilities.isTablet()) {
             layersActionBarLayout.onLowMemory();
@@ -634,16 +772,19 @@ public class ExternalActionActivity extends Activity implements INavigationLayou
 
     @Override
     public boolean needPresentFragment(BaseFragment fragment, boolean removeLast, boolean forceWithoutAnimation, INavigationLayout layout) {
-        return true;
+        return canAccessSensitiveUi();
     }
 
     @Override
     public boolean needAddFragmentToStack(BaseFragment fragment, INavigationLayout layout) {
-        return true;
+        return canAccessSensitiveUi();
     }
 
     @Override
     public boolean needCloseLastFragment(INavigationLayout layout) {
+        if (!canAccessSensitiveUi()) {
+            return false;
+        }
         if (AndroidUtilities.isTablet()) {
             if (layout == actionBarLayout && layout.getFragmentStack().size() <= 1) {
                 onFinish();
@@ -666,6 +807,9 @@ public class ExternalActionActivity extends Activity implements INavigationLayou
 
     @Override
     public void onRebuildAllFragments(INavigationLayout layout, boolean last) {
+        if (!canAccessSensitiveUi()) {
+            return;
+        }
         if (AndroidUtilities.isTablet()) {
             if (layout == layersActionBarLayout) {
                 actionBarLayout.rebuildAllFragmentViews(last, last);

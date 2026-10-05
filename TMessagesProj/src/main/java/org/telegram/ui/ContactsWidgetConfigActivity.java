@@ -27,6 +27,9 @@ public class ContactsWidgetConfigActivity extends ExternalActionActivity {
             args.putBoolean("allowSwitchAccount", true);
             EditWidgetActivity fragment = new EditWidgetActivity(EditWidgetActivity.TYPE_CONTACTS, creatingAppWidgetId);
             fragment.setDelegate(dialogs -> {
+                if (!canAccessSensitiveUi()) {
+                    return;
+                }
                 Intent resultValue = new Intent();
                 resultValue.putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, creatingAppWidgetId);
                 setResult(RESULT_OK, resultValue);

@@ -139,6 +139,7 @@ public class VoIPPiPView implements VoIPService.StateListener, IPipSourceDelegat
     };
 
     public static void show(Activity activity, int account, int parentWidth, int parentHeight, int animationType) {
+        if (!org.telegram.messenger.NotesGate.isUnlocked()) return;
         if (instance != null || VideoCapturerDevice.eglBase == null) {
             return;
         }
@@ -249,6 +250,29 @@ public class VoIPPiPView implements VoIPService.StateListener, IPipSourceDelegat
         }
         expandedInstance = null;
         instance = null;
+    }
+
+    /** The privacy gate must also close windows while a PiP transition is in progress. */
+    public static void dismissForNotesLock() {
+        VoIPPiPView small = instance;
+        VoIPPiPView large = expandedInstance;
+        instance = null;
+        expandedInstance = null;
+        switchingToPip = false;
+        for (VoIPPiPView pip : new VoIPPiPView[] {small, large}) {
+            if (pip == null) continue;
+            pip.windowView.setVisibility(View.INVISIBLE);
+            pip.windowView.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
+            pip.windowView.animate().setListener(null).cancel();
+            AndroidUtilities.cancelRunOnUIThread(pip.collapseRunnable);
+            for (Animator animation : new Animator[] {pip.expandAnimator, pip.animatorToCameraMini, pip.moveToBoundsAnimator}) {
+                if (animation != null) {
+                    animation.removeAllListeners();
+                    animation.cancel();
+                }
+            }
+            try { pip.finishInternal(); } catch (RuntimeException error) { FileLog.e(error); }
+        }
     }
 
     public static boolean isExpanding() {
@@ -540,7 +564,13 @@ public class VoIPPiPView implements VoIPService.StateListener, IPipSourceDelegat
     private Runnable firstFrameCallback;
 
     @Override
+    public boolean pipIsAvailable() {
+        return org.telegram.messenger.NotesGate.isUnlocked() && (instance == this || expandedInstance == this);
+    }
+
+    @Override
     public Bitmap pipCreatePrimaryWindowViewBitmap() {
+        if (!org.telegram.messenger.NotesGate.isUnlocked()) return null;
         if (callingUserTextureView == null || !callingUserTextureView.renderer.isAvailable()) {
             return null;
         }
@@ -595,6 +625,7 @@ public class VoIPPiPView implements VoIPService.StateListener, IPipSourceDelegat
 
     @Override
     public Bitmap pipCreatePictureInPictureViewBitmap() {
+        if (!org.telegram.messenger.NotesGate.isUnlocked()) return null;
         if (pipTextureView == null || !pipTextureView.renderer.isAvailable()) {
             return null;
         }
@@ -604,6 +635,7 @@ public class VoIPPiPView implements VoIPService.StateListener, IPipSourceDelegat
 
     @Override
     public void pipShowPrimaryWindowView(Runnable firstFrameCallback) {
+        if (!org.telegram.messenger.NotesGate.isUnlocked()) return;
         this.firstFrameCallback = firstFrameCallback;
         windowManager.addView(windowView, windowLayoutParams);
 
@@ -784,6 +816,7 @@ public class VoIPPiPView implements VoIPService.StateListener, IPipSourceDelegat
         }
 
         private void expand(boolean expanded) {
+            if (!org.telegram.messenger.NotesGate.isUnlocked()) return;
             AndroidUtilities.cancelRunOnUIThread(collapseRunnable);
             if (instance == null || expandedAnimationInProgress || instance.expanded == expanded) {
                 return;

@@ -27,6 +27,9 @@ public class ChatsWidgetConfigActivity extends ExternalActionActivity {
             args.putBoolean("allowSwitchAccount", true);
             EditWidgetActivity fragment = new EditWidgetActivity(EditWidgetActivity.TYPE_CHATS, creatingAppWidgetId);
             fragment.setDelegate(dialogs -> {
+                if (!canAccessSensitiveUi()) {
+                    return;
+                }
                 Intent resultValue = new Intent();
                 resultValue.putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, creatingAppWidgetId);
                 setResult(RESULT_OK, resultValue);

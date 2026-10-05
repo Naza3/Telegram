@@ -23,6 +23,7 @@ import org.telegram.messenger.AndroidUtilities;
 import org.telegram.messenger.ApplicationLoader;
 import org.telegram.messenger.FileLog;
 import org.telegram.messenger.MessageObject;
+import org.telegram.messenger.NotesGate;
 import org.telegram.messenger.R;
 import org.telegram.messenger.UserConfig;
 import org.telegram.messenger.Utilities;
@@ -33,6 +34,7 @@ import org.telegram.ui.Components.ShareAlert;
 public class ShareActivity extends Activity {
 
     private Dialog visibleDialog;
+    private boolean notesGateInitialized;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -42,6 +44,10 @@ public class ShareActivity extends Activity {
         requestWindowFeature(Window.FEATURE_NO_TITLE);
         setTheme(R.style.Theme_TMessages_Transparent);
         super.onCreate(savedInstanceState);
+        if (NotesGate.guardActivity(this, savedInstanceState)) {
+            return;
+        }
+        notesGateInitialized = true;
         setContentView(new View(this), new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         Intent intent = getIntent();
@@ -93,8 +99,28 @@ public class ShareActivity extends Activity {
     }
 
     @Override
+    protected void onResume() {
+        super.onResume();
+        if (!notesGateInitialized || isFinishing() || NotesGate.guardResume(this)) {
+            return;
+        }
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        if (!notesGateInitialized || isFinishing() || NotesGate.deferIntent(this, intent)) {
+            return;
+        }
+    }
+
+    @Override
     public void onPause() {
         super.onPause();
+        if (!notesGateInitialized) {
+            return;
+        }
         try {
             if (visibleDialog != null && visibleDialog.isShowing()) {
                 visibleDialog.dismiss();

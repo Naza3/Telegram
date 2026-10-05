@@ -398,6 +398,7 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        NotesGate.prepareActivity(this);
         if (!NotesGate.isUnlocked()) {
             notesGateRedirected = true;
             super.onCreate(savedInstanceState);
@@ -7332,6 +7333,12 @@ public class LaunchActivity extends BasePermissionsActivity implements INavigati
             MessagesController.getInstance(currentAccount).checkPromoInfo(true);
         }
         drainNotesGateResults();
+        if (!isFinishing() && !isDestroyed()) {
+            Intent deferredIntent = NotesGate.takeDeferredIntent(this);
+            if (deferredIntent != null) {
+                onNewIntent(deferredIntent);
+            }
+        }
         //if (refreshRateController != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
         //    refreshRateController.start();
         //}

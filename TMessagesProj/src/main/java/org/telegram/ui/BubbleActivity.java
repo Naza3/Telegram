@@ -355,6 +355,12 @@ public class BubbleActivity extends BasePermissionsActivity implements INavigati
         }
         instance = this;
         drainNotesGateResults();
+        if (!isFinishing() && !isDestroyed()) {
+            Intent deferredIntent = NotesGate.takeDeferredIntent(this);
+            if (deferredIntent != null) {
+                onNewIntent(deferredIntent);
+            }
+        }
     }
 
     private void onPasscodePause() {

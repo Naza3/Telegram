@@ -104,12 +104,13 @@ jobs:
             'ndk;27.2.12479018' 'cmake;3.22.1'
           "$sdkmanager" --sdk_root="$sdk_root" --list_installed
 
-      - name: Verify fingerprint session and cancellation boundaries
+      - name: Verify fingerprint session, timeout and settings boundaries
         shell: bash
         run: |
           ECJ_JAR="$MNN_BUILD_DIR/ai-summary-tools/ecj.jar" \
           ANDROID_JAR="$ANDROID_HOME/platforms/android-36/android.jar" \
             bash tests/notes-gate/run.sh
+          ECJ_JAR="$MNN_BUILD_DIR/ai-summary-tools/ecj.jar" bash tests/notes-gate/preferences/run.sh
 
       - name: Cache Gradle downloads
         uses: actions/cache@v4

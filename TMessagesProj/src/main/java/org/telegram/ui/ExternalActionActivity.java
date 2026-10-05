@@ -676,6 +676,12 @@ public class ExternalActionActivity extends Activity implements INavigationLayou
             passcodeView.onResume();
         }
         drainNotesGateResults();
+        if (!isFinishing() && !isDestroyed()) {
+            Intent deferredIntent = NotesGate.takeDeferredIntent(this);
+            if (deferredIntent != null) {
+                onNewIntent(deferredIntent);
+            }
+        }
     }
 
     private void onPasscodePause() {

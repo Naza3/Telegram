@@ -4,11 +4,13 @@ package org.telegram.messenger;
 import android.app.Activity;
 import android.app.Application;
 import android.app.Dialog;
+import android.app.KeyguardManager;
 import android.content.Context;
 import android.content.Intent;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.PowerManager;
+import android.os.SystemClock;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -41,6 +43,8 @@ public final class NotesGate {
     private static WeakReference<Activity> resumedProtected = new WeakReference<>(null);
     private static PendingEntry pending;
     private static boolean installed;
+    private static Runnable relockTask;
+    private static long relockGeneration;
 
     private NotesGate() { }
 
@@ -75,7 +79,14 @@ public final class NotesGate {
 
     public static boolean isScreenInteractive(Context context) {
         PowerManager manager = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
-        return manager != null && manager.isInteractive();
+        KeyguardManager keyguard = (KeyguardManager) context.getSystemService(Context.KEYGUARD_SERVICE);
+        return manager != null && manager.isInteractive() && keyguard != null && !keyguard.isKeyguardLocked();
+    }
+
+    /** Called only for an actual Activity entry/start/resume, never from an async content callback. */
+    public static boolean prepareActivity(Activity activity) {
+        cancelRelockTask();
+        return STATE.resumeSession(SystemClock.elapsedRealtime(), isScreenInteractive(activity));
     }
 
     public static void install(Application application) {
@@ -85,6 +96,7 @@ public final class NotesGate {
             @Override public void onActivityCreated(Activity a, Bundle state) {
                 if (isProtected(a)) {
                     protectedActivities.put(a, Boolean.TRUE);
+                    prepareActivity(a);
                     // Do not disable ordinary screenshots while the user is authenticated.
                     if (Build.VERSION.SDK_INT >= 33) a.setRecentsScreenshotEnabled(false);
                     if (!isUnlocked()) cover(a);
@@ -95,6 +107,7 @@ public final class NotesGate {
             }
             @Override public void onActivityResumed(Activity a) {
                 if (isProtected(a)) {
+                    prepareActivity(a);
                     resumedProtected = new WeakReference<>(a);
                     if (isUnlocked()) onProtectedResume(a);
                     else cover(a);
@@ -105,11 +118,14 @@ public final class NotesGate {
                 protectedActivities.remove(a);
                 startedActivities.remove(a);
             }
-            @Override public void onActivityStarted(Activity a) { startedActivities.put(a, Boolean.TRUE); }
+            @Override public void onActivityStarted(Activity a) {
+                startedActivities.put(a, Boolean.TRUE);
+                if (isProtected(a)) prepareActivity(a);
+            }
             @Override public void onActivityStopped(Activity a) {
                 startedActivities.remove(a);
                 // Also covers Home/screen-off during the brief Notes-to-content handoff.
-                if (startedActivities.isEmpty()) lock();
+                if (startedActivities.isEmpty()) beginBackground();
             }
             @Override public void onActivitySaveInstanceState(Activity a, Bundle b) { }
         });
@@ -138,9 +154,24 @@ public final class NotesGate {
         return true;
     }
 
+    /** A notification/link delivered while paused is replayed by its original, resumed host. */
+    public static Intent takeDeferredIntent(Activity activity) {
+        if (!isUnlocked() || resumedProtected.get() != activity || pending == null
+                || !pending.replayIntent || pending.resumeExisting == null
+                || pending.resumeExisting.get() != activity) return null;
+        Intent intent = new Intent(pending.intent);
+        pending = null;
+        return intent;
+    }
+
     /** Must be checked before proxy links, account switching, sharing or any other intent effect. */
     public static boolean deferIntent(Activity activity, Intent intent) {
-        if (isUnlocked()) return false;
+        if (isUnlocked()) {
+            // A newer foreground request supersedes an older paused request for the same host.
+            if (pending != null && pending.replayIntent && pending.resumeExisting != null
+                    && pending.resumeExisting.get() == activity) pending = null;
+            return false;
+        }
         remember(activity, intent, false);
         pending.resumeExisting = new WeakReference<>(activity);
         pending.replayIntent = true;
@@ -187,6 +218,7 @@ public final class NotesGate {
     /** Called only after the hardware proof and foreground/epoch checks both succeed. */
     public static boolean enterProtectedActivity(ShiyeNotesActivity activity) {
         if (!isUnlocked() || !isScreenInteractive(activity)) { lock(); return false; }
+        cancelRelockTask();
         PendingEntry entry = pending;
         if (entry == null) entry = new PendingEntry(LaunchActivity.class, new Intent(Intent.ACTION_MAIN), false);
         Activity existing = entry.resumeExisting == null ? null : entry.resumeExisting.get();
@@ -233,7 +265,7 @@ public final class NotesGate {
     public static void onProtectedPause(Activity activity) {
         if (resumedProtected.get() == activity) resumedProtected.clear();
         cover(activity); // synchronous: hide input/accessibility before changing activities
-        lock();
+        beginBackground();
     }
 
     public static void onProtectedResume(Activity activity) {
@@ -243,7 +275,47 @@ public final class NotesGate {
     }
 
     public static void lock() {
+        cancelRelockTask();
         STATE.lock(); // invalidate first; cancel() can itself deliver a late hardware callback
+        hideProtectedContent();
+    }
+
+    private static void beginBackground() {
+        if (!isScreenInteractive(ApplicationLoader.applicationContext)) {
+            lock();
+            return;
+        }
+        boolean wasVisible = STATE.isUnlocked();
+        STATE.onBackground(SystemClock.elapsedRealtime(), NotesEntryPreferences.getRelockDelaySeconds() * 1000L);
+        // The session may remain valid, but async dialogs/media stay blocked throughout background.
+        if (wasVisible) hideProtectedContent();
+        scheduleRelock();
+    }
+
+    private static void cancelRelockTask() {
+        ++relockGeneration;
+        if (relockTask != null) AndroidUtilities.cancelRunOnUIThread(relockTask);
+        relockTask = null;
+    }
+
+    private static void scheduleRelock() {
+        cancelRelockTask();
+        long remaining = STATE.remainingGraceMs(SystemClock.elapsedRealtime());
+        if (remaining <= 0) return;
+        final long generation = relockGeneration;
+        relockTask = () -> {
+            if (generation != relockGeneration) return;
+            relockTask = null;
+            if (!STATE.hasValidSession(SystemClock.elapsedRealtime())) {
+                lock();
+            } else if (!STATE.isUnlocked()) {
+                scheduleRelock();
+            }
+        };
+        AndroidUtilities.runOnUIThread(relockTask, remaining);
+    }
+
+    private static void hideProtectedContent() {
         ShiyeNotesActivity current = notes.get();
         if (current != null) current.onGateLocked();
         for (Dialog dialog : new ArrayList<>(contentDialogs.keySet())) {

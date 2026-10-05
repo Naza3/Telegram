@@ -13,6 +13,8 @@ java -jar "$ecj_jar" -1.8 -encoding UTF-8 -warn:none -cp "$android_jar" -d "$cla
   "$repo_dir/TMessagesProj/src/main/java/org/telegram/messenger/NotesGateState.java" \
   "$repo_dir/TMessagesProj/src/main/java/org/telegram/messenger/NotesFingerprintAuthenticator.java" \
   "$repo_dir/tests/notes-gate/NotesGateStateTest.java" \
+  "$repo_dir/tests/notes-gate/NotesGateGraceTest.java" \
   "$repo_dir/tests/notes-gate/NotesFingerprintAuthenticatorTest.java"
 java -cp "$classes:$android_jar" org.telegram.messenger.NotesGateStateTest
+java -cp "$classes:$android_jar" org.telegram.messenger.NotesGateGraceTest
 java -cp "$classes:$android_jar" org.telegram.messenger.NotesFingerprintAuthenticatorTest

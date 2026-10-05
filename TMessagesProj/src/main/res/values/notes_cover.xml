@@ -19,10 +19,21 @@
     <string name="ShiyeNotesDeleteFailed">未能删除，笔记仍保留。%1$s</string>
     <string name="ShiyeNotesCancel">取消</string>
     <string name="ShiyeNotesEntrySettings">拾页入口</string>
-    <string name="ShiyeNotesEntrySettingsInfo">首页验证手势</string>
+    <string name="ShiyeNotesEntrySettingsInfo">首页验证手势与后台重新验证</string>
     <string name="ShiyeNotesEntryGesture">验证手势</string>
     <string name="ShiyeNotesEntryLongPress">长按“拾页”标题 2 秒</string>
     <string name="ShiyeNotesEntryFiveTaps">连续点按“拾页”标题 5 次</string>
-    <string name="ShiyeNotesEntryExplanation">在拾页首页或笔记编辑页使用所选手势后，需要通过设备指纹验证。切换到后台或熄屏后立即重新锁定。</string>
-    <string name="ShiyeNotesEntrySaveFailed">未能保存手势设置，请重试。</string>
+    <string name="ShiyeNotesEntryExplanation">在拾页首页或笔记编辑页使用所选手势后，需要通过设备指纹验证。</string>
+    <string name="ShiyeNotesEntrySaveFailed">未能保存设置，仍使用上次保存的选项。请重试。</string>
+    <string name="ShiyeNotesRelockTitle">后台重新验证</string>
+    <string name="ShiyeNotesRelockImmediate">立即</string>
+    <string name="ShiyeNotesRelock30Seconds">30 秒</string>
+    <string name="ShiyeNotesRelock60Seconds">60 秒</string>
+    <string name="ShiyeNotesRelock5Minutes">5 分钟</string>
+    <string name="ShiyeNotesRelockCustom">自定义秒数</string>
+    <string name="ShiyeNotesRelockCustomValue">自定义：%1$d 秒</string>
+    <string name="ShiyeNotesRelockSecondsHint">秒数（0–86400）</string>
+    <string name="ShiyeNotesRelockSave">保存等待时间</string>
+    <string name="ShiyeNotesRelockInvalid">请输入 0 到 86400 之间的整数秒数。</string>
+    <string name="ShiyeNotesRelockExplanation">在等待时间内返回无需再次验证；息屏和应用重启仍立即锁定，原 Telegram 密码锁独立生效。</string>
 </resources>

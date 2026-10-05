@@ -26,6 +26,7 @@ public final class ShiyeNotesActivity extends Activity {
     private NotesCoverView notesView;
     private NotesFingerprintAuthenticator fingerprint;
     private AlertDialog authenticationDialog;
+    private AlertDialog authenticationMessageDialog;
     private long host;
     private long attempt;
     private boolean resumed;
@@ -41,7 +42,7 @@ public final class ShiyeNotesActivity extends Activity {
         AndroidUtilities.checkDisplaySize(this, getResources().getConfiguration());
         AndroidUtilities.fillStatusBarHeight(this, false);
         Theme.createCommonChatResources();
-        NotesGate.lock();
+        if (!NotesGate.prepareActivity(this)) NotesGate.lock();
         host = NotesGate.state().attachHost();
         NotesGate.attachNotes(this);
         fingerprint = new NotesFingerprintAuthenticator(this);
@@ -63,7 +64,8 @@ public final class ShiyeNotesActivity extends Activity {
         super.onNewIntent(intent);
         setIntent(intent);
         openingProtectedActivity = false;
-        NotesGate.lock();
+        if (!NotesGate.prepareActivity(this)) NotesGate.lock();
+        if (resumed) resumeExistingSession();
     }
 
     @Override protected void onResume() {
@@ -73,6 +75,20 @@ public final class ShiyeNotesActivity extends Activity {
         NotesGate.state().onResume(host, NotesGate.isScreenInteractive(this));
         notesView.refreshTheme();
         updateSystemBars();
+        resumeExistingSession();
+    }
+
+    /** Launcher aliases still enter this activity; a valid grace period continues the old session. */
+    private void resumeExistingSession() {
+        if (!resumed || isFinishing() || openingProtectedActivity || !NotesGate.prepareActivity(this)) return;
+        openingProtectedActivity = true;
+        cancelAuthentication();
+        if (NotesGate.enterProtectedActivity(this)) {
+            finish();
+            overridePendingTransition(0, 0);
+        } else {
+            openingProtectedActivity = false;
+        }
     }
 
     @Override protected void onPause() {
@@ -112,7 +128,7 @@ public final class ShiyeNotesActivity extends Activity {
     }
 
     private void requestFingerprint() {
-        if (!resumed || isFinishing() || authenticationDialog != null) return;
+        if (!resumed || isFinishing() || authenticationDialog != null || authenticationMessageDialog != null) return;
         NotesGate.state().onResume(host, NotesGate.isScreenInteractive(this));
         NotesFingerprintAuthenticator.Availability availability = fingerprint.availability();
         if (availability != NotesFingerprintAuthenticator.Availability.AVAILABLE) {
@@ -128,7 +144,7 @@ public final class ShiyeNotesActivity extends Activity {
                     catch (RuntimeException ignored) { }
                 });
             }
-            builder.show();
+            showAuthenticationMessage(builder);
             return;
         }
         final long authenticationAttempt = NotesGate.state().beginAuthentication(host);
@@ -174,8 +190,17 @@ public final class ShiyeNotesActivity extends Activity {
 
     private void showAuthenticationError(String message) {
         if (!resumed || isFinishing()) return;
-        new AlertDialog.Builder(this).setTitle("指纹验证").setMessage(message)
-                .setPositiveButton("关闭", null).show();
+        showAuthenticationMessage(new AlertDialog.Builder(this).setTitle("指纹验证").setMessage(message)
+                .setPositiveButton("关闭", null));
+    }
+
+    private void showAuthenticationMessage(AlertDialog.Builder builder) {
+        authenticationMessageDialog = builder.create();
+        final AlertDialog dialog = authenticationMessageDialog;
+        dialog.setOnDismissListener(ignored -> {
+            if (authenticationMessageDialog == dialog) authenticationMessageDialog = null;
+        });
+        dialog.show();
     }
 
     private void cancelAuthentication() {
@@ -185,6 +210,9 @@ public final class ShiyeNotesActivity extends Activity {
         if (fingerprint != null) fingerprint.cancel();
         AlertDialog dialog = authenticationDialog;
         authenticationDialog = null;
+        if (dialog != null) { dialog.setOnDismissListener(null); dialog.dismiss(); }
+        dialog = authenticationMessageDialog;
+        authenticationMessageDialog = null;
         if (dialog != null) { dialog.setOnDismissListener(null); dialog.dismiss(); }
         if (notesView != null) notesView.setAuthenticationPending(false);
     }

@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Trial build tag, matching gradle.properties (example: mnn-v12.10.6-7115); does not publish'
+        description: 'Trial build tag, matching gradle.properties (example: mnn-v12.10.6-7116); does not publish'
         required: true
         type: string
   push:
@@ -132,12 +132,13 @@ jobs:
             'ndk;27.2.12479018' 'cmake;3.22.1'
           "$sdkmanager" --sdk_root="$sdk_root" --list_installed
 
-      - name: Verify fingerprint session and cancellation boundaries
+      - name: Verify fingerprint session, timeout and settings boundaries
         shell: bash
         run: |
           ECJ_JAR="$MNN_BUILD_DIR/ai-summary-tools/ecj.jar" \
           ANDROID_JAR="$ANDROID_HOME/platforms/android-36/android.jar" \
             bash tests/notes-gate/run.sh
+          ECJ_JAR="$MNN_BUILD_DIR/ai-summary-tools/ecj.jar" bash tests/notes-gate/preferences/run.sh
 
       - name: Cache Gradle downloads
         uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3

@@ -49,8 +49,10 @@ public class ShareActivity extends Activity {
         }
         notesGateInitialized = true;
         setContentView(new View(this), new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        handleIntent(getIntent());
+    }
 
-        Intent intent = getIntent();
+    private void handleIntent(Intent intent) {
         if (intent == null || !Intent.ACTION_VIEW.equals(intent.getAction()) || intent.getData() == null) {
             finish();
             return;
@@ -104,6 +106,10 @@ public class ShareActivity extends Activity {
         if (!notesGateInitialized || isFinishing() || NotesGate.guardResume(this)) {
             return;
         }
+        Intent deferredIntent = NotesGate.takeDeferredIntent(this);
+        if (deferredIntent != null) {
+            onNewIntent(deferredIntent);
+        }
     }
 
     @Override
@@ -113,6 +119,12 @@ public class ShareActivity extends Activity {
         if (!notesGateInitialized || isFinishing() || NotesGate.deferIntent(this, intent)) {
             return;
         }
+        if (visibleDialog != null) {
+            visibleDialog.setOnDismissListener(null);
+            visibleDialog.dismiss();
+            visibleDialog = null;
+        }
+        handleIntent(intent);
     }
 
     @Override

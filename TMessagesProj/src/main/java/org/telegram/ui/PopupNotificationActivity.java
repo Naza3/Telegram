@@ -1517,6 +1517,12 @@ public class PopupNotificationActivity extends Activity implements NotificationC
         checkAndUpdateAvatar();
         wakeLock.acquire(7000);
         drainDeferredPermissionResults();
+        if (!isFinishing() && !isDestroyed()) {
+            Intent deferredIntent = NotesGate.takeDeferredIntent(this);
+            if (deferredIntent != null) {
+                onNewIntent(deferredIntent);
+            }
+        }
     }
 
     @Override

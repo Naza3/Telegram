@@ -33,6 +33,8 @@ public class RadioCell extends FrameLayout {
 
     private Theme.ResourcesProvider resourcesProvider;
     private TextView textView;
+    // ThemeDescription looks up this field by name when applying theme colors.
+    @androidx.annotation.Keep
     private RadioButton radioButton;
     private boolean needDivider;
 

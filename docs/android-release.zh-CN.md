@@ -6,7 +6,7 @@
 - `workflow_dispatch`：使用输入的 `release_tag` 试构建，只上传 Actions artifact，不创建标签或 GitHub Release。
 - 功能分支只修改此工作流时可产生注册运行；构建 job 明确排除分支 push。
 
-本轮仅准备工作流和工具，不创建发布标签。应用显示名称和图标以所构建源码为准，工作流不覆盖品牌资源。
+应用显示名称和图标以所构建源码为准，工作流不覆盖品牌资源。已完成一次手动 Release 试构建，尚未创建正式发布标签或 GitHub Release。
 
 ## 版本规则
 
@@ -94,7 +94,7 @@ git push origin mnn-v12.10.6-7113
 
 ## 构建和验证范围
 
-构建环境固定为 Ubuntu 24.04、JDK 21、Android SDK 36、Build Tools 36.0.0、NDK 27.2.12479018、CMake 3.22.1。源码检出包含提交固定的递归子模块。Gradle 下载缓存与原 Debug 构建共用缓存规则，签名密钥不在缓存内。Gradle 使用 6 GiB heap、1 GiB metaspace、2 workers，并关闭并行项目构建；实际 Release 的 R8 内存和耗时仍以 Actions 日志为准。
+构建环境固定为 Ubuntu 24.04、JDK 21、Android SDK 36、Build Tools 36.0.0、NDK 27.2.12479018、CMake 3.22.1。源码检出包含提交固定的递归子模块。Gradle 下载缓存与原 Debug 构建共用缓存规则，签名密钥不在缓存内。Gradle 使用 6 GiB heap、1 GiB metaspace、2 workers，并关闭并行项目构建；首次成功试构建的 Gradle 耗时为 15 分 58 秒，后续耗时以当次日志为准。
 
 Release 工作流保留现有纯 JVM、controller、foreground-service、fixture、群消息及真实 TL 序列化回归。涉及真实编译 TL 类的测试明确读取 **Release** 库的 `classes.jar`，不依赖曾构建过 Debug。发布依赖实际 `AfatRelease` APK 的签名、manifest、ABI 和对齐检查，单独完成配置校验不代表 APK 构建成功。
 
@@ -104,4 +104,18 @@ Release 工作流保留现有纯 JVM、controller、foreground-service、fixture
 python3 -B -m unittest discover -s tests/build-config -p test_release_tag.py -v
 ```
 
-本轮已执行 6 个标签校验测试方法，覆盖正常版本、Afat 上界、无效/注入输入、源码不匹配、旧标签回退/复用和 Actions 输出安全。工作流已通过 `actionlint` 静态检查。实际 Release APK 构建、R8 运行和手机覆盖安装尚待试构建及设备验证，不能据此宣称已经通过。
+本地及云端均通过 35 项版本、签名和 API 配置测试，其中 6 个标签校验测试方法覆盖正常版本、Afat 上界、无效/注入输入、源码不匹配、旧标签回退/复用和 Actions 输出安全。工作流已通过 `actionlint` 静态检查。
+
+2026-10-05 的 [手动试构建 37252179371](https://github.com/Naza3/Telegram/actions/runs/37252179371) 已成功，发布 job 按预期跳过：
+
+| 项目 | 验证结果 |
+| --- | --- |
+| 源码 commit | `43710c8da0684c3920562cfd644e763b87c889b2` |
+| APK | `12.10.6-mnn.7113`，`71139`，36,626,144 字节 |
+| APK SHA-256 | `6e6d6e3dbdd71d6ddc79c3a39e93d8ca1631d4e2e41afad659492b7721c0889c` |
+| R8 / 资源压缩 | 实际执行 `minifyAfatReleaseWithR8` / `optimizeAfatReleaseResources` 并成功 |
+| APK 验收 | 上表中的原证书、v1/v2、包名、版本、非调试、ARM64 和 16 KiB ZIP 对齐全部通过 |
+| 功能回归 | AI 核心、controller、后台服务、fixtures、真实 TL 序列化及群消息测试全部通过 |
+| 下载 | [APK、校验和与公开构建信息](https://github.com/Naza3/Telegram/actions/runs/37252179371/artifacts/11321508082)，artifact 于 2026-10-19 01:58 UTC 过期 |
+
+手机上的覆盖安装、交互和后台行为仍需实际设备验证。手动试构建不等于已验证 tag 推送后的发布 job；正式发布路径目前完成的是静态检查与版本规则测试。

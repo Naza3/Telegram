@@ -44,3 +44,14 @@ Release 和 Debug Actions 都执行这些检查。Android 编译验证资源和�
 - 保持 `org.telegram.messenger.beta` 包名和“拾页”名称，Release 非调试包、仅 ARM64、16 KiB 对齐检查通过。
 - 认证专项 63 条断言、笔记存储 125 条断言、35 项构建配置测试，以及 AI 总结、控制器、后台服务、发布实体、群消息过滤和本地撤回记录回归检查均通过。
 - 本次为手动触发的 Release 构建产物，未创建正式 tag 或发布 GitHub Release。
+
+## 7116 构建记录
+
+- 源码：`a659291a27ea44c789a30a5e2988a771197e6895`，分支 `feature/mnn-group-summary`。增加可配置的后台重新验证等待时间，默认 30 秒。
+- [GitHub Actions 37264041823](https://github.com/Naza3/Telegram/actions/runs/37264041823) 成功；Release 编译用时 21 分 25 秒。
+- [下载签名安装包](https://github.com/Naza3/Telegram/actions/runs/37264041823/artifacts/11325887730)：`Shiye-12.10.6-mnn.7116-arm64-release.apk`，36,831,971 字节，APK versionCode `71169`。Actions 产物保留至 2026-10-19 05:00 UTC；需要登录 GitHub 下载并解压。
+- APK SHA-256：`1ebd6658881a38573d4e887f90ccc79ebc7447594646e78f753fc8026bcf0534`。
+- 原签名证书 SHA-256：`c8715ba0c50510b9c1cc4d52b0fd2b0aed82dd55675f89c4f48d68978b7df313`；v1/v2 签名校验均通过，可覆盖安装原签名版本。
+- 保持 `org.telegram.messenger.beta` 包名和“拾页”名称，Release 非调试包、仅 ARM64、16 KiB 对齐检查通过。
+- 认证会话、超时和设置专项共 295 条断言、笔记存储 125 条断言、35 项构建配置测试，以及 AI 总结、控制器、后台服务、发布实体、群消息过滤和本地撤回记录回归检查均通过。真实指纹及 Android 前后台切换仍需手机验证。
+- 本次为手动触发的 Release 构建产物，未创建正式 tag 或发布 GitHub Release。

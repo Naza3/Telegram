@@ -39,19 +39,21 @@ Windows PowerShell：
 
 ## 构建行为
 
-当前 APK 工作流先恢复并验证 Secrets 中的密钥，然后才开始测试与 Android 构建。缺少任何一项、Base64 无效、密码或别名错误、没有私钥或证书不匹配都会停止；不会回退到 Cache，也不会生成新签名。
+当前 APK 工作流先运行合成配置测试，再恢复并验证 Secrets 中的密钥，通过后继续 AI 回归测试与 Android 构建。缺少任何一项、Base64 无效、密码或别名错误、没有私钥或证书不匹配都会停止；不会回退到 Cache，也不会生成新签名。
 
 恢复工具先验证证书，再用临时 JAR 试签名，提前发现私钥密码错误。Gradle 从环境变量读取密码和别名，不把密码拼进命令行；生成 APK 后再次检查证书。临时密钥库位于 `.local-build/signing/current.keystore`，工作流结束时删除，上传产物只有 APK 与校验文件。原备份和旧缓存本轮不删除。
 
 仅添加或修改 Secrets 不会触发构建。首次需要对包含本次迁移改动的提交启动构建；重跑旧提交仍会执行旧的缓存签名流程。正式切换成功以新工作流通过并核对 APK 证书为准。
 
-本轮迁移提交使用 `[skip ci]`，给手工录入 Secrets 留出时间。GitHub 连接当前无法管理 Secrets（403），不能宣称已代为写入或已完成云端验证。
+手动触发可使用已登录的 GitHub CLI：`gh workflow run mnn-debug-apk.yml --repo Naza3/Telegram --ref feature/mnn-group-summary`，运行结果在 [Build MNN debug APK](https://github.com/Naza3/Telegram/actions/workflows/mnn-debug-apk.yml) 页面查看。推送到该分支也会触发构建，带 `[skip ci]` 的提交除外。当前仍构建 `AfatDebug`，尚未配置 Release 或 tag 触发发布。
 
-本地验证：14 项签名合成测试与 7 项原有 API 配置测试通过；原密钥经 Base64 恢复后与备份字节一致，证书校验及试签名通过。实际运行 `:TMessagesProj_App:validateSigningAfatDebug --rerun-tasks` 成功（27 秒，5 项任务执行），缺失密钥时构建脚本明确拒绝且不生成新密钥。没有生成或发布新 APK。
+## 验证结果
 
-首次云端验证的 [第 22 次](https://github.com/Naza3/Telegram/actions/runs/37212591733) 与增加安全诊断后的 [第 23 次](https://github.com/Naza3/Telegram/actions/runs/37213035641) 都在原密钥库恢复校验阶段停止，没有生成 APK。第 23 次先运行的 26 项合成配置测试全部通过，临时密钥清理成功；截至该次验证，实际 Secrets 配置仍未通过，不能视为完成迁移。通用错误不足以确定是文件、密码或别名问题；本地复现表明被截断但仍可 Base64 解码的密钥库也可能触发此类错误，不能仅凭它断言密码填写错误。
+本地的 22 项签名合成测试与 7 项 API 配置测试，共 29 项通过。原密钥经 Base64 恢复后与备份字节一致，证书校验及试签名通过；`:TMessagesProj_App:validateSigningAfatDebug --rerun-tasks` 通过，缺失密钥时构建脚本拒绝继续且不生成新密钥。
 
-[第 24 次验证](https://github.com/Naza3/Telegram/actions/runs/37213580288) 的 29 项合成测试通过，实际输入明确报“Base64 可解码，但密钥库格式无效或内容不完整”，仍未生成 APK。暂不能确认迁移成功，需要将完整有效的原密钥内容重新写入 Secrets 后再验证。私密录入包在本地核验过 ZIP 完整性、Base64 解码与原备份的字节一致性；Bash 脚本通过模拟 CLI 确认逐项传入的标准输入完整且密码没有尾随换行，但没有绕过连接权限替用户写入云端 Secrets。
+2026-10-05，用户重新填写 Secrets 后，[第 25 次构建](https://github.com/Naza3/Telegram/actions/runs/37246221440) 全部成功。29 项配置测试、从 Secrets 恢复原密钥及试签名、AI 总结与群消息回归测试、ARM64 APK 编译均通过。最终 `apksigner verify` 验证签名有效，证书 SHA-256 与本文开头的原证书完全一致，16 KiB 页面 ZIP 对齐检查通过，临时密钥清理成功。当前签名已成功迁入 Actions Secrets。
+
+[第 25 次 APK 附件](https://github.com/Naza3/Telegram/actions/runs/37246221440/artifacts/11319402708) 仅包含 `Telegram-MNN-arm64-debug.apk` 与其 SHA-256 校验文件，需登录 GitHub 下载，2026-10-19 08:21:42（北京时间）到期。本次产物来自提交 `a746050306356351cb0abea531ce700ac96dfa48`，仍为 `AfatDebug`；后续签名说明文档更新不改变 APK 内容。
 
 ## 本地构建
 

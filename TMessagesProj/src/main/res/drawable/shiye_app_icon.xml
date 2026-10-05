@@ -1,13 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Static startup mark; no paper-plane animation or named animation targets. -->
+<!-- App identity for system accounts and Telecom; the Telegram OAuth avatar stays separate. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
-    android:width="320dp"
-    android:height="320dp"
-    android:viewportWidth="320"
-    android:viewportHeight="320">
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
     <path android:fillColor="#405A47"
-        android:pathData="M112,72 L208,72 Q248,72 248,112 L248,208 Q248,248 208,248 L112,248 Q72,248 72,208 L72,112 Q72,72 112,72 Z" />
-    <group android:scaleX="5.4" android:scaleY="5.4" android:translateX="98" android:translateY="93">
+        android:pathData="M12,2 L36,2 Q46,2 46,12 L46,36 Q46,46 36,46 L12,46 Q2,46 2,36 L2,12 Q2,2 12,2 Z" />
+    <group android:scaleX="1.35" android:scaleY="1.35" android:translateX="8.5" android:translateY="7.3">
         <group android:rotation="-7" android:pivotX="10" android:pivotY="13.5">
             <path android:fillColor="#E3DAC8"
                 android:pathData="M5,5 L15,5 Q17,5 17,7 L17,20 Q17,22 15,22 L5,22 Q3,22 3,20 L3,7 Q3,5 5,5 Z" />

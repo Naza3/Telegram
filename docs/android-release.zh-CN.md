@@ -6,7 +6,7 @@
 - `workflow_dispatch`：使用输入的 `release_tag` 试构建，只上传 Actions artifact，不创建标签或 GitHub Release。
 - 功能分支只修改此工作流时可产生注册运行；构建 job 明确排除分支 push。
 
-应用显示名称和图标以所构建源码为准，工作流不覆盖品牌资源。已完成一次手动 Release 试构建，尚未创建正式发布标签或 GitHub Release。
+应用显示名称为“拾页”，图标见[品牌资源说明](branding/shiye/README.md)。工作流核对 APK 内各语言的显示名称，不覆盖源码品牌资源。已完成一次手动 Release 试构建，尚未创建正式发布标签或 GitHub Release。
 
 ## 版本规则
 
@@ -14,16 +14,16 @@
 
 ```properties
 APP_VERSION_NAME=12.10.6
-APP_VERSION_CODE=7113
+APP_VERSION_CODE=7114
 ```
 
-对应标签 `mnn-v12.10.6-7113`，派生：
+对应标签 `mnn-v12.10.6-7114`，派生：
 
 | 字段 | 示例 |
 | --- | --- |
-| `MNN_RELEASE_VERSION_NAME` | `12.10.6-mnn.7113` |
-| `MNN_RELEASE_VERSION_CODE`（基础值） | `7113` |
-| APK 实际 `versionCode`（Afat：基础值 × 10 + 9） | `71139` |
+| `MNN_RELEASE_VERSION_NAME` | `12.10.6-mnn.7114` |
+| `MNN_RELEASE_VERSION_CODE`（基础值） | `7114` |
+| APK 实际 `versionCode`（Afat：基础值 × 10 + 9） | `71149` |
 
 每次新发布应先在源码中递增 `APP_VERSION_CODE`，再提交、推送，最后给该提交打标签。Debug 与 Release 共用这个基础版本号，避免安装 Release 后，后续 Debug 因版本号较低而无法覆盖。`versionName` 的可读文字不决定 Android 升级顺序。
 
@@ -62,11 +62,11 @@ APP_VERSION_CODE=7113
 
 ## 先试构建，再发布
 
-先把代码和版本号提交并推送到目标分支。确认工作流已在仓库中注册后，在 Actions 中选择 **Build and publish MNN release APK**，选择要测试的分支，填写与源码一致的标签文字。示例仅用于手动试构建：
+先把代码和版本号提交并推送到目标分支。确认工作流已在仓库中注册后，在 Actions 中选择 **Build and publish Shiye release APK**，选择要测试的分支，填写与源码一致的标签文字。示例仅用于手动试构建：
 
 ```sh
 gh workflow run mnn-release-apk.yml --repo Naza3/Telegram \
-  --ref feature/mnn-group-summary -f release_tag=mnn-v12.10.6-7113
+  --ref feature/mnn-group-summary -f release_tag=mnn-v12.10.6-7114
 ```
 
 手动输入标签文字不会创建该标签，也不会触发发布 job。若 GitHub 尚未提供手动运行入口，先检查工作流是否已被仓库识别及默认分支的 `workflow_dispatch` 注册要求；不要用创建正式标签替代试构建。
@@ -74,8 +74,8 @@ gh workflow run mnn-release-apk.yml --repo Naza3/Telegram \
 构建通过后，从该次运行的 Summary 下载 artifact。文件名示例为：
 
 ```text
-Telegram-MNN-mnn-v12.10.6-7113-arm64-release.apk
-Telegram-MNN-mnn-v12.10.6-7113-arm64-release.apk.sha256
+Shiye-12.10.6-mnn.7114-arm64-release.apk
+Shiye-12.10.6-mnn.7114-arm64-release.apk.sha256
 release-metadata.json
 ```
 
@@ -83,11 +83,11 @@ release-metadata.json
 
 确认 APK 功能和升级安装正常、并决定公开发布后，再给已验证提交创建符合格式的标签并推送。标签推送会重新构建该提交；只有所有门禁成功，独立 publish job 才取得 `contents: write` 权限创建新 Release。它会核对远端标签仍指向构建 commit、下载附件的校验和一致，并检查该标签没有现存 Release。已有 Release、附件冲突或上传失败都不会自动覆盖；应检查实际状态后再决定处理方式。
 
-例如，先确认本地 `HEAD` 正是要发布的已验证提交，且其源码版本仍为上面的 `12.10.6` / `7113`，然后执行以下命令即可触发首次发布（本轮未执行）：
+例如，先确认本地 `HEAD` 正是要发布的已验证提交，且其源码版本仍为上面的 `12.10.6` / `7114`，然后执行以下命令即可触发首次发布（本轮未执行）：
 
 ```sh
-git tag -a mnn-v12.10.6-7113 -m "MNN Android 12.10.6-mnn.7113"
-git push origin mnn-v12.10.6-7113
+git tag -a mnn-v12.10.6-7114 -m "MNN Android 12.10.6-mnn.7114"
+git push origin mnn-v12.10.6-7114
 ```
 
 后续发布递增源码版本号并使用新标签，不重复使用上述示例。

@@ -1,10 +1,10 @@
-name: Build and publish MNN release APK
+name: Build and publish Shiye release APK
 
 on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Trial build tag, matching gradle.properties (example: mnn-v12.10.6-7113); does not publish'
+        description: 'Trial build tag, matching gradle.properties (example: mnn-v12.10.6-7114); does not publish'
         required: true
         type: string
   push:
@@ -214,11 +214,14 @@ jobs:
               raise SystemExit('Release APK package or version differs from the validated tag')
           if re.search(r'^application-debuggable(?:\s|$)', badging, re.MULTILINE):
               raise SystemExit('Release APK must not be debuggable')
+          labels = re.findall(r"^application-label(?:-[^:]+)?:'([^']*)'$", badging, re.MULTILINE)
+          if not labels or any(label != '拾页' for label in labels):
+              raise SystemExit('Release APK must display the Shiye name in every packaged locale')
           with zipfile.ZipFile(apk) as archive:
               abis = {name.split('/')[1] for name in archive.namelist() if name.startswith('lib/') and name.endswith('.so')}
           if abis != {'arm64-v8a'}:
               raise SystemExit('Release APK must contain only ARM64 native libraries')
-          name = 'Telegram-MNN-' + os.environ['MNN_RELEASE_TAG'] + '-arm64-release.apk'
+          name = 'Shiye-' + os.environ['MNN_RELEASE_VERSION_NAME'] + '-arm64-release.apk'
           target = Path('artifacts/release') / name
           shutil.copyfile(apk, target)
           with target.open('rb') as stream:
@@ -227,6 +230,7 @@ jobs:
           metadata = {
               'tag': os.environ['MNN_RELEASE_TAG'], 'source_sha': os.environ['MNN_RELEASE_SOURCE_SHA'],
               'package': package.group(1), 'version_name': package.group(3),
+              'display_name': '拾页',
               'version_code': int(package.group(2)), 'base_version_code': int(os.environ['MNN_RELEASE_VERSION_CODE']),
               'debuggable': False, 'abis': sorted(abis), 'certificate_sha256': expected,
               'apk_sha256': digest, 'apk_bytes': target.stat().st_size,
@@ -241,7 +245,7 @@ jobs:
         id: upload-apk
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: Telegram-MNN-release-${{ github.run_id }}-${{ github.run_attempt }}
+          name: Shiye-release-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             artifacts/release/*.apk
             artifacts/release/*.apk.sha256
@@ -331,7 +335,7 @@ jobs:
         run: |
           notes="$RUNNER_TEMP/mnn-release-notes.md"
           {
-            printf 'Android ARM64 release build `%s`.\n\n' "$MNN_RELEASE_VERSION_NAME"
+            printf '拾页 Android ARM64 release build `%s`.\n\n' "$MNN_RELEASE_VERSION_NAME"
             printf 'Source commit: `%s`.\n\n' "$MNN_RELEASE_SOURCE_SHA"
             echo 'Package: `org.telegram.messenger.beta`; debuggable: false.'
             echo 'Signed with the existing Telegram MNN certificate; no replacement key is generated.'
@@ -339,5 +343,5 @@ jobs:
           } > "$notes"
           # No --clobber, release edit or upload-to-existing path. A conflict fails the job.
           gh release create "$MNN_RELEASE_TAG" --repo "$GH_REPO" --verify-tag \
-            --target "$MNN_RELEASE_SOURCE_SHA" --title "Telegram MNN $MNN_RELEASE_VERSION_NAME" \
+            --target "$MNN_RELEASE_SOURCE_SHA" --title "拾页 $MNN_RELEASE_VERSION_NAME" \
             --notes-file "$notes" release-assets/*.apk release-assets/*.apk.sha256 release-assets/release-metadata.json

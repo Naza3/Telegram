@@ -1131,8 +1131,7 @@ public class LinkManager {
                 scrollTo("liteModeRow");
             if ("stickers-and-emoji".equalsIgnoreCase(second))
                 scrollTo("stickersRow");
-            if ("app-icon".equalsIgnoreCase(second))
-                scrollTo("appIconSelectorRow");
+            // Legacy app-icon links open appearance settings; this build has one launcher identity.
             if ("tap-for-next-media".equalsIgnoreCase(second))
                 scrollTo("nextMediaTapRow");
 

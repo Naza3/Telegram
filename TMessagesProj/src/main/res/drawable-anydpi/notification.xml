@@ -1,14 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Shiye: a single-color stacked-page silhouette for Android themed icons. -->
+<!-- Notification small icons are white alpha masks, without a launcher background. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
-    android:width="108dp"
-    android:height="108dp"
-    android:viewportWidth="108"
-    android:viewportHeight="108">
-    <group android:scaleX="2.7" android:scaleY="2.7" android:translateX="22" android:translateY="20">
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
     <path android:fillColor="#FFFFFF"
         android:pathData="M5.2,5.5 L6,5.4 L6,7.1 L5.4,7.2 Q4.6,7.3 4.7,8.1 L6.1,20 Q6.2,20.9 7.1,20.8 L16.6,19.6 L16.8,21.2 L7.3,22.5 Q4.9,22.8 4.6,20.3 L3.1,8.4 Q2.8,5.8 5.2,5.5 Z" />
     <path android:fillColor="#FFFFFF"
         android:pathData="M9.2,2.5 L14.7,2.5 L14.7,6.1 Q14.7,8.3 16.9,8.3 L20.5,8.3 L20.5,19.5 Q20.5,21.5 18.5,21.5 L9.2,21.5 Q7.2,21.5 7.2,19.5 L7.2,4.5 Q7.2,2.5 9.2,2.5 Z M16.2,2.9 L20.1,6.8 L17.1,6.8 Q16.2,6.8 16.2,5.9 Z" />
-    </group>
 </vector>

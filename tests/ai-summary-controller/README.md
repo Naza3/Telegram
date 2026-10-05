@@ -42,6 +42,10 @@ selected snapshots with no history RPC or generic completion/cursor write, and
 same-text changes to sender/topic/date/reply metadata. The selected-snapshot
 factory itself is tested in the separate core harness.
 
+Specified-date cases verify dispatch to the date loader, exact date labels in
+archived results and snapshot replays, preserving an existing incremental cursor,
+partial and empty days, and retaining the chosen date after cancellation.
+
 Passing this harness establishes controller decisions and boundary calls. It does
 not establish actual Android service startup, notification/wake-lock behavior,
 process death recovery, native Telegram RPC access, model quality, or device

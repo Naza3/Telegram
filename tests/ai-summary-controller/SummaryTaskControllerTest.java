@@ -47,6 +47,11 @@ public final class SummaryTaskControllerTest {
         run("terminal metrics survive success and error but ignore late callbacks", SummaryTaskControllerTest::terminalMetrics);
         run("cancelled and replaced tasks reject late request metrics", SummaryTaskControllerTest::lateMetrics);
         run("selected snapshot skips history and never records generic coverage", SummaryTaskControllerTest::selectedSnapshot);
+        run("specified date routes to date loader and archives without rewinding cursor", SummaryTaskControllerTest::specifiedDate);
+        run("specified date partial result stays labelled and does not advance cursor", SummaryTaskControllerTest::partialDate);
+        run("empty specified day does not call model or move cursor", SummaryTaskControllerTest::emptyDate);
+        run("cancelled date task retains selected date and rejects late history", SummaryTaskControllerTest::cancelDate);
+        run("replaying a dated snapshot preserves its date label without refetching", SummaryTaskControllerTest::replayDate);
         run("missing and foreign selected snapshots fail before any IO", SummaryTaskControllerTest::invalidSelection);
         run("UID exclusions precede inference and never advance generic cursor", SummaryTaskControllerTest::excludedSenders);
         run("same-body source identity and topic changes invalidate selected input", SummaryTaskControllerTest::selectionMetadataChanged);
@@ -145,6 +150,55 @@ public final class SummaryTaskControllerTest {
     }
     private static GroupSummarySheet.RangeRequest selectedRequest(SummaryHistoryLoader.Result history){
         return new GroupSummarySheet.RangeRequest(GroupSummarySheet.RangeMode.SELECTED,1,0,0,0,false,history,null,SummaryFilter.Options.DEFAULT);
+    }
+    private static GroupSummarySheet.RangeRequest dateRequest(){
+        return new GroupSummarySheet.RangeRequest(GroupSummarySheet.RangeMode.DATE,2000,100,0,-1,false,
+                null,null,SummaryFilter.Options.DEFAULT,false,2026,10,4);
+    }
+    private static void seedDateCursor(){
+        check(SummaryStateStore.recordSuccess(0,OWNER,DIALOG,0,0,0,100,true,true,1,"previous summary","",
+                new SummaryStateStore.CompletionToken()),"could not seed existing cursor");
+    }
+    private static void specifiedDate(){
+        seedDateCursor();
+        SummaryTaskController.Session task=start(dateRequest());
+        check(loader().method.equals("date"),"date request fell back to recent messages");
+        check(loader().dateYear==2026&&loader().dateMonth==10&&loader().dateDay==4,"selected date changed at loader boundary");
+        loaded();client().callback.onSuccess("summary of selected day");flush();
+        terminal(task,SummaryTaskController.State.SUCCESS);
+        check(task.historySaved&&task.committed&&cursor()==100,"past date changed incremental cursor or was not saved");
+        check(SummaryHistoryStore.saved.size()==1&&SummaryHistoryStore.saved.get(0).rangeLabel.equals("2026-10-04 的文字消息"),"history lost selected date label");
+    }
+    private static void partialDate(){
+        seedDateCursor();SummaryTaskController.Session task=start(dateRequest());
+        loader().callback.onLoaded(new SummaryHistoryLoader.Result(messages(),0,10,false));flush();
+        client().callback.onSuccess("partial day summary");flush();terminal(task,SummaryTaskController.State.SUCCESS);
+        check(task.historySaved&&!task.committed&&cursor()==100,"partial date changed existing cursor");
+        check(SummaryHistoryStore.saved.get(0).partial&&SummaryHistoryStore.saved.get(0).rangeLabel.contains("2026-10-04"),"partial date presented as full or lost its date");
+    }
+    private static void emptyDate(){
+        seedDateCursor();SummaryTaskController.Session task=start(dateRequest());
+        loader().callback.onLoaded(new SummaryHistoryLoader.Result(new ArrayList<>(),0,0,true));flush();
+        terminal(task,SummaryTaskController.State.SUCCESS);
+        check(AiSummaryClient.created.isEmpty()&&SummaryHistoryStore.saved.isEmpty(),"empty date invoked model or saved invented summary");
+        check(cursor()==100,"empty date moved existing cursor");
+    }
+    private static void cancelDate(){
+        SummaryTaskController.Session task=start(dateRequest());SummaryHistoryLoader old=loader();controller.cancel();
+        check(task.range.mode==GroupSummarySheet.RangeMode.DATE&&task.range.dateYear==2026
+                &&task.range.dateMonth==10&&task.range.dateDay==4,"terminal request copy lost selected date");
+        old.callback.onLoaded(new SummaryHistoryLoader.Result(messages(),0,10,true));flush();
+        terminal(task,SummaryTaskController.State.CANCELLED);
+        check(AiSummaryClient.created.isEmpty(),"late cancelled date history started inference");
+    }
+    private static void replayDate(){
+        seedDateCursor();SummaryHistoryLoader.Result history=new SummaryHistoryLoader.Result(messages(),0,10,true);
+        SummaryTaskController.Session task=start(new GroupSummarySheet.RangeRequest(GroupSummarySheet.RangeMode.REPLAY,
+                2000,100,0,10,false,history,messages(),SummaryFilter.Options.DEFAULT,false,2026,10,4));flush();
+        check(SummaryHistoryLoader.created.isEmpty(),"dated snapshot replay refetched history");
+        client().callback.onSuccess("regenerated day summary");flush();terminal(task,SummaryTaskController.State.SUCCESS);
+        check(task.historySaved&&!task.committed&&cursor()==100,"dated replay altered existing cursor");
+        check(SummaryHistoryStore.saved.get(0).rangeLabel.equals("重做 2026-10-04 的文字消息的已读取范围"),"replay lost original day in history");
     }
     private static SummaryHistoryLoader.Result selectedHistory(){
         SummaryHistoryLoader.Result history=new SummaryHistoryLoader.Result(messages(),0,0,true);

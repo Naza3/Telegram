@@ -43,6 +43,10 @@ toolchain or compiling the APK. A failed check blocks the APK build.
 
 The tests cover:
 
+- `SummaryHistoryDateTest`: direct date seeking, Gregorian date validation,
+  local-day bounds including short/long DST days and repeated/missing midnight,
+  frozen adjusted clock and timezone, topic isolation, pagination and partial
+  limits, empty days, cancellation, owner changes and RPC failures.
 - `ApiProfilesStoreTest`: explicit current-profile selection, encrypted-storage
   boundary, legacy migration, revision checks, separate credentials, deletion
   without fallback, name validation and owner isolation.

@@ -242,6 +242,7 @@ public final class SummaryTaskController implements NotificationCenter.Notificat
         };
         switch (range.mode) {
             case TODAY: loader.loadToday(callback); break;
+            case DATE: loader.loadDate(range.dateYear, range.dateMonth, range.dateDay, callback); break;
             case UNREAD: loader.loadUnread(range.lower, range.upper, range.count, callback); break;
             case REPLAY: loader.loadRange(range.lower, range.upper, range.count, callback); break;
             case SINCE:
@@ -389,7 +390,7 @@ public final class SummaryTaskController implements NotificationCenter.Notificat
             ArrayList<SummarySourceReference> sources = new ArrayList<>();
             for (SummaryMessage source : task.sources) sources.add(SummarySourceReference.from(source));
             task.record = new SummaryHistoryStore.Record(UUID.randomUUID().toString(), task.dialogId, task.topicId,
-                    System.currentTimeMillis(), task.chatTitle(), rangeLabel(task.range.mode), task.coverage, "",
+                    System.currentTimeMillis(), task.chatTitle(), rangeLabel(task.range), task.coverage, "",
                     task.prompt.customInstructions, task.config.model, summary, !task.history.complete, sources,
                     task.prompt.builtinRulesVersion < 4);
         }
@@ -611,15 +612,21 @@ public final class SummaryTaskController implements NotificationCenter.Notificat
     private static void stripReplay(Session task) {
         GroupSummarySheet.RangeRequest previous = task.range;
         task.range = new GroupSummarySheet.RangeRequest(previous.mode, previous.count, previous.expectedCursor,
-                previous.lower, previous.upper, previous.initialize, null, null, previous.filters, previous.includePublished);
+                previous.lower, previous.upper, previous.initialize, null, null, previous.filters, previous.includePublished,
+                previous.dateYear, previous.dateMonth, previous.dateDay);
     }
 
-    private static String rangeLabel(GroupSummarySheet.RangeMode mode) {
-        switch (mode) {
+    private static String rangeLabel(GroupSummarySheet.RangeRequest range) {
+        switch (range.mode) {
             case TODAY: return "当日文字消息";
+            case DATE: return String.format(Locale.US, "%04d-%02d-%02d 的文字消息",
+                    range.dateYear, range.dateMonth, range.dateDay);
             case SINCE: return "上次总结之后";
             case UNREAD: return "固定未读范围";
-            case REPLAY: return "重做已记录范围";
+            case REPLAY: return range.dateYear > 0
+                    ? String.format(Locale.US, "重做 %04d-%02d-%02d 的文字消息的已读取范围",
+                        range.dateYear, range.dateMonth, range.dateDay)
+                    : "重做已记录范围";
             case SELECTED: return "手动选中的文字消息";
             default: return "最近 N 条文字消息";
         }

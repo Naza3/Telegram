@@ -55,6 +55,7 @@ import org.telegram.messenger.ai.SummaryFilter;
 import org.telegram.messenger.ai.SummaryExcludedSendersStore;
 import org.telegram.messenger.ai.UsageStats;
 import org.telegram.messenger.ai.SummaryChatExport;
+import org.telegram.tgnet.ConnectionsManager;
 import org.telegram.ui.ActionBar.AlertDialog;
 import org.telegram.ui.ActionBar.BaseFragment;
 import org.telegram.ui.ActionBar.Theme;
@@ -64,6 +65,8 @@ import org.telegram.ui.Cells.TextCheckCell;
 import org.telegram.ui.SummaryHistoryActivity;
 
 import java.util.ArrayList;
+import java.util.Calendar;
+import java.util.GregorianCalendar;
 import java.util.Collections;
 import java.util.Set;
 import java.util.Locale;
@@ -87,7 +90,7 @@ public final class GroupSummarySheet {
         void open(long dialogId, int messageId);
     }
 
-    enum RangeMode { RECENT, TODAY, SINCE, UNREAD, REPLAY, SELECTED }
+    enum RangeMode { RECENT, TODAY, DATE, SINCE, UNREAD, REPLAY, SELECTED }
 
     static final class RangeRequest {
         final RangeMode mode;
@@ -100,6 +103,9 @@ public final class GroupSummarySheet {
         final ArrayList<SummaryMessage> replayMessages;
         final SummaryFilter.Options filters;
         final boolean includePublished;
+        final int dateYear;
+        final int dateMonth;
+        final int dateDay;
 
         RangeRequest(RangeMode mode, int count, int expectedCursor, int lower, int upper,
                      boolean initialize, SummaryHistoryLoader.Result replayHistory,
@@ -116,7 +122,18 @@ public final class GroupSummarySheet {
         RangeRequest(RangeMode mode, int count, int expectedCursor, int lower, int upper,
                      boolean initialize, SummaryHistoryLoader.Result replayHistory,
                      ArrayList<SummaryMessage> replayMessages, SummaryFilter.Options filters, boolean includePublished) {
+            this(mode, count, expectedCursor, lower, upper, initialize, replayHistory, replayMessages,
+                    filters, includePublished, 0, 0, 0);
+        }
+
+        RangeRequest(RangeMode mode, int count, int expectedCursor, int lower, int upper,
+                     boolean initialize, SummaryHistoryLoader.Result replayHistory,
+                     ArrayList<SummaryMessage> replayMessages, SummaryFilter.Options filters, boolean includePublished,
+                     int year, int month, int day) {
             this.includePublished = includePublished;
+            this.dateYear = year;
+            this.dateMonth = month;
+            this.dateDay = day;
             this.mode = mode;
             this.count = count;
             this.expectedCursor = expectedCursor;
@@ -274,11 +291,16 @@ public final class GroupSummarySheet {
     private String recentCountText = "100";
     private int recentCount = 100;
     private RangeMode rangeMode = RangeMode.RECENT;
+    private int selectedDateYear;
+    private int selectedDateMonth;
+    private int selectedDateDay;
+    private AlertDialog datePickerDialog;
     private SummaryStateStore.State summaryState;
     private SummaryStateStore.CompletionToken completionToken;
     private RangeRequest summaryRange;
     private SummaryHistoryLoader.Result summaryHistory;
     private SummaryHistoryLoader.Result lastSuccessfulHistory;
+    private RangeRequest lastSuccessfulRange;
     private ArrayList<SummaryMessage> lastSuccessfulSources;
     private boolean resultCommitted;
     private String completionNotice;
@@ -403,6 +425,7 @@ public final class GroupSummarySheet {
         attached = value;
         if (!value) {
             stopProgressUpdates();
+            closeDatePicker();
             closeRequestInputs(); closeQuestions(); closeSourcePreview();
         } else if (taskController != null) {
             SummaryTaskController.Session task = taskController.current();
@@ -467,7 +490,7 @@ public final class GroupSummarySheet {
         summaryPrompt = null;
         summaryConfig = null;
         lastSuccessfulSources = null;
-        lastSuccessfulHistory = null;
+        lastSuccessfulHistory = null; lastSuccessfulRange = null;
         summaryHistory = null;
         cachedResult = null;
         historyRecord = null;
@@ -482,6 +505,7 @@ public final class GroupSummarySheet {
 
     private void cancelWork(boolean keepRequestInputs) {
         operation++;
+        closeDatePicker();
         closeRequestInputs();
         requestInputsButton = null;
         if (!keepRequestInputs) requestInputs.clear();
@@ -756,7 +780,7 @@ public final class GroupSummarySheet {
         summaryHistory = null;
         summaryRange = null;
         lastSuccessfulSources = null;
-        lastSuccessfulHistory = null;
+        lastSuccessfulHistory = null; lastSuccessfulRange = null;
         summaryPrompt = null;
         summaryConfig = null;
         coverageNote = null;
@@ -818,6 +842,7 @@ public final class GroupSummarySheet {
         sourceMessages = new ArrayList<>(snapshot.sources);
         summaryHistory = snapshot.history;
         summaryRange = snapshot.range;
+        restoreDateSelection(snapshot.range);
         summaryFiltered = snapshot.range.filters != null && snapshot.range.filters.hasFilters();
         summaryConfig = snapshot.config;
         summaryPrompt = snapshot.prompt;
@@ -1153,10 +1178,11 @@ public final class GroupSummarySheet {
         ChoiceGroup choices = new ChoiceGroup(context);
         choices.setOrientation(ChoiceGroup.VERTICAL);
         for (RangeMode mode : rangeMode == RangeMode.SELECTED ? new RangeMode[] {RangeMode.SELECTED}
-                : new RangeMode[] {RangeMode.RECENT, RangeMode.TODAY, RangeMode.SINCE, RangeMode.UNREAD}) {
+                : new RangeMode[] {RangeMode.RECENT, RangeMode.TODAY, RangeMode.DATE, RangeMode.SINCE, RangeMode.UNREAD}) {
             RadioCell option = radio(mode == RangeMode.SELECTED ? "仅本次手动选择的 " + selectedSnapshot.messages.size() + " 条文字"
                     : mode == RangeMode.RECENT ? "最近 N 条文字消息"
                     : mode == RangeMode.TODAY ? "当日文字消息"
+                    : mode == RangeMode.DATE ? "指定日期的文字消息"
                     : mode == RangeMode.SINCE ? "上次总结之后"
                     : entryUnreadSnapshot ? "进入聊天时的未读消息" : "选择来源时的未读消息");
             option.setId(View.generateViewId());
@@ -1177,12 +1203,15 @@ public final class GroupSummarySheet {
             @Override public void onTextChanged(CharSequence value, int start, int before, int length) { recentCountText = value.toString(); }
             @Override public void afterTextChanged(Editable value) { }
         });
+        ensureSelectedDate();
+        TextView dateChoice = addAction("选择日期：" + selectedDateLabel(), this::showDatePicker);
         TextView rangeNote = addText("", false);
         Runnable updateRange = () -> {
-            count.setEnabled(rangeMode != RangeMode.TODAY && rangeMode != RangeMode.SELECTED);
-            count.setVisibility(rangeMode == RangeMode.SELECTED ? View.GONE : View.VISIBLE);
+            boolean dateRange = rangeMode == RangeMode.TODAY || rangeMode == RangeMode.DATE;
+            count.setEnabled(!dateRange && rangeMode != RangeMode.SELECTED);
+            count.setVisibility(dateRange || rangeMode == RangeMode.SELECTED ? View.GONE : View.VISIBLE);
             ((View) count.getParent()).setVisibility(count.getVisibility());
-            count.setAlpha(rangeMode == RangeMode.TODAY ? 0.5f : 1f);
+            dateChoice.setVisibility(rangeMode == RangeMode.DATE ? View.VISIBLE : View.GONE);
             count.setHint((rangeMode == RangeMode.UNREAD || rangeMode == RangeMode.SINCE && summaryState.cursor > 0
                     ? "每批历史条数" : "文字条数") + "（1–" + SummaryHistoryLoader.MAX_RECENT_COUNT + "）");
             rangeNote.setText(rangeMode == RangeMode.SELECTED ? selectedSnapshot.coverageNote
@@ -1195,7 +1224,10 @@ public final class GroupSummarySheet {
                         ? (entryUnreadSnapshot ? "固定进入聊天前的未读边界" : "固定本次选择来源时的未读边界")
                             + "；每批条数包含非文字消息。不改变 Telegram 已读状态，也不移动增量进度。"
                     : rangeMode == RangeMode.TODAY
-                        ? "按手机时区从今天 00:00 起读取，当前时间由 Telegram 校准，范围截至开始时；不移动增量进度。"
+                        ? "按手机时区从今天 00:00 起读取，当前时间由 Telegram 校准，范围截至开始时；不移动增量进度。" + dateRangeLimitNote()
+                    : rangeMode == RangeMode.DATE
+                        ? "按手机时区（" + TimeZone.getDefault().getID() + "）读取 " + selectedDateLabel()
+                            + " 00:00 至次日 00:00 之前的文字；若选择今天，仅截至开始时。不移动增量进度。" + dateRangeLimitNote()
                         : "从最新消息向前选取 N 条有效文字，再按时间先后总结；不移动增量进度。需要建立增量起点时请选择“上次总结之后”。");
         };
         choices.setOnCheckedChangeListener((group, checkedId) -> {
@@ -1273,7 +1305,10 @@ public final class GroupSummarySheet {
                 recentCountText = count.getText().toString();
                 RangeRequest request = new RangeRequest(RangeMode.REPLAY, recentCount, summaryState.cursor,
                         lastSuccessfulHistory.lowerExclusiveId, lastSuccessfulHistory.coveredThroughId,
-                        false, lastSuccessfulHistory, lastSuccessfulHistory.messages);
+                        false, lastSuccessfulHistory, lastSuccessfulHistory.messages, null, includePublished,
+                        lastSuccessfulRange == null ? 0 : lastSuccessfulRange.dateYear,
+                        lastSuccessfulRange == null ? 0 : lastSuccessfulRange.dateMonth,
+                        lastSuccessfulRange == null ? 0 : lastSuccessfulRange.dateDay);
                 startSummary(request);
             });
             addText("重做使用上次成功范围的原始文字快照，重新应用当前筛选与核心总结要求，不移动增量进度；任务快照只在当前进程内短时保留，切换来源不会复用临时核心要求。", false);
@@ -1293,9 +1328,125 @@ public final class GroupSummarySheet {
         return unreadLower >= 0 && unreadUpper >= unreadLower;
     }
 
+    private Calendar currentLocalDate() {
+        Calendar today = new GregorianCalendar(TimeZone.getDefault(), Locale.US);
+        int serverNow = ConnectionsManager.getInstance(account).getCurrentTime();
+        today.setTimeInMillis(serverNow > 0 ? serverNow * 1000L : System.currentTimeMillis());
+        return today;
+    }
+
+    private void ensureSelectedDate() {
+        if (selectedDateYear > 0) return;
+        Calendar yesterday = currentLocalDate();
+        yesterday.add(Calendar.DAY_OF_MONTH, -1);
+        selectedDateYear = yesterday.get(Calendar.YEAR);
+        selectedDateMonth = yesterday.get(Calendar.MONTH) + 1;
+        selectedDateDay = yesterday.get(Calendar.DAY_OF_MONTH);
+    }
+
+    private String selectedDateLabel() {
+        return String.format(Locale.US, "%04d-%02d-%02d", selectedDateYear, selectedDateMonth, selectedDateDay);
+    }
+
+    private void restoreDateSelection(RangeRequest request) {
+        if (request.dateYear > 0) {
+            selectedDateYear = request.dateYear;
+            selectedDateMonth = request.dateMonth;
+            selectedDateDay = request.dateDay;
+        }
+        if (request.mode == RangeMode.DATE) rangeMode = RangeMode.DATE;
+    }
+
+    private static String dateRangeLabel(RangeRequest request) {
+        return String.format(Locale.US, "%04d-%02d-%02d 的文字消息", request.dateYear, request.dateMonth, request.dateDay);
+    }
+
+    private static String dateRangeLimitNote() {
+        return "\n按日读取不使用 500 条限制；最多收集 " + SummaryHistoryLoader.MAX_DATE_MESSAGES
+                + " 条有效文字、扫描 10000 条历史。达到上限或读取不完整时，只总结/导出已读取部分，并标明部分覆盖。";
+    }
+
+    private void closeDatePicker() {
+        AlertDialog previous = datePickerDialog;
+        datePickerDialog = null;
+        if (previous != null) previous.dismiss();
+    }
+
+    private void showDatePicker() {
+        if (closed || !attached || !checkAccountOwner()) return;
+        ensureSelectedDate();
+        closeDatePicker();
+        AndroidUtilities.hideKeyboard(content);
+        LinearLayout pickers = new LinearLayout(context);
+        pickers.setOrientation(LinearLayout.HORIZONTAL);
+        pickers.setPadding(dp(16), 0, dp(16), 0);
+        NumberPicker year = new NumberPicker(context, resourcesProvider);
+        NumberPicker month = new NumberPicker(context, resourcesProvider);
+        NumberPicker day = new NumberPicker(context, resourcesProvider);
+        year.setMinValue(1970);
+        year.setMaxValue(currentLocalDate().get(Calendar.YEAR));
+        year.setValue(selectedDateYear);
+        month.setMinValue(1);
+        month.setMaxValue(12);
+        month.setValue(selectedDateMonth);
+        day.setMinValue(1);
+        day.setMaxValue(31);
+        day.setValue(selectedDateDay);
+        year.setFormatter(value -> value + " 年");
+        month.setFormatter(value -> value + " 月");
+        day.setFormatter(value -> value + " 日");
+        for (NumberPicker picker : new NumberPicker[] {year, month, day}) {
+            picker.setWrapSelectorWheel(false);
+            pickers.addView(picker, LayoutHelper.createLinear(0, 180, picker == year ? 0.4f : 0.3f));
+        }
+        boolean[] adjusting = {false};
+        Runnable updateBounds = () -> {
+            if (adjusting[0]) return;
+            adjusting[0] = true;
+            try {
+                Calendar today = currentLocalDate();
+                year.setMaxValue(today.get(Calendar.YEAR));
+                boolean currentYear = year.getValue() == today.get(Calendar.YEAR);
+                month.setMaxValue(currentYear ? today.get(Calendar.MONTH) + 1 : 12);
+                Calendar selected = new GregorianCalendar(TimeZone.getDefault(), Locale.US);
+                selected.clear();
+                selected.set(year.getValue(), month.getValue() - 1, 1);
+                day.setMaxValue(currentYear && month.getValue() == today.get(Calendar.MONTH) + 1
+                        ? today.get(Calendar.DAY_OF_MONTH) : selected.getActualMaximum(Calendar.DAY_OF_MONTH));
+            } finally {
+                adjusting[0] = false;
+            }
+        };
+        for (NumberPicker picker : new NumberPicker[] {year, month, day}) {
+            picker.setOnValueChangedListener((view, oldValue, newValue) -> updateBounds.run());
+            picker.setOnScrollListener((view, state) -> {
+                if (state == NumberPicker.OnScrollListener.SCROLL_STATE_IDLE) updateBounds.run();
+            });
+        }
+        updateBounds.run();
+        AlertDialog pickerDialog = new AlertDialog.Builder(context, resourcesProvider)
+                .setTitle("选择日期（手机时区）")
+                .setView(pickers)
+                .setPositiveButton("确定", (ignored, which) -> {
+                    if (closed || !attached || !selectionPageVisible || !checkAccountOwner()) return;
+                    updateBounds.run();
+                    selectedDateYear = year.getValue();
+                    selectedDateMonth = month.getValue();
+                    selectedDateDay = day.getValue();
+                    showSelection();
+                })
+                .setNegativeButton("取消", null)
+                .create();
+        datePickerDialog = pickerDialog;
+        pickerDialog.setOnDismissListener(ignored -> {
+            if (datePickerDialog == pickerDialog) datePickerDialog = null;
+        });
+        pickerDialog.show();
+    }
+
     private boolean readSelectedCount(EditTextBoldCursor count) {
         recentCountText = count.getText().toString().trim();
-        if (rangeMode == RangeMode.TODAY || rangeMode == RangeMode.SELECTED) return true;
+        if (rangeMode == RangeMode.TODAY || rangeMode == RangeMode.DATE || rangeMode == RangeMode.SELECTED) return true;
         try {
             recentCount = Integer.parseInt(recentCountText);
         } catch (NumberFormatException ignored) {
@@ -1325,12 +1476,19 @@ public final class GroupSummarySheet {
         return new RangeRequest(rangeMode, recentCount, summaryState.cursor,
                 rangeMode == RangeMode.UNREAD ? unreadLower : summaryState.cursor,
                 rangeMode == RangeMode.UNREAD ? unreadUpper : -1,
-                rangeMode == RangeMode.SINCE && summaryState.cursor == 0, null, null, filterOptions, includePublished);
+                rangeMode == RangeMode.SINCE && summaryState.cursor == 0, null, null, filterOptions, includePublished,
+                rangeMode == RangeMode.DATE ? selectedDateYear : 0,
+                rangeMode == RangeMode.DATE ? selectedDateMonth : 0,
+                rangeMode == RangeMode.DATE ? selectedDateDay : 0);
     }
 
     private String exportRangeLabel(RangeRequest request) {
         if (request.mode == RangeMode.SELECTED) return "仅本次手动选择的文字消息（不补抓其他消息）";
         if (request.mode == RangeMode.TODAY) return "当日文字消息（手机时区，今天 00:00 起）";
+        if (request.mode == RangeMode.DATE) return dateRangeLabel(request) + "（手机时区，00:00 至次日 00:00 之前；今天截至开始时）";
+        if (request.mode == RangeMode.REPLAY && request.dateYear > 0) {
+            return "重做 " + dateRangeLabel(request) + "的已读取快照（不补抓其他消息）";
+        }
         if (request.mode == RangeMode.RECENT) return "最近 " + request.count + " 条有效文字消息（不含其他类型）";
         if (request.mode == RangeMode.SINCE && request.initialize) {
             return "尚无总结起点：仅导出最近 " + request.count + " 条有效文字，不建立增量起点";
@@ -1488,7 +1646,8 @@ public final class GroupSummarySheet {
                 && (task.range.mode == RangeMode.SINCE || task.range.mode == RangeMode.UNREAD)) {
             addAction("读取并导出下一批", () -> startExport(new RangeRequest(task.range.mode, task.range.count,
                     task.range.expectedCursor, task.history.coveredThroughId, task.history.upperInclusiveId,
-                    false, null, null, task.range.filters), task.format, task.prompt));
+                    false, null, null, task.range.filters, task.range.includePublished,
+                    task.range.dateYear, task.range.dateMonth, task.range.dateDay), task.format, task.prompt));
             addText("下一批仅在本次导出中继续，通用总结进度保持不变。", false);
         }
         addAction("重新读取此范围", () -> startExport(task.range, task.format, task.prompt));
@@ -1595,7 +1754,7 @@ public final class GroupSummarySheet {
         summaryHistory = null;
         summaryRange = null;
         lastSuccessfulSources = null;
-        lastSuccessfulHistory = null;
+        lastSuccessfulHistory = null; lastSuccessfulRange = null;
         summaryConfig = null;
         summaryPrompt = null;
         if (task != null) showExportError(task, message);
@@ -2207,7 +2366,10 @@ public final class GroupSummarySheet {
         RangeRequest request = new RangeRequest(rangeMode, recentCount, summaryState.cursor,
                 rangeMode == RangeMode.UNREAD ? unreadLower : summaryState.cursor,
                 rangeMode == RangeMode.UNREAD ? unreadUpper : -1,
-                rangeMode == RangeMode.SINCE && summaryState.cursor == 0, null, null);
+                rangeMode == RangeMode.SINCE && summaryState.cursor == 0, null, null, null, includePublished,
+                rangeMode == RangeMode.DATE ? selectedDateYear : 0,
+                rangeMode == RangeMode.DATE ? selectedDateMonth : 0,
+                rangeMode == RangeMode.DATE ? selectedDateDay : 0);
         startSummary(request);
     }
 
@@ -2220,7 +2382,7 @@ public final class GroupSummarySheet {
                 managedTask = null;
                 managedRenderedState = null;
                 sourceMessages = null; summaryHistory = null;
-                lastSuccessfulHistory = null; lastSuccessfulSources = null;
+                lastSuccessfulHistory = null; lastSuccessfulRange = null; lastSuccessfulSources = null;
                 requestInputs.clear(); closeRequestInputs(); closeQuestions();
             }
             return;
@@ -2234,7 +2396,7 @@ public final class GroupSummarySheet {
             sourceSnapshotInvalid = false;
             if (task.range.mode == RangeMode.SELECTED) selectedSnapshotInvalid = false;
             viewingCachedResult = false;
-            lastSuccessfulHistory = null;
+            lastSuccessfulHistory = null; lastSuccessfulRange = null;
             lastSuccessfulSources = null;
             managedTask = task;
             managedRenderedState = null;
@@ -2243,6 +2405,7 @@ public final class GroupSummarySheet {
             requestInputs.clear();
         }
         summaryRange = task.range;
+        restoreDateSelection(task.range);
         if (task.range.mode == RangeMode.SELECTED && task.range.replayHistory != null) {
             rangeMode = RangeMode.SELECTED;
             selectedSnapshot = task.range.replayHistory;
@@ -2274,6 +2437,7 @@ public final class GroupSummarySheet {
         if (task.state == SummaryTaskController.State.SUCCESS) {
             if (task.history != null && task.history.complete && (task.committed || task.range.mode == RangeMode.REPLAY || task.range.mode == RangeMode.SELECTED)) {
                 lastSuccessfulHistory = task.history;
+                lastSuccessfulRange = task.range;
                 lastSuccessfulSources = task.sources == null ? null : new ArrayList<>(task.sources);
             }
             if (changed) {
@@ -2296,7 +2460,7 @@ public final class GroupSummarySheet {
                 sourceSnapshotInvalid = task.state == SummaryTaskController.State.INVALIDATED;
                 if (task.range.mode == RangeMode.SELECTED) invalidateSelectedSnapshot();
                 sourceMessages = null; summaryHistory = null;
-                lastSuccessfulHistory = null; lastSuccessfulSources = null;
+                lastSuccessfulHistory = null; lastSuccessfulRange = null; lastSuccessfulSources = null;
                 clearCachedResult();
                 clearContent();
                 addText(task.stage, true);
@@ -2364,7 +2528,8 @@ public final class GroupSummarySheet {
         final RangeRequest snapshot = request.filters == null
                 ? new RangeRequest(request.mode, request.count, request.expectedCursor, request.lower, request.upper,
                     request.initialize, request.replayHistory, request.replayMessages,
-                    filterOptions.withExcludedSenderIds(excludedSenderIds), includePublished) : request;
+                    filterOptions.withExcludedSenderIds(excludedSenderIds), includePublished,
+                    request.dateYear, request.dateMonth, request.dateDay) : request;
         final PromptOptions prompt = effectivePrompt().withFocusSelf(snapshot.filters.mode == SummaryFilter.Mode.FOCUS_SELF);
         if (!requireCoreSummaryInstructions(prompt)) return;
         summaryRange = snapshot;
@@ -2446,6 +2611,7 @@ public final class GroupSummarySheet {
         progressStatus = addText("正在读取文字消息…", true);
         progressElapsed = addText("已耗时 0 秒", false);
         addText(request.mode == RangeMode.TODAY ? "读取今天 00:00 起的文字消息。"
+                : request.mode == RangeMode.DATE ? "按手机时区读取 " + dateRangeLabel(request) + "。" + dateRangeLimitNote()
                 : request.mode == RangeMode.RECENT || request.initialize ? "读取最近 " + request.count + " 条文字消息。"
                 : request.mode == RangeMode.REPLAY ? "重做已记录的范围，不改变增量进度。"
                 : "从固定下界开始读取下一批，最多 " + request.count + " 条历史消息；只总结文字。", false);
@@ -2487,6 +2653,8 @@ public final class GroupSummarySheet {
             } else callback.onLoaded(request.replayHistory);
         } else if (request.mode == RangeMode.TODAY) {
             loader.loadToday(callback);
+        } else if (request.mode == RangeMode.DATE) {
+            loader.loadDate(request.dateYear, request.dateMonth, request.dateDay, callback);
         } else if (request.mode == RangeMode.SINCE && !request.initialize && request.upper < 0) {
             loader.loadSince(request.lower, request.count, callback);
         } else if (request.mode == RangeMode.UNREAD) {
@@ -2597,6 +2765,7 @@ public final class GroupSummarySheet {
             completionNotice = summaryRange.mode == RangeMode.SELECTED ? "所选消息总结完成；增量进度保持不变。"
                     : "重做完成；已保存的增量进度和原始恢复范围保持不变。";
             lastSuccessfulHistory = summaryHistory;
+            lastSuccessfulRange = summaryRange;
             lastSuccessfulSources = new ArrayList<>(sourceMessages);
             cacheCompletedResult(summary);
             showResult(summary);
@@ -2631,6 +2800,7 @@ public final class GroupSummarySheet {
                     summaryState = state;
                     resultCommitted = true;
                     lastSuccessfulHistory = history;
+                    lastSuccessfulRange = range;
                     lastSuccessfulSources = sources;
                     completionNotice = advance ? "本批完整完成，增量进度已保存。"
                             : "本批完成记录已保存，增量进度保持不变。";
@@ -2678,9 +2848,11 @@ public final class GroupSummarySheet {
             String title = chat == null || chat.title == null ? "聊天 " + (-dialogId) : chat.title;
             RangeMode mode = summaryRange == null ? RangeMode.RECENT : summaryRange.mode;
             String range = mode == RangeMode.SELECTED ? "手动选中的文字消息" : mode == RangeMode.TODAY ? "当日文字消息"
+                    : mode == RangeMode.DATE ? dateRangeLabel(summaryRange)
                     : mode == RangeMode.SINCE ? "上次总结之后"
                     : mode == RangeMode.UNREAD ? "进入聊天时的未读消息"
-                    : mode == RangeMode.REPLAY ? "重做已记录范围" : "最近 N 条文字消息";
+                    : mode == RangeMode.REPLAY ? summaryRange.dateYear > 0 ? "重做 " + dateRangeLabel(summaryRange) + "的已读取范围"
+                        : "重做已记录范围" : "最近 N 条文字消息";
             historyRecord = new SummaryHistoryStore.Record(UUID.randomUUID().toString(), dialogId, topicId,
                     System.currentTimeMillis(), title, range, coverageNote == null ? "" : coverageNote,
                     summaryPrompt == null || summaryPrompt.builtinRulesVersion >= 6 ? ""
@@ -2742,7 +2914,8 @@ public final class GroupSummarySheet {
         int upper = summaryRange.mode == RangeMode.REPLAY ? summaryRange.upper : summaryHistory.upperInclusiveId;
         RangeRequest next = new RangeRequest(summaryRange.mode, summaryRange.count,
                 summaryState == null ? summaryRange.expectedCursor : summaryState.cursor,
-                summaryHistory.coveredThroughId, upper, false, null, null, summaryRange.filters, summaryRange.includePublished);
+                summaryHistory.coveredThroughId, upper, false, null, null, summaryRange.filters, summaryRange.includePublished,
+                summaryRange.dateYear, summaryRange.dateMonth, summaryRange.dateDay);
         startSummary(next);
     }
 
@@ -2757,7 +2930,8 @@ public final class GroupSummarySheet {
                 ? new RangeRequest(originalRange.mode, originalRange.count, originalRange.expectedCursor,
                     originalRange.lower, originalRange.upper, originalRange.initialize, summaryHistory,
                     originalRange.replayMessages == null ? summaryHistory.messages : originalRange.replayMessages,
-                    originalRange.filters, originalRange.includePublished)
+                    originalRange.filters, originalRange.includePublished,
+                    originalRange.dateYear, originalRange.dateMonth, originalRange.dateDay)
                 : originalRange;
         cancelWork(true);
         clearContent();
@@ -2855,7 +3029,8 @@ public final class GroupSummarySheet {
         if (viewingCachedResult && summaryHistory != null && sourceMessages != null) {
             final RangeRequest regenerate = new RangeRequest(RangeMode.REPLAY, recentCount,
                     summaryRange.expectedCursor, summaryHistory.lowerExclusiveId, summaryHistory.coveredThroughId,
-                    false, summaryHistory, summaryHistory.messages);
+                    false, summaryHistory, summaryHistory.messages, null, includePublished,
+                    summaryRange.dateYear, summaryRange.dateMonth, summaryRange.dateDay);
             addAction("按当前设置和要求重新生成", () -> startSummary(regenerate));
         }
         addAction("重新选择范围", this::showSelection);

@@ -17,8 +17,12 @@ import org.telegram.tgnet.TLObject;
 import org.telegram.tgnet.TLRPC;
 
 import java.text.SimpleDateFormat;
+import java.time.DateTimeException;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
 import java.util.ArrayList;
-import java.util.Calendar;
 import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
@@ -38,7 +42,8 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public final class SummaryHistoryLoader {
     public static final int MAX_RECENT_COUNT = 500;
-    public static final int MAX_TODAY_MESSAGES = 2000;
+    public static final int MAX_DATE_MESSAGES = 2000;
+    public static final int MAX_TODAY_MESSAGES = MAX_DATE_MESSAGES;
     public static final int MAX_SELECTED_COUNT = 100;
     private static final int PAGE_SIZE = 100;
     private static final int MAX_SCANNED_MESSAGES = 10000;
@@ -146,7 +151,7 @@ public final class SummaryHistoryLoader {
         }
         int now = ConnectionsManager.getInstance(account).getCurrentTime();
         SummaryHistoryLoader converter = new SummaryHistoryLoader(account, dialogId, topicId);
-        Run run = new Run(account, ownerId, 0, false, selected.size(), null,
+        Run run = new Run(account, ownerId, 0, null, selected.size(), null,
                 now * 1000L, TimeZone.getDefault(), controller, chat, 0, 0, false);
         int skipped = 0;
         for (MessageObject object : new ArrayList<>(selected)) {
@@ -206,6 +211,11 @@ public final class SummaryHistoryLoader {
         begin(true, MAX_TODAY_MESSAGES, callback);
     }
 
+    /** Read one civil date in the phone timezone captured now; month is 1 through 12. */
+    public void loadDate(int year, int month, int day, Callback callback) {
+        begin(true, MAX_DATE_MESSAGES, 0, 0, false, new int[]{year, month, day}, callback);
+    }
+
     /** Read the earliest complete batch AFTER the saved cursor, never the newest N messages. */
     public void loadSince(int lowerExclusiveId, int count, Callback callback) {
         begin(false, count, lowerExclusiveId, -1, true, callback);
@@ -236,12 +246,17 @@ public final class SummaryHistoryLoader {
         });
     }
 
-    private void begin(boolean today, int count, Callback callback) {
-        begin(today, count, 0, 0, false, callback);
+    private void begin(boolean dateRange, int count, Callback callback) {
+        begin(dateRange, count, 0, 0, false, callback);
     }
 
-    private void begin(boolean today, int count, int lowerExclusiveId, int upperInclusiveId,
+    private void begin(boolean dateRange, int count, int lowerExclusiveId, int upperInclusiveId,
             boolean forward, Callback callback) {
+        begin(dateRange, count, lowerExclusiveId, upperInclusiveId, forward, null, callback);
+    }
+
+    private void begin(boolean dateRange, int count, int lowerExclusiveId, int upperInclusiveId,
+            boolean forward, int[] selectedDate, Callback callback) {
         if (callback == null) {
             throw new IllegalArgumentException("callback is required");
         }
@@ -274,7 +289,7 @@ public final class SummaryHistoryLoader {
                 callback.onError("目前仅支持群聊和可阅读频道的文字消息总结。");
                 return;
             }
-            if (!today && (count < 1 || count > MAX_RECENT_COUNT)) {
+            if (!dateRange && (count < 1 || count > MAX_RECENT_COUNT)) {
                 callback.onError("最近消息数量须为 1–" + MAX_RECENT_COUNT + "。");
                 return;
             }
@@ -305,7 +320,14 @@ public final class SummaryHistoryLoader {
                 callback.onError("当前话题范围无效，请重新打开群话题后重试。");
                 return;
             }
-            Run run = new Run(account, clientUserId, runGeneration, today, count, callback,
+            DateWindow window;
+            try {
+                window = dateRange ? DateWindow.create(startedAt, timeZone, selectedDate) : null;
+            } catch (IllegalArgumentException invalidDate) {
+                callback.onError(invalidDate.getMessage());
+                return;
+            }
+            Run run = new Run(account, clientUserId, runGeneration, window, count, callback,
                     startedAt, timeZone, controller, chat, lowerExclusiveId, upperInclusiveId,
                     forward);
             active = run;
@@ -342,9 +364,9 @@ public final class SummaryHistoryLoader {
         final int limit = run.snapshotPending ? 1
                 : forwardPage ? Math.min(PAGE_SIZE, run.target - run.scanned) : PAGE_SIZE;
         final int offsetId = forwardPage ? run.forwardCursor + 1 : run.offsetId;
-        // Recent/since snapshots start at the actual newest server message. Only today's range
-        // needs a date cutoff; subsequent pages use the fixed ID cursor instead of wall time.
-        final int offsetDate = run.today && run.offsetId == 0 ? run.upperDateExclusive : 0;
+        // Date windows seek directly to their exclusive end, even for dates far in the past.
+        // Subsequent pages use the fixed ID cursor; recent/since still start at the newest message.
+        final int offsetDate = run.dateRange && run.offsetId == 0 ? run.upperDateExclusive : 0;
         // Telegram's negative add_offset window starts immediately AFTER offset_id - 1.
         // min_id/max_id intentionally stay zero for forward windows: bounds are checked locally,
         // so server-side filtering cannot change which contiguous page follows the old cursor.
@@ -459,7 +481,7 @@ public final class SummaryHistoryLoader {
                 continue;
             }
             run.scanned++;
-            if (run.today && message.date >= run.upperDateExclusive) {
+            if (run.dateRange && message.date >= run.upperDateExclusive) {
                 continue;
             }
             if (run.maxIdExclusive == 0 && message.date > 0) {
@@ -472,7 +494,7 @@ public final class SummaryHistoryLoader {
                 return;
             }
             // Empty/deleted placeholders have no reliable date; they still advance the ID cursor.
-            if (message.date > 0 && run.today && message.date < run.lowerDateInclusive) {
+            if (message.date > 0 && run.dateRange && message.date < run.lowerDateInclusive) {
                 reachedDayStart = true;
                 continue;
             }
@@ -483,9 +505,9 @@ public final class SummaryHistoryLoader {
             }
             run.messages.add(toSummaryMessage(run, message));
             if (run.messages.size() == run.target) {
-                if (run.today) {
-                    finish(run, true, "当日文字达到 " + MAX_TODAY_MESSAGES
-                            + " 条上限，仅总结较新的部分；未确认更早的当日消息。");
+                if (run.dateRange) {
+                    finish(run, true, "所选日期文字达到 " + MAX_DATE_MESSAGES
+                            + " 条上限，仅总结较新的部分；未确认该日更早的消息。");
                 } else {
                     finish(run, false, "已找到最近 " + run.target + " 条可用纯文字。");
                 }
@@ -493,7 +515,7 @@ public final class SummaryHistoryLoader {
             }
         }
         if (reachedDayStart) {
-            finish(run, false, "已读至本次固定的当日零点边界。");
+            finish(run, false, "已读至所选日期固定的起始边界。");
         } else if (onlyTopicAnchor) {
             // A replies page containing only its creation anchor has no remaining replies.
             finishAtEnd(run);
@@ -768,16 +790,21 @@ public final class SummaryHistoryLoader {
         String scope = topicId != 0 ? "当前 Topic #" + topicId
                 : run.forum ? "当前群的全部 Topic" : run.broadcast ? "当前频道" : "当前群";
         StringBuilder note = new StringBuilder(scope).append("；手机时区 ")
-                .append(run.timeZone.getID()).append(run.today ? "，Telegram 校准时间固定截止 " : "，Telegram 校准时间发起于 ")
+                .append(run.timeZone.getID()).append("，Telegram 校准时间发起于 ")
                 .append(format.format(new Date(run.startedAt))).append("。\n");
         if (run.forward) {
             note.append("固定消息范围：#").append(run.lowerExclusiveId).append(" 之后至 #")
                     .append(run.upperInclusiveId).append("；每批最多 ").append(run.target)
                     .append(" 条历史消息，仅总结文字。 ");
-        } else if (run.today) {
-            note.append("当日范围从 ")
+        } else if (run.dateRange) {
+            note.append("指定日期 ").append(run.dateLabel).append("；范围从 ")
                     .append(format.format(new Date(run.lowerDateInclusive * 1000L)))
-                    .append(" 至上述截止时刻。 ");
+                    .append("（含）至 ").append(format.format(new Date(run.upperDateExclusive * 1000L)))
+                    .append("（不含）");
+            if (run.upperDateExclusive == run.startedAt / 1000L + 1) {
+                note.append("；今日仅截至发起时的 Telegram 校准当前秒");
+            }
+            note.append("。 ");
         } else {
             note.append("目标：最近 ").append(run.target)
                     .append(" 条可用文字；从新到旧选取后，按时间从早到晚交给模型。 ");
@@ -841,11 +868,55 @@ public final class SummaryHistoryLoader {
         return true;
     }
 
+    /** Immutable Gregorian local-date bounds, including timezone transitions at midnight. */
+    private static final class DateWindow {
+        final int lowerInclusive, upperExclusive;
+        final String label;
+
+        DateWindow(int lowerInclusive, int upperExclusive, String label) {
+            this.lowerInclusive = lowerInclusive;
+            this.upperExclusive = upperExclusive;
+            this.label = label;
+        }
+
+        static DateWindow create(long startedAt, TimeZone timeZone, int[] selectedDate) {
+            ZoneId zone = timeZone.toZoneId();
+            LocalDate today = Instant.ofEpochMilli(startedAt).atZone(zone).toLocalDate();
+            LocalDate selected;
+            try {
+                if (selectedDate != null && (selectedDate[0] < 1 || selectedDate[0] > 9999)) {
+                    throw new DateTimeException("Invalid year");
+                }
+                selected = selectedDate == null ? today
+                        : LocalDate.of(selectedDate[0], selectedDate[1], selectedDate[2]);
+            } catch (DateTimeException invalid) {
+                throw new IllegalArgumentException("所选日期无效，请重新选择年、月、日。");
+            }
+            if (selected.isAfter(today)) {
+                throw new IllegalArgumentException("不能读取未来日期，请选择今天或更早的日期。");
+            }
+            // atStartOfDay chooses the earliest valid instant, including repeated or missing
+            // midnights; a civil day need not last 24 hours. Desugaring supports old Android APIs.
+            ZonedDateTime start = selected.atStartOfDay(zone);
+            if (!start.toLocalDate().equals(selected)) {
+                throw new IllegalArgumentException("所选日期在当前手机时区不存在，请重新选择日期。");
+            }
+            long lower = start.toEpochSecond();
+            // Message dates are second-resolution: the current second remains included today.
+            long upper = Math.min(selected.plusDays(1).atStartOfDay(zone).toEpochSecond(), startedAt / 1000L + 1);
+            if (lower < 0 || upper <= lower || upper > Integer.MAX_VALUE) {
+                throw new IllegalArgumentException("所选日期超出 Telegram 支持的时间范围，请重新选择日期。");
+            }
+            return new DateWindow((int) lower, (int) upper, selected.toString());
+        }
+    }
+
     private static final class Run {
         final int generation;
         final long clientUserId;
         final int guid = ConnectionsManager.generateClassGuid();
-        final boolean today;
+        final boolean dateRange;
+        final String dateLabel;
         final int target;
         final Callback callback;
         final long startedAt;
@@ -876,13 +947,14 @@ public final class SummaryHistoryLoader {
         int pages;
         Runnable timeout;
 
-        Run(int account, long clientUserId, int generation, boolean today, int target,
+        Run(int account, long clientUserId, int generation, DateWindow window, int target,
                 Callback callback, long startedAt, TimeZone timeZone,
                 MessagesController controller, TLRPC.Chat chat, int lowerExclusiveId,
                 int upperInclusiveId, boolean forward) {
             this.clientUserId = clientUserId;
             this.generation = generation;
-            this.today = today;
+            this.dateRange = window != null;
+            this.dateLabel = window == null ? "" : window.label;
             this.target = target;
             this.callback = callback;
             this.startedAt = startedAt;
@@ -900,17 +972,8 @@ public final class SummaryHistoryLoader {
             this.snapshotPending = forward && upperInclusiveId < 0;
             addUsernames(UserConfig.getInstance(account).getCurrentUser());
             addUsernames(controller.getUser(clientUserId));
-            Calendar day = Calendar.getInstance(timeZone);
-            day.setTimeInMillis(startedAt);
-            day.set(Calendar.HOUR_OF_DAY, 0);
-            day.set(Calendar.MINUTE, 0);
-            day.set(Calendar.SECOND, 0);
-            day.set(Calendar.MILLISECOND, 0);
-            lowerDateInclusive = today ? (int) (day.getTimeInMillis() / 1000L) : 0;
-            day.add(Calendar.DAY_OF_MONTH, 1);
-            // Telegram message dates have second resolution; include the action's current second.
-            upperDateExclusive = (int) Math.min(startedAt / 1000L + 1,
-                    today ? day.getTimeInMillis() / 1000L : Integer.MAX_VALUE);
+            lowerDateInclusive = window == null ? 0 : window.lowerInclusive;
+            upperDateExclusive = window == null ? 0 : window.upperExclusive;
         }
 
         private void addUsernames(TLRPC.User user) {
